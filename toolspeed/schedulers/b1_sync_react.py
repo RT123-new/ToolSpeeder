@@ -43,35 +43,10 @@ class SyncReActScheduler(BaseScheduler):
             if decision.final_answer is not None or not decision.tool_calls:
                 return decision.final_answer
 
-            # 2. Sequential Tool Execution Step (strictly serial)
+            # 2. Sequential Tool Execution Step (strictly serial via ToolExecutor)
             for call in decision.tool_calls:
                 ctx.tool_calls.append(call)
-                adapter = tools.get(call.name)
-                if not adapter:
-                    err_res = ToolResult(
-                        call_id=call.call_id,
-                        name=call.name,
-                        error=f"Tool '{call.name}' not found in registry",
-                    )
-                    ctx.record_tool_result(err_res)
-                    continue
-
-                ctx.guardrails.record_tool_dispatch(adapter.spec, call, is_speculative=False)
-                ctx.profiler.start_span(f"tool_{call.call_id}")
-                ctx.guardrails.record_concurrency_enter()
-
-                await ctx.rate_limiter.acquire()
-                try:
-                    result = await adapter.execute(call)
-                finally:
-                    ctx.rate_limiter.release()
-                    ctx.guardrails.record_concurrency_exit()
-
-                ctx.profiler.end_span(
-                    f"tool_{call.call_id}",
-                    EventType.TOOL_END,
-                    details={"tool": call.name, "call_id": call.call_id},
-                )
+                result = await ctx.executor.execute(call)
                 ctx.record_tool_result(result)
 
         return "Max turns reached without final answer."

@@ -19,7 +19,9 @@ from toolspeed.core.types import (
     TaskResult,
     ToolCall,
     ToolResult,
+    sanitize_for_json,
 )
+from toolspeed.schedulers.executor import ToolExecutor
 
 
 @dataclass
@@ -38,6 +40,7 @@ class SchedulerConfig:
     commit_horizon_enabled: bool = False
     jit_fusion_enabled: bool = False
     action_bytecode_enabled: bool = False
+    shared_rate_limiter: Optional[RateLimiter] = None
     custom_options: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -47,9 +50,11 @@ class ExecutionContext:
 
     task: Task
     config: SchedulerConfig
+    tools: ToolRegistry
     profiler: LatencyProfiler = field(default_factory=LatencyProfiler)
     guardrails: GuardrailMonitor = field(default_factory=GuardrailMonitor)
     rate_limiter: RateLimiter = field(default_factory=RateLimiter)
+    executor: ToolExecutor = field(init=False)
     history: List[Dict[str, Any]] = field(default_factory=list)
     tool_calls: List[ToolCall] = field(default_factory=list)
     tool_results: List[ToolResult] = field(default_factory=list)
@@ -58,9 +63,19 @@ class ExecutionContext:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.rate_limiter = RateLimiter(
-            max_concurrency=self.config.concurrency_limit,
-            requests_per_second=self.config.rate_limit_rps,
+        if self.config.shared_rate_limiter is not None:
+            self.rate_limiter = self.config.shared_rate_limiter
+        else:
+            self.rate_limiter = RateLimiter(
+                max_concurrency=self.config.concurrency_limit,
+                requests_per_second=self.config.rate_limit_rps,
+            )
+        self.executor = ToolExecutor(
+            registry=self.tools,
+            rate_limiter=self.rate_limiter,
+            profiler=self.profiler,
+            guardrails=self.guardrails,
+            default_timeout_s=self.config.timeout_seconds,
         )
 
     def record_model_decision(self, decision: LLMDecision) -> None:
@@ -82,9 +97,9 @@ class ExecutionContext:
         self.history.append(
             {
                 "role": "tool",
-                "name": result.name,
+                "name": result.name or result.tool_name,
                 "call_id": result.call_id,
-                "output": result.output,
+                "output": result.output if result.output is not None else result.result,
                 "error": result.error,
             }
         )
@@ -107,7 +122,7 @@ class BaseScheduler(ABC):
         tools: ToolRegistry,
     ) -> TaskResult:
         """Executes a task under this scheduler policy with full lifecycle instrumentation."""
-        ctx = ExecutionContext(task=task, config=self.config)
+        ctx = ExecutionContext(task=task, config=self.config, tools=tools)
         ctx.guardrails.record_task_start()
         ctx.profiler.start()
 
@@ -116,7 +131,6 @@ class BaseScheduler(ABC):
         success: bool = False
 
         try:
-            # Wrap execution with timeout if configured
             if self.config.timeout_seconds > 0:
                 final_answer = await asyncio.wait_for(
                     self._execute_internal(ctx, model, tools),
@@ -125,21 +139,25 @@ class BaseScheduler(ABC):
             else:
                 final_answer = await self._execute_internal(ctx, model, tools)
 
-            # Validate correctness against task validator
+            # Strict correctness validation
             success = task.validate(final_answer)
 
         except asyncio.TimeoutError:
             error = f"Execution timed out after {self.config.timeout_seconds}s"
             success = False
+        except asyncio.CancelledError:
+            error = "Execution was cancelled"
+            success = False
+            raise
         except Exception as e:
             error = f"Scheduler execution error: {str(e)}"
             success = False
-
-        total_ms = ctx.profiler.finish()
-        ctx.guardrails.record_task_finish(task, final_answer, success)
+        finally:
+            total_ms = ctx.profiler.finish()
+            ctx.guardrails.record_task_finish(task, final_answer, success)
 
         # Correct Completion Latency (CCL): only valid when task passes validation
-        ccl_ms = total_ms if success else float("nan")
+        ccl_ms: Optional[float] = total_ms if success else None
 
         return TaskResult(
             task_id=task.task_id,
@@ -161,7 +179,7 @@ class BaseScheduler(ABC):
         model: BaseLLMAdapter,
         tools: ToolRegistry,
     ) -> TaskResult:
-        """Asynchronous execution wrapper (alias for execute)."""
+        """Asynchronous execution wrapper."""
         return await self.execute(task, model, tools)
 
     def run_sync(

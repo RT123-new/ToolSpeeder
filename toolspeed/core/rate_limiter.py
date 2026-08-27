@@ -1,9 +1,9 @@
-"""Async token bucket and concurrency rate limiters with backpressure and 429 simulation."""
+"""Async token bucket and concurrency rate limiters with backpressure, safety, and 429 simulation."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Optional, Dict, Any
 import time
 
 
@@ -29,8 +29,12 @@ class AsyncTokenBucket:
         capacity: float = 100.0,
         reject_on_limit: bool = False,
     ):
-        self.rate = max(0.001, rate)
-        self.capacity = max(1.0, capacity)
+        if rate <= 0:
+            raise ValueError(f"Rate must be positive, got {rate}")
+        if capacity <= 0:
+            raise ValueError(f"Capacity must be positive, got {capacity}")
+        self.rate = float(rate)
+        self.capacity = float(capacity)
         self.reject_on_limit = reject_on_limit
         self._tokens = float(capacity)
         self._last_refill_ns = time.perf_counter_ns()
@@ -58,50 +62,79 @@ class AsyncTokenBucket:
             Queuing delay in milliseconds.
             
         Raises:
+            ValueError: If tokens <= 0 or tokens > capacity.
             RateLimitError: If reject_on_limit is True and insufficient tokens.
             asyncio.TimeoutError: If timeout expires before tokens are acquired.
         """
+        if tokens <= 0:
+            raise ValueError(f"Requested tokens must be positive, got {tokens}")
+        if tokens > self.capacity:
+            raise ValueError(f"Requested tokens ({tokens}) exceeds maximum bucket capacity ({self.capacity})")
+
         start_ns = time.perf_counter_ns()
-        self.total_tokens_requested += tokens
+        deadline = (time.perf_counter() + timeout) if timeout is not None else None
 
-        async def _do_acquire() -> float:
-            while True:
-                async with self._lock:
-                    self._refill()
-                    if self._tokens >= tokens:
-                        self._tokens -= tokens
-                        self.total_tokens_granted += tokens
-                        break
-                    elif self.reject_on_limit:
-                        self.total_429_errors += 1
-                        missing = tokens - self._tokens
-                        wait_s = missing / self.rate
-                        raise RateLimitError(
-                            f"Rate limit exceeded: needed {tokens}, available {self._tokens:.2f}",
-                            retry_after_s=wait_s,
-                        )
-                    else:
-                        missing = tokens - self._tokens
-                        wait_s = missing / self.rate
+        async with self._lock:
+            self.total_tokens_requested += tokens
 
-                # Sleep outside lock to let tokens accumulate
-                await asyncio.sleep(max(0.001, wait_s))
+        while True:
+            if deadline is not None and time.perf_counter() > deadline:
+                raise asyncio.TimeoutError(f"Timed out acquiring {tokens} rate limit tokens")
 
-            end_ns = time.perf_counter_ns()
-            delay_ns = end_ns - start_ns
+            async with self._lock:
+                self._refill()
+                if self._tokens >= tokens:
+                    self._tokens -= tokens
+                    self.total_tokens_granted += tokens
+                    break
+                elif self.reject_on_limit:
+                    self.total_429_errors += 1
+                    missing = tokens - self._tokens
+                    wait_s = missing / self.rate
+                    raise RateLimitError(
+                        f"Rate limit exceeded: needed {tokens}, available {self._tokens:.2f}",
+                        retry_after_s=wait_s,
+                    )
+                else:
+                    missing = tokens - self._tokens
+                    wait_s = missing / self.rate
+
+            # Sleep outside lock to allow token accumulation
+            sleep_time = max(0.001, wait_s)
+            if deadline is not None:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError(f"Timed out acquiring {tokens} rate limit tokens")
+                sleep_time = min(sleep_time, remaining)
+
+            await asyncio.sleep(sleep_time)
+
+        end_ns = time.perf_counter_ns()
+        delay_ns = end_ns - start_ns
+        async with self._lock:
             self.total_queue_delay_ns += delay_ns
             if delay_ns > self.max_queue_delay_ns:
                 self.max_queue_delay_ns = delay_ns
-            return delay_ns / 1_000_000.0
+        return delay_ns / 1_000_000.0
 
-        if timeout is not None:
-            return await asyncio.wait_for(_do_acquire(), timeout=timeout)
-        return await _do_acquire()
+    def refund(self, tokens: int = 1) -> None:
+        """Refund tokens if an operation was cancelled before execution."""
+        if tokens <= 0:
+            return
+        self._refill()
+        self._tokens = min(self.capacity, self._tokens + tokens)
+        if self.total_tokens_granted >= tokens:
+            self.total_tokens_granted -= tokens
 
     def try_acquire(self, tokens: int = 1) -> bool:
         """Non-blocking attempt to acquire tokens. Returns True if granted."""
-        self.total_tokens_requested += tokens
+        if tokens <= 0:
+            raise ValueError(f"Requested tokens must be positive, got {tokens}")
+        if tokens > self.capacity:
+            return False
+
         self._refill()
+        self.total_tokens_requested += tokens
         if self._tokens >= tokens:
             self._tokens -= tokens
             self.total_tokens_granted += tokens
@@ -127,8 +160,10 @@ class AsyncConcurrencyLimiter:
     """Async concurrency limiter tracking in-flight executions, queue delays, and peak concurrency."""
 
     def __init__(self, max_concurrency: int = 10):
-        self.max_concurrency = max(1, max_concurrency)
-        self._semaphore = asyncio.Semaphore(self.max_concurrency)
+        if max_concurrency < 1:
+            raise ValueError(f"max_concurrency must be >= 1, got {max_concurrency}")
+        self.max_concurrency = max_concurrency
+        self._semaphore = asyncio.BoundedSemaphore(self.max_concurrency)
         self._active_count = 0
         self._peak_concurrency = 0
         self._lock = asyncio.Lock()
@@ -157,23 +192,28 @@ class AsyncConcurrencyLimiter:
 
         end_ns = time.perf_counter_ns()
         delay_ns = end_ns - start_ns
-        self.total_queue_delay_ns += delay_ns
-        if delay_ns > self.max_queue_delay_ns:
-            self.max_queue_delay_ns = delay_ns
 
         async with self._lock:
             self._active_count += 1
             self.total_acquisitions += 1
             if self._active_count > self._peak_concurrency:
                 self._peak_concurrency = self._active_count
+            self.total_queue_delay_ns += delay_ns
+            if delay_ns > self.max_queue_delay_ns:
+                self.max_queue_delay_ns = delay_ns
 
         return delay_ns / 1_000_000.0
 
     def release(self) -> None:
-        """Release concurrency slot."""
-        if self._active_count > 0:
-            self._active_count -= 1
-        self._semaphore.release()
+        """Release concurrency slot safely, guarding against over-release."""
+        if self._active_count <= 0:
+            return
+        self._active_count -= 1
+        try:
+            self._semaphore.release()
+        except ValueError:
+            # BoundedSemaphore raised ValueError because release exceeded initial value
+            pass
 
     async def __aenter__(self) -> AsyncConcurrencyLimiter:
         await self.acquire()
@@ -190,7 +230,7 @@ class AsyncConcurrencyLimiter:
 
 
 class RateLimiter:
-    """Unified rate limiter combining token bucket throughput and concurrency limits."""
+    """Unified rate limiter combining token bucket throughput and concurrency limits with cancellation safety."""
 
     def __init__(
         self,
@@ -204,17 +244,34 @@ class RateLimiter:
         eff_rate = requests_per_second if requests_per_second is not None else rate_per_sec
         eff_conc = concurrency_limit if concurrency_limit is not None else max_concurrency
         self.token_bucket = AsyncTokenBucket(
-            rate=eff_rate,
-            capacity=burst_capacity,
+            rate=max(0.001, eff_rate),
+            capacity=max(1.0, burst_capacity),
             reject_on_limit=reject_on_limit,
         )
-        self.concurrency_limiter = AsyncConcurrencyLimiter(max_concurrency=eff_conc)
+        self.concurrency_limiter = AsyncConcurrencyLimiter(max_concurrency=max(1, eff_conc))
 
     async def acquire(self, tokens: int = 1, timeout: Optional[float] = None) -> float:
-        """Acquire both rate limit tokens and concurrency slot."""
+        """Acquire both concurrency slot and rate limit tokens with single deadline and rollback safety."""
         start_ns = time.perf_counter_ns()
-        token_delay_ms = await self.token_bucket.acquire(tokens=tokens, timeout=timeout)
-        conc_delay_ms = await self.concurrency_limiter.acquire(timeout=timeout)
+        deadline = (time.perf_counter() + timeout) if timeout is not None else None
+
+        # 1. Acquire concurrency slot first
+        conc_timeout = (deadline - time.perf_counter()) if deadline is not None else None
+        if conc_timeout is not None and conc_timeout <= 0:
+            raise asyncio.TimeoutError("Timeout expired before acquiring concurrency slot")
+        
+        await self.concurrency_limiter.acquire(timeout=conc_timeout)
+
+        # 2. Acquire rate limit tokens. If token acquire fails or is cancelled, release concurrency slot!
+        try:
+            token_timeout = (deadline - time.perf_counter()) if deadline is not None else None
+            if token_timeout is not None and token_timeout <= 0:
+                raise asyncio.TimeoutError("Timeout expired before acquiring rate limit tokens")
+            await self.token_bucket.acquire(tokens=tokens, timeout=token_timeout)
+        except (Exception, asyncio.CancelledError):
+            self.concurrency_limiter.release()
+            raise
+
         total_delay_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
         return total_delay_ms
 
@@ -229,7 +286,7 @@ class RateLimiter:
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
 
-    def get_metrics(self) -> dict[str, Any]:
+    def get_metrics(self) -> Dict[str, Any]:
         return {
             "tokens_requested": self.token_bucket.total_tokens_requested,
             "tokens_granted": self.token_bucket.total_tokens_granted,

@@ -10,25 +10,14 @@ import time
 
 import numpy as np
 
-
-@dataclass(frozen=True)
-class LatencyProfile:
-    """Latency parameters and operational characteristics."""
-    model_decision_ms: float = 450.0
-    model_final_ms: float = 300.0
-    tool_ms: float = 600.0
-    draft_model_ms: float = 70.0
-    program_runtime_overhead_ms: float = 80.0
-    cache_lookup_ms: float = 8.0
-    token_decode_ms_per_token: float = 12.0
-    tokens_per_tool_json: int = 150
-    tokens_per_tool_bytecode: int = 25
-    rate_limit_capacity: int = 10
-    rate_limit_refill_per_sec: float = 20.0
-    sigma: float = 0.45
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+from toolspeed.core.types import (
+    EvidenceLevel,
+    VerdictState,
+    ArtifactManifest,
+    LatencyProfile,
+    sanitize_for_json,
+    strict_json_dumps,
+)
 
 
 class WorkloadFamily(str, Enum):
@@ -52,7 +41,7 @@ class HypothesisCheck:
     detail: str
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        return sanitize_for_json(asdict(self))
 
 
 @dataclass
@@ -64,8 +53,13 @@ class FalsificationVerdict:
     falsified: bool
     summary: str
     checks: List[HypothesisCheck] = field(default_factory=list)
-    inconclusive: bool = False
+    state: VerdictState = VerdictState.INCONCLUSIVE
+    evidence_level: EvidenceLevel = EvidenceLevel.SYNTHETIC
     evidence_log_row: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def inconclusive(self) -> bool:
+        return self.state == VerdictState.INCONCLUSIVE
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -73,7 +67,8 @@ class FalsificationVerdict:
             "hypothesis": self.hypothesis,
             "passed": self.passed,
             "falsified": self.falsified,
-            "inconclusive": self.inconclusive,
+            "state": self.state.value if isinstance(self.state, VerdictState) else str(self.state),
+            "evidence_level": self.evidence_level.value if isinstance(self.evidence_level, EvidenceLevel) else str(self.evidence_level),
             "summary": self.summary,
             "checks": [c.to_dict() for c in self.checks],
             "evidence_log_row": self.evidence_log_row,
@@ -112,11 +107,11 @@ class MetricSummary:
     tool_start_p95_ms: float = 0.0
     tool_start_speedup_p95: float = 1.0
     semantic_mutation_rate: float = 0.0
+    p95_reduction_ci: Tuple[float, float] = (0.0, 0.0)
     extra_metrics: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        d = asdict(self)
-        return d
+        return sanitize_for_json(asdict(self))
 
 
 @dataclass
@@ -131,7 +126,9 @@ class ExperimentResult:
     parameter_name: str
     rows: List[Dict[str, Any]]
     verdict: FalsificationVerdict
+    evidence_level: EvidenceLevel = EvidenceLevel.SYNTHETIC
     runtime_sec: float = 0.0
+    manifest: Optional[ArtifactManifest] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -140,11 +137,13 @@ class ExperimentResult:
             "workloads": self.workloads,
             "trials": self.trials,
             "seed": self.seed,
+            "evidence_level": self.evidence_level.value if isinstance(self.evidence_level, EvidenceLevel) else str(self.evidence_level),
             "profile": self.profile.to_dict(),
             "parameter_name": self.parameter_name,
-            "rows": self.rows,
+            "rows": sanitize_for_json(self.rows),
             "verdict": self.verdict.to_dict(),
             "runtime_sec": self.runtime_sec,
+            "manifest": self.manifest.to_dict() if self.manifest else None,
         }
 
     def get_row(self, param_value: Any) -> Optional[Dict[str, Any]]:
@@ -156,7 +155,7 @@ class ExperimentResult:
 
 def samples(rng: np.random.Generator, median_ms: float, sigma: float, shape: Union[int, Tuple[int, ...]]) -> np.ndarray:
     """Generate log-normal latency samples centered around median_ms."""
-    return rng.lognormal(np.log(median_ms), sigma, shape)
+    return rng.lognormal(np.log(max(1.0, median_ms)), sigma, shape)
 
 
 def compute_percentiles(arr: np.ndarray, percentiles: Tuple[int, ...] = (50, 90, 95, 99)) -> Dict[str, float]:
@@ -253,6 +252,12 @@ def compute_summary(
 
     mutation_rate = float(np.mean(semantic_mutations)) if semantic_mutations is not None and len(semantic_mutations) > 0 else 0.0
 
+    # Paired bootstrap CI for P95 reduction
+    ci_low, ci_high = 0.0, 0.0
+    if len(valid_baseline) > 10 and len(valid_candidate) > 10 and len(valid_baseline) == len(valid_candidate):
+        diffs = (valid_baseline - valid_candidate) / np.maximum(1.0, valid_baseline) * 100.0
+        ci_low, ci_high = bootstrap_confidence_interval(diffs, stat_func=np.median, num_samples=500)
+
     return MetricSummary(
         baseline_p50_ms=b50,
         candidate_p50_ms=c50,
@@ -283,6 +288,7 @@ def compute_summary(
         tool_start_p95_ms=t_start_p95,
         tool_start_speedup_p95=t_start_speedup,
         semantic_mutation_rate=mutation_rate,
+        p95_reduction_ci=(ci_low, ci_high),
         extra_metrics=extra or {},
     )
 

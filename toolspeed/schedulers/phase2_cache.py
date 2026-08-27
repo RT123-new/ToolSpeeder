@@ -40,7 +40,6 @@ class ToolResultCache:
         return f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
 
     def _semantic_key(self, tool_name: str, arguments: Dict[str, Any]) -> str:
-        # Normalize whitespace, case, and strip punctuation in string args
         norm_args = {}
         for k, v in sorted(arguments.items()):
             if isinstance(v, str):
@@ -149,11 +148,10 @@ class CacheScheduler(BaseScheduler):
     ) -> ToolResult:
         adapter = tools.get(call.name)
         if not adapter:
-            return ToolResult(call_id=call.call_id, name=call.name, error="Tool not found")
+            return await ctx.executor.execute(call)
 
         # 1. Invalidation on mutation / side effects
         if adapter.spec.side_effects or not adapter.spec.is_read_only:
-            # Invalidate cached reads for this domain/tool
             self.cache.invalidate_tool(call.name)
 
         # 2. Check Cache for Read-Only tools
@@ -172,6 +170,8 @@ class CacheScheduler(BaseScheduler):
                 return ToolResult(
                     call_id=call.call_id,
                     name=call.name,
+                    tool_name=call.name,
+                    result=cached_output,
                     output=cached_output,
                     cached=True,
                     execution_time_ms=lookup_ms,
@@ -180,26 +180,15 @@ class CacheScheduler(BaseScheduler):
                 ctx.guardrails.record_cache_event(hit=False)
                 ctx.profiler.record_event(EventType.CACHE_MISS, duration_ms=lookup_ms)
 
-        # 3. Cache Miss: Execute Tool
-        ctx.guardrails.record_tool_dispatch(adapter.spec, call)
-        ctx.profiler.start_span(f"tool_{call.call_id}")
-        ctx.guardrails.record_concurrency_enter()
-
-        await ctx.rate_limiter.acquire()
-        try:
-            res = await adapter.execute(call)
-        finally:
-            ctx.rate_limiter.release()
-            ctx.guardrails.record_concurrency_exit()
-
-        ctx.profiler.end_span(f"tool_{call.call_id}", EventType.TOOL_END)
+        # 3. Cache Miss: Execute Tool via ToolExecutor
+        res = await ctx.executor.execute(call)
 
         # 4. Populate Cache if successful and read-only
         if res.is_success and adapter.spec.is_read_only:
             self.cache.put(
                 tool_name=call.name,
                 arguments=call.arguments,
-                output=res.output,
+                output=res.output if res.output is not None else res.result,
                 ttl_seconds=ctx.config.cache_ttl_seconds,
             )
 

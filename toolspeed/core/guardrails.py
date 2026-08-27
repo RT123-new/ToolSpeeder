@@ -16,24 +16,12 @@ from toolspeed.core.types import (
     ToolCall,
     ToolResult,
     ToolSpec,
+    sanitize_for_json,
 )
 
 
 class GuardrailTracker:
-    """Computes guardrail metrics across execution traces and task instances.
-    
-    Tracks:
-    1. Exact task success (0 or 1, mean success rate)
-    2. Tool selection accuracy (Jaccard similarity / precision-recall)
-    3. Tool argument accuracy (exact match of expected args)
-    4. Unnecessary calls (tools called outside expected set)
-    5. Duplicated calls (redundant identical calls)
-    6. Speculative calls cancelled vs wasted vs committed
-    7. Cost per task ($/tokens + $/tool invocations)
-    8. Cache freshness violations
-    9. Unsafe / unapproved side effects
-    10. Peak concurrency & rate-limit error rate
-    """
+    """Computes guardrail metrics across execution traces and task instances."""
 
     def __init__(self):
         self._traces: list[ExecutionTrace] = []
@@ -80,48 +68,48 @@ class GuardrailTracker:
                 successful_tasks += 1
 
             task = self._tasks.get(trace.task_id)
-            expected_tools = set(task.expected_tools) if task else set()
+            expected_tools = set(task.expected_tools) if task else None
             expected_args = task.expected_args if task else None
 
             # Track tool selection accuracy
-            actual_tools = [call.tool_name for call in trace.tool_calls]
+            actual_tools = [call.name or call.tool_name for call in trace.tool_calls]
             actual_tools_set = set(actual_tools)
 
-            if expected_tools:
-                intersection = actual_tools_set.intersection(expected_tools)
-                union = actual_tools_set.union(expected_tools)
-                jaccard = len(intersection) / len(union) if union else 1.0
-                tool_selection_scores.append(jaccard)
-            else:
-                tool_selection_scores.append(1.0 if not actual_tools else 1.0)
+            if expected_tools is not None:
+                if len(expected_tools) == 0:
+                    tool_selection_scores.append(1.0 if not actual_tools else 0.0)
+                else:
+                    intersection = actual_tools_set.intersection(expected_tools)
+                    union = actual_tools_set.union(expected_tools)
+                    jaccard = len(intersection) / len(union) if union else 1.0
+                    tool_selection_scores.append(jaccard)
 
             # Track argument accuracy if expected_args provided
-            if expected_args:
+            if expected_args is not None:
                 matched_args = 0
                 total_expected_args = len(expected_args)
                 for call in trace.tool_calls:
-                    if call.tool_name in expected_args:
-                        target = expected_args[call.tool_name]
+                    call_name = call.name or call.tool_name
+                    if call_name in expected_args:
+                        target = expected_args[call_name]
+                        # Exact schema comparison (no extra keys allowed)
                         if isinstance(target, dict):
-                            # Check keys
-                            match = all(call.arguments.get(k) == v for k, v in target.items())
-                            if match:
+                            if call.arguments == target:
                                 matched_args += 1
                         elif call.arguments == target:
                             matched_args += 1
                 arg_score = matched_args / total_expected_args if total_expected_args > 0 else 1.0
                 argument_accuracy_scores.append(min(1.0, arg_score))
-            else:
-                argument_accuracy_scores.append(1.0)
 
             # Track unnecessary and duplicated calls
             seen_calls: Set[str] = set()
             for call in trace.tool_calls:
+                call_name = call.name or call.tool_name
                 total_tool_calls += 1
-                if expected_tools and call.tool_name not in expected_tools:
+                if expected_tools is not None and expected_tools and call_name not in expected_tools:
                     unnecessary_calls += 1
 
-                call_signature = f"{call.tool_name}:{json.dumps(call.arguments, sort_keys=True)}"
+                call_signature = f"{call_name}:{json.dumps(call.arguments, sort_keys=True)}"
                 if call_signature in seen_calls:
                     duplicated_calls += 1
                 else:
@@ -131,20 +119,19 @@ class GuardrailTracker:
                 if call.requires_approval and not call.is_approved:
                     unsafe_side_effects += 1
 
-            # Track speculative calls
+            # Track speculative calls and rate limits from events
             for event in trace.events:
                 ev_type = str(event.event_type)
-                if ev_type == EventType.SPECULATIVE_CANCEL.value:
+                if ev_type in (EventType.SPECULATION_CANCELLED.value, "speculative_cancel"):
                     speculative_cancelled += 1
-                elif ev_type == EventType.SPECULATIVE_COMMIT.value:
+                elif ev_type in (EventType.SPECULATION_HIT.value, "speculative_commit"):
                     speculative_committed += 1
-                elif ev_type == EventType.RATE_LIMIT_ERROR.value:
+                elif ev_type in (EventType.RATE_LIMIT_ERROR.value, "rate_limit_error"):
                     rate_limit_errors += 1
 
-            # Speculative wasted = speculative calls executed but never committed
+            # Speculative wasted = speculative calls executed but not hit or cancelled
             for call in trace.tool_calls:
                 if call.is_speculative and not call.metadata.get("committed", False):
-                    # If not cancelled, it was wasted
                     if not call.metadata.get("cancelled", False):
                         speculative_wasted += 1
 
@@ -155,22 +142,23 @@ class GuardrailTracker:
                 total_cost_usd += res.cost_usd
 
             for ev in trace.events:
-                if ev.data.get("cache_stale_violation", False):
+                if ev.data.get("cache_stale_violation", False) or ev.details.get("cache_stale_violation", False):
                     cache_freshness_violations += 1
 
             # Add token costs
             total_cost_usd += trace.token_usage.cost_usd
 
-        # Calculate peak concurrency from traces and recorded samples
+        # Calculate peak concurrency
         peak_concurrency = self._compute_peak_concurrency()
 
         exact_success = successful_tasks / total_tasks if total_tasks > 0 else 0.0
-        avg_tool_selection = sum(tool_selection_scores) / len(tool_selection_scores) if tool_selection_scores else 1.0
-        avg_argument_acc = sum(argument_accuracy_scores) / len(argument_accuracy_scores) if argument_accuracy_scores else 1.0
+        avg_tool_selection = (sum(tool_selection_scores) / len(tool_selection_scores)) if tool_selection_scores else None
+        avg_argument_acc = (sum(argument_accuracy_scores) / len(argument_accuracy_scores)) if argument_accuracy_scores else None
         cost_per_task = total_cost_usd / total_tasks if total_tasks > 0 else 0.0
 
         return GuardrailMetrics(
             exact_success=exact_success,
+            exact_accuracy=exact_success,
             tool_selection_accuracy=avg_tool_selection,
             argument_accuracy=avg_argument_acc,
             unnecessary_calls=unnecessary_calls,
@@ -197,9 +185,9 @@ class GuardrailTracker:
         for trace in self._traces:
             for ev in trace.events:
                 ev_type = str(ev.event_type)
-                if ev_type in (EventType.TOOL_START.value, EventType.SPECULATIVE_LAUNCH.value):
+                if ev_type in (EventType.TOOL_START.value, EventType.SPECULATION_START.value):
                     intervals.append((ev.timestamp_ns, 1))
-                elif ev_type in (EventType.TOOL_END.value, EventType.SPECULATIVE_CANCEL.value):
+                elif ev_type in (EventType.TOOL_END.value, EventType.SPECULATION_CANCELLED.value, EventType.TOOL_CANCELLED.value):
                     intervals.append((ev.timestamp_ns, -1))
 
         intervals.sort(key=lambda x: (x[0], -x[1]))
@@ -253,8 +241,8 @@ class GuardrailMonitor:
 
             if is_speculative:
                 self.metrics.speculative_calls_launched += 1
-                is_read_only = getattr(tool_spec, "is_read_only", not getattr(tool_spec, "is_side_effect", False))
-                side_effects = getattr(tool_spec, "side_effects", getattr(tool_spec, "is_side_effect", False))
+                is_read_only = getattr(tool_spec, "is_read_only", not getattr(tool_spec, "side_effects", False))
+                side_effects = getattr(tool_spec, "side_effects", not getattr(tool_spec, "is_read_only", True))
                 if not is_read_only or side_effects:
                     self.metrics.unapproved_side_effects += 1
                     self.metrics.unsafe_side_effects += 1

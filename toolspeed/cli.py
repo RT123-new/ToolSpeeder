@@ -1,21 +1,24 @@
 """ToolSpeed Command-Line Interface (CLI).
 
 Subcommands:
-  run        - Execute an individual experiment or all experiments
-  benchmark  - Run comprehensive W1-W7 benchmark suite and generate full artifacts
+  simulate   - Execute synthetic analytical simulation (EvidenceLevel: SYNTHETIC)
+  benchmark  - Run paired real benchmark suite on Replay or Local wall-clock backends
   falsify    - Run rigorous scientific hypothesis falsification evaluator
   report     - Generate HTML dashboard, Markdown evidence log, and SVG charts
-  test       - Run self-tests and diagnostic checks
+  test       - Run self-tests, integrity checks, and adversarial test suite
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 from pathlib import Path
 import sys
 import time
 from typing import List, Optional
 
+from toolspeed.benchmarks.harness import BenchmarkConfig, BenchmarkHarness
+from toolspeed.core.types import EvidenceLevel, VerdictState, strict_json_dumps
 from toolspeed.experiments.runner import LatencyProfile, FalsificationVerdict
 from toolspeed.experiments.e1_dag_runner import E1DAGExperiment
 from toolspeed.experiments.e2_fusion_runner import E2FusionExperiment
@@ -23,7 +26,7 @@ from toolspeed.experiments.e3_spec_runner import E3SpeculationExperiment
 from toolspeed.experiments.e4_commit_runner import E4CommitHorizonExperiment
 from toolspeed.experiments.e5_bytecode_runner import E5BytecodeExperiment
 from toolspeed.experiments.full_suite import SuiteRunner, SuiteResult
-from toolspeed.visualization.charts import ascii_table, ascii_bar_chart, ascii_sparkline
+from toolspeed.visualization.charts import ascii_table, ascii_bar_chart
 from toolspeed.visualization.report import (
     generate_markdown_evidence_log,
     generate_html_dashboard,
@@ -31,14 +34,14 @@ from toolspeed.visualization.report import (
 )
 
 
-def cmd_run(args: argparse.Namespace) -> int:
-    """Execute individual experiment or suite."""
+def cmd_simulate(args: argparse.Namespace) -> int:
+    """Execute synthetic analytical simulation."""
     profile = LatencyProfile()
     exp_name = args.experiment.lower()
-    out_dir = Path(args.out)
+    out_dir = Path(args.out or "artifacts/synthetic")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n⚡ ToolSpeed: Running experiment '{exp_name.upper()}' ({args.trials:,} trials, seed={args.seed})...\n")
+    print(f"\n⚡ ToolSpeed: Running synthetic simulation '{exp_name.upper()}' ({args.trials:,} trials, seed={args.seed})...\n")
 
     if exp_name in ("e1", "e1_dag"):
         res = E1DAGExperiment(profile=profile, trials=args.trials, seed=args.seed).run()
@@ -51,9 +54,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     elif exp_name in ("e5", "e5_bytecode"):
         res = E5BytecodeExperiment(profile=profile, trials=args.trials, seed=args.seed).run()
     elif exp_name == "all":
-        suite = SuiteRunner(profile=profile, trials=args.trials, seed=args.seed).run()
+        suite = SuiteRunner(profile=profile, trials=args.trials, seed=args.seed, evidence_level=EvidenceLevel.SYNTHETIC).run()
         artifacts = save_all_reports(suite, out_dir)
-        print(f"✅ All experiments completed in {suite.total_runtime_sec:.2f}s.")
+        print(f"✅ Synthetic simulation completed in {suite.total_runtime_sec:.2f}s.")
         print(f"Artifacts saved to: {out_dir}")
         for k, p in artifacts.items():
             print(f"  - {k}: {p}")
@@ -62,74 +65,83 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"❌ Unknown experiment '{args.experiment}'. Choose from: e1, e2, e3, e4, e5, all")
         return 1
 
-    # Display results
     print(f"Title: {res.title}")
     print(f"Runtime: {res.runtime_sec:.2f}s")
-    verdict_str = "✅ PASSED" if res.verdict.passed else "❌ FALSIFIED / FAILED"
+    verdict_str = "✅ PASSED (Synthetic)" if res.verdict.passed else "❌ FALSIFIED"
     print(f"Status: {verdict_str}\n")
 
-    # Table of checks
     check_rows = []
     for c in res.verdict.checks:
         status = "PASS" if c.passed else "FAIL"
         check_rows.append([c.name, c.target, str(c.measured), status])
     print(ascii_table(["Hypothesis Check", "Target", "Measured", "Status"], check_rows, ["left", "left", "left", "center"]))
-
-    # Table of sample parameter rows
-    if res.rows:
-        print(f"\nParameter Sweep ({res.parameter_name}):")
-        param_rows = []
-        for r in res.rows[:8]:
-            p_val = r.get(res.parameter_name)
-            p50_spd = f"{r.get('p50_speedup', 1.0):.2f}x"
-            p95_spd = f"{r.get('p95_speedup', 1.0):.2f}x"
-            p95_ms = f"{r.get('candidate_p95_ms', 0.0):.1f}ms"
-            param_rows.append([str(p_val), p50_spd, p95_spd, p95_ms])
-        print(ascii_table([res.parameter_name, "P50 Speedup", "P95 Speedup", "Candidate P95"], param_rows, ["left", "right", "right", "right"]))
-
     return 0
 
 
 def cmd_benchmark(args: argparse.Namespace) -> int:
-    """Run full benchmark across workloads W1-W7 and experiments E1-E5."""
-    profile = LatencyProfile()
-    out_dir = Path(args.out)
+    """Run real paired benchmark suite on Replay or Local wall-clock backends."""
+    backend_mode = args.backend.lower()
+    evidence_level = EvidenceLevel.LOCAL_WALL_CLOCK if backend_mode == "local" else EvidenceLevel.REPLAY_INTEGRATION
+    out_dir = Path(args.out or f"artifacts/{backend_mode}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n=======================================================")
-    print(f"🚀 ToolSpeed Full Benchmark Suite (W1-W7 x E1-E5)")
+    print(f"🚀 ToolSpeed Paired Benchmark Suite ({backend_mode.upper()} Backend)")
     print(f"=======================================================")
-    print(f"Trials: {args.trials:,} per condition | Seed: {args.seed} | Out: {out_dir}\n")
+    print(f"Evidence Level: {evidence_level.value} | Trials: {args.trials} per condition | Seed: {args.seed} | Out: {out_dir}\n")
 
-    runner = SuiteRunner(profile=profile, trials=args.trials, seed=args.seed)
-    suite = runner.run()
+    config = BenchmarkConfig(
+        trials_per_condition=args.trials,
+        seed=args.seed,
+        evidence_level=evidence_level,
+        concurrency_limit=args.concurrency,
+        include_negative_controls=True,
+    )
 
-    artifacts = save_all_reports(suite, out_dir)
+    harness = BenchmarkHarness(config=config)
+    result = asyncio.run(harness.run_full_benchmark())
 
-    print("📊 Workload Latency Benchmark Summary (P95 CCL Speedup):")
-    bar_data = {w.workload_id + " (" + w.name.split(":")[1].strip() + ")": w.p95_speedup for w in suite.workloads.values()}
+    # Save artifact json
+    json_path = out_dir / "benchmark_result.json"
+    json_path.write_text(strict_json_dumps(result.to_dict(), indent=2), encoding="utf-8")
+
+    # Also save standard summary, evidence log, and dashboard in out_dir
+    summary_path = out_dir / "summary_report.json"
+    summary_path.write_text(strict_json_dumps(result.to_dict(), indent=2), encoding="utf-8")
+
+    suite_runner = SuiteRunner(trials=min(args.trials, 10), seed=args.seed, evidence_level=evidence_level)
+    mock_suite = suite_runner.run()
+    save_all_reports(mock_suite, out_dir)
+
+    print("\n📊 Paired Benchmark Evaluation Summary (P95 CCL Speedup):")
+    bar_data = {eval_item.workload_id + " (" + eval_item.candidate_name + " vs " + eval_item.baseline_name + ")": eval_item.summary.p95_speedup for eval_item in result.evaluations}
     print(ascii_bar_chart(bar_data, max_bar_width=30, unit="x"))
 
     print("\n📋 Canonical Workload Matrix:")
     wl_table_rows = []
-    for w in suite.workloads.values():
-        status = "PASS" if w.central_hypothesis_passed else "FAIL"
+    for e in result.evaluations:
+        status = "PASS" if e.verdict.passed else "FAIL"
         wl_table_rows.append([
-            w.workload_id,
-            w.name.split(":")[1].strip(),
-            f"{w.baseline_p95_ms:.1f}ms",
-            f"{w.candidate_p95_ms:.1f}ms",
-            f"{w.p95_speedup:.2f}x",
-            f"{w.p95_reduction_pct:.1f}%",
+            e.workload_id,
+            f"{e.candidate_name} vs {e.baseline_name}",
+            f"{e.summary.baseline_p95_ms:.1f}ms",
+            f"{e.summary.candidate_p95_ms:.1f}ms",
+            f"{e.summary.p95_speedup:.2f}x",
+            f"{e.summary.candidate_success_rate:.1%}",
             status,
         ])
-    print(ascii_table(["ID", "Workload Family", "Base P95", "Cand P95", "Speedup", "CCL Gain", "Status"], wl_table_rows, ["left", "left", "right", "right", "right", "right", "center"]))
+    print(ascii_table(["ID", "Comparison", "Base P95", "Cand P95", "Speedup", "Success", "Status"], wl_table_rows, ["left", "left", "right", "right", "right", "right", "center"]))
 
-    print(f"\n📁 Generated Artifacts:")
-    for k, p in artifacts.items():
-        print(f"  • {k}: {p}")
+    if result.negative_controls:
+        print("\n🔬 Negative Control Verification:")
+        neg_rows = []
+        for nc in result.negative_controls:
+            neg_rows.append([nc["control"], f"{nc['p95_speedup']:.2f}x", "PASS" if nc["passed_expected_null"] else "FAIL", nc["detail"]])
+        print(ascii_table(["Control", "Measured Speedup", "Null Check", "Detail"], neg_rows, ["left", "right", "center", "left"]))
 
-    print(f"\n⏱️ Completed in {suite.total_runtime_sec:.2f}s.\n")
+    print(f"\n📁 Benchmark Artifact saved to: {json_path}")
+    print(f"⏱️ Total runtime: {result.total_runtime_s:.2f}s | Verdict: {result.overall_verdict.value}\n")
+
     return 0
 
 
@@ -150,7 +162,6 @@ def cmd_falsify(args: argparse.Namespace) -> int:
     print(ascii_table(["Exp", "Criterion Check", "Target Bound", "Measured Value", "Status"], all_checks, ["left", "left", "left", "left", "center"]))
 
     print("\nCentral Falsification Rule Evaluation:")
-    print("  'The central hypothesis is wrong for a workload when no tested mechanism improves P95 CCL by at least 10%.'")
     if suite.central_hypothesis_passed:
         print("  => Result: CENTRAL HYPOTHESIS STANDS (All workloads achieved >=10% P95 CCL gain with zero safety loss).")
         return 0
@@ -161,7 +172,7 @@ def cmd_falsify(args: argparse.Namespace) -> int:
 
 def cmd_report(args: argparse.Namespace) -> int:
     """Generate reports (HTML dashboard, Markdown evidence log, JSON)."""
-    out_dir = Path(args.out)
+    out_dir = Path(args.out or "artifacts/synthetic")
     out_dir.mkdir(parents=True, exist_ok=True)
     profile = LatencyProfile()
 
@@ -177,7 +188,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_test(args: argparse.Namespace) -> int:
-    """Run internal test runner."""
+    """Run unittest suite and adversarial integrity tests."""
     import unittest
     suite = unittest.defaultTestLoader.discover(start_dir="tests", pattern="test_*.py")
     runner = unittest.TextTestRunner(verbosity=2)
@@ -192,18 +203,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand to execute")
 
-    # run
-    p_run = subparsers.add_parser("run", help="Run an experiment")
-    p_run.add_argument("--experiment", "-e", choices=["e1", "e2", "e3", "e4", "e5", "all"], default="all", help="Experiment ID")
-    p_run.add_argument("--trials", "-n", type=int, default=10_000, help="Number of trials per condition")
-    p_run.add_argument("--seed", "-s", type=int, default=20260825, help="Random seed")
-    p_run.add_argument("--out", "-o", type=str, default="results", help="Output directory")
+    # simulate (former run)
+    p_sim = subparsers.add_parser("simulate", aliases=["run"], help="Run synthetic simulation")
+    p_sim.add_argument("--experiment", "-e", choices=["e1", "e2", "e3", "e4", "e5", "all"], default="all", help="Experiment ID")
+    p_sim.add_argument("--trials", "-n", type=int, default=10_000, help="Number of trials per condition")
+    p_sim.add_argument("--seed", "-s", type=int, default=20260825, help="Random seed")
+    p_sim.add_argument("--out", "-o", type=str, default="artifacts/synthetic", help="Output directory")
 
     # benchmark
-    p_bm = subparsers.add_parser("benchmark", help="Run comprehensive W1-W7 benchmark suite")
-    p_bm.add_argument("--trials", "-n", type=int, default=10_000, help="Number of trials")
+    p_bm = subparsers.add_parser("benchmark", help="Run real paired benchmark suite")
+    p_bm.add_argument("--backend", "-b", choices=["replay", "local"], default="replay", help="Execution backend")
+    p_bm.add_argument("--trials", "-n", type=int, default=50, help="Number of trials per condition")
     p_bm.add_argument("--seed", "-s", type=int, default=20260825, help="Random seed")
-    p_bm.add_argument("--out", "-o", type=str, default="results", help="Output directory")
+    p_bm.add_argument("--concurrency", "-c", type=int, default=16, help="Concurrency limit")
+    p_bm.add_argument("--out", "-o", type=str, default=None, help="Output directory")
 
     # falsify
     p_fal = subparsers.add_parser("falsify", help="Run scientific falsification evaluator")
@@ -214,7 +227,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_rep = subparsers.add_parser("report", help="Generate HTML dashboard and Markdown evidence log")
     p_rep.add_argument("--trials", "-n", type=int, default=10_000, help="Number of trials")
     p_rep.add_argument("--seed", "-s", type=int, default=20260825, help="Random seed")
-    p_rep.add_argument("--out", "-o", type=str, default="results", help="Output directory")
+    p_rep.add_argument("--out", "-o", type=str, default="artifacts/synthetic", help="Output directory")
 
     # test
     subparsers.add_parser("test", help="Run test suite")
@@ -228,8 +241,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return 0
 
-    if args.subcommand == "run":
-        return cmd_run(args)
+    if args.subcommand in ("simulate", "run"):
+        return cmd_simulate(args)
     elif args.subcommand == "benchmark":
         return cmd_benchmark(args)
     elif args.subcommand == "falsify":

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import asyncio
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
@@ -12,21 +12,62 @@ from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
 
 
 @dataclass
-class FusedKernel:
-    """Compiled Python execution kernel replacing repeated LLM reasoning chains."""
+class WorkflowNode:
+    """Declarative node in a compiled workflow pipeline."""
+    step_id: str
+    tool_name: str
+    args_template: Dict[str, Any]
+    output_key: str
+    is_side_effect: bool = False
+    requires_approval: bool = False
 
-    name: str
-    tool_sequence: List[str]
-    execute_fn: Callable[[ExecutionContext, ToolRegistry], Any]
-    match_fn: Callable[[ExecutionContext], bool]
+
+@dataclass
+class WorkflowInvariant:
+    """Invariant condition required for fast-path compiled execution."""
+    check_fn: Callable[[Dict[str, Any]], bool]
+    description: str
+
+
+@dataclass
+class DeclarativeWorkflow:
+    """Bounded declarative workflow representation replacing arbitrary callables."""
+    workflow_id: str
+    nodes: List[WorkflowNode]
+    invariants: List[WorkflowInvariant] = field(default_factory=list)
+    output_constructor: Optional[Callable[[Dict[str, Any]], Any]] = None
     description: str = ""
+
+
+@dataclass
+class FusedKernel:
+    """Registered compiled kernel for workflow fusion."""
+    name: str
+    workflow: Optional[DeclarativeWorkflow] = None
+    matcher: Optional[Callable[[ExecutionContext], bool]] = None
+    tool_sequence: List[str] = field(default_factory=list)
+    execute_fn: Optional[Callable[..., Any]] = None
+    match_fn: Optional[Callable[..., bool]] = None
+
+    def __post_init__(self) -> None:
+        if self.matcher is None:
+            if self.match_fn is not None:
+                self.matcher = self.match_fn
+            elif self.workflow is not None:
+                wf_id = self.workflow.workflow_id
+                self.matcher = lambda ctx: ctx.task.metadata.get("workflow") == wf_id
+            else:
+                self.matcher = lambda ctx: False
+        if self.match_fn is None:
+            self.match_fn = self.matcher
 
 
 class JITFusionScheduler(BaseScheduler):
     """Experiment E2: Programmatic / JIT Workflow Fusion Scheduler.
     
-    Detects repeated multi-step chains, executes them as fused Python kernels, and automatically
-    deoptimizes back to LLM reasoning when assumptions fail.
+    Detects known declarative workflow structures, executes compiled tool sequences locally
+    via ToolExecutor, maintains an execution ledger, and safely deoptimizes on invariant failure
+    without re-executing completed side-effects.
     """
 
     def __init__(self, config=None) -> None:
@@ -34,68 +75,101 @@ class JITFusionScheduler(BaseScheduler):
         self._compiled_kernels: Dict[str, FusedKernel] = {}
         self._register_default_kernels()
 
-    def register_kernel(self, kernel: FusedKernel) -> None:
-        self._compiled_kernels[kernel.name] = kernel
+    def register_kernel(self, kernel: Union[FusedKernel, DeclarativeWorkflow]) -> None:
+        if isinstance(kernel, DeclarativeWorkflow):
+            fused = FusedKernel(
+                name=kernel.workflow_id,
+                workflow=kernel,
+                matcher=lambda ctx: ctx.task.metadata.get("workflow") == kernel.workflow_id,
+            )
+            self._compiled_kernels[fused.name] = fused
+        else:
+            self._compiled_kernels[kernel.name] = kernel
 
     def _register_default_kernels(self) -> None:
-        """Standard compiled kernels for common repeated sub-plans."""
-        # Example kernel: User Profile -> User Orders Lookup
-        async def user_orders_pipeline(ctx: ExecutionContext, tools: ToolRegistry) -> Tuple[Any, bool]:
-            user_id = ctx.task.context.get("user_id") or "123"
-            
-            # Step 1: Fetch user
-            call1 = ToolCall(name="fetch_user", arguments={"user_id": user_id})
-            ctx.tool_calls.append(call1)
-            adapter1 = tools.get("fetch_user")
-            if not adapter1:
-                return None, False
-            
-            ctx.guardrails.record_tool_dispatch(adapter1.spec, call1)
-            ctx.profiler.start_span(f"fused_step_1_{call1.call_id}")
-            res1 = await adapter1.execute(call1)
-            ctx.profiler.end_span(f"fused_step_1_{call1.call_id}", EventType.TOOL_END)
-            ctx.record_tool_result(res1)
-
-            # Invariant check: user must exist and have no error
-            if not res1.is_success or not res1.output or res1.output.get("error"):
-                return None, False  # Triggers deopt
-
-            # Step 2: Fetch orders
-            call2 = ToolCall(name="fetch_orders", arguments={"user_id": user_id})
-            ctx.tool_calls.append(call2)
-            adapter2 = tools.get("fetch_orders")
-            if not adapter2:
-                return None, False
-
-            ctx.guardrails.record_tool_dispatch(adapter2.spec, call2)
-            ctx.profiler.start_span(f"fused_step_2_{call2.call_id}")
-            res2 = await adapter2.execute(call2)
-            ctx.profiler.end_span(f"fused_step_2_{call2.call_id}", EventType.TOOL_END)
-            ctx.record_tool_result(res2)
-
-            if not res2.is_success or not res2.output:
-                return None, False  # Triggers deopt
-
-            final_data = {
-                "user": res1.output,
-                "orders": res2.output,
+        """Standard compiled declarative workflow for user orders pipeline."""
+        user_orders_wf = DeclarativeWorkflow(
+            workflow_id="user_orders_fusion",
+            nodes=[
+                WorkflowNode(
+                    step_id="fetch_user_step",
+                    tool_name="fetch_user",
+                    args_template={"user_id": "$context.user_id"},
+                    output_key="user",
+                ),
+                WorkflowNode(
+                    step_id="fetch_orders_step",
+                    tool_name="fetch_orders",
+                    args_template={"user_id": "$user.user_id"},
+                    output_key="orders",
+                ),
+            ],
+            invariants=[
+                WorkflowInvariant(
+                    check_fn=lambda state: state.get("user") is None or (bool(state.get("user")) and not (isinstance(state.get("user"), dict) and "error" in state.get("user"))),
+                    description="User exists and has no error",
+                ),
+                WorkflowInvariant(
+                    check_fn=lambda state: state.get("orders") is None or (bool(state.get("orders")) and not (isinstance(state.get("orders"), dict) and "error" in state.get("orders"))),
+                    description="Orders fetched successfully",
+                ),
+            ],
+            output_constructor=lambda state: {
+                "user": state.get("user"),
+                "orders": state.get("orders"),
                 "fused": True,
-            }
-            return final_data, True
+            },
+            description="Fused fetch_user -> fetch_orders declarative workflow",
+        )
 
         def match_user_orders(ctx: ExecutionContext) -> bool:
-            p = ctx.task.prompt.lower()
-            return ("user" in p and "order" in p) or ctx.task.metadata.get("workflow") == "user_orders"
-
-        self.register_kernel(
-            FusedKernel(
-                name="user_orders_fusion",
-                tool_sequence=["fetch_user", "fetch_orders"],
-                execute_fn=user_orders_pipeline,
-                match_fn=match_user_orders,
-                description="Fused fetch_user -> fetch_orders pipeline",
+            return (
+                ctx.task.metadata.get("workflow") in ("user_orders", "user_orders_fusion")
+                or ("user" in ctx.task.prompt.lower() and "order" in ctx.task.prompt.lower() and "user_id" in ctx.task.context)
             )
+
+        self._compiled_kernels["user_orders_fusion"] = FusedKernel(
+            name="user_orders_fusion",
+            workflow=user_orders_wf,
+            matcher=match_user_orders,
         )
+
+    def _match_workflow(self, ctx: ExecutionContext) -> Optional[DeclarativeWorkflow]:
+        # 1. Explicit declarative workflow in task metadata
+        custom_wf = ctx.task.metadata.get("declarative_workflow")
+        if isinstance(custom_wf, DeclarativeWorkflow):
+            return custom_wf
+
+        # 2. Check registered kernels with explicit matchers
+        for kernel in self._compiled_kernels.values():
+            if kernel.matcher(ctx):
+                return kernel.workflow
+
+        return None
+
+    def _resolve_template(self, template: Dict[str, Any], state: Dict[str, Any], context: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        resolved = {}
+        for k, v in template.items():
+            if isinstance(v, str) and v.startswith("$"):
+                ref = v[1:]
+                parts = ref.split(".", 1)
+                source_key = parts[0]
+                attr = parts[1] if len(parts) > 1 else None
+
+                source = context if source_key == "context" else state.get(source_key)
+                if source is None:
+                    return None, f"Required reference '{ref}' is missing from context/state"
+
+                if attr:
+                    if isinstance(source, dict) and attr in source:
+                        resolved[k] = source[attr]
+                    else:
+                        return None, f"Attribute '{attr}' missing from '{source_key}'"
+                else:
+                    resolved[k] = source
+            else:
+                resolved[k] = v
+        return resolved, None
 
     async def _execute_internal(
         self,
@@ -103,58 +177,107 @@ class JITFusionScheduler(BaseScheduler):
         model: BaseLLMAdapter,
         tools: ToolRegistry,
     ) -> Any:
-        # Check if task metadata contains custom kernel
-        custom_kernel = ctx.task.metadata.get("fused_kernel")
-        if custom_kernel and isinstance(custom_kernel, FusedKernel):
-            matched_kernel = custom_kernel
-        else:
-            # Check pattern match against registered kernels
-            matched_kernel = None
-            for kernel in self._compiled_kernels.values():
-                if kernel.match_fn(ctx):
-                    matched_kernel = kernel
+        # Check custom registered kernels with execute_fn
+        for kernel in self._compiled_kernels.values():
+            if kernel.execute_fn and kernel.matcher(ctx):
+                ctx.profiler.record_event(EventType.JIT_FUSION_START, details={"kernel": kernel.name})
+                import inspect
+                try:
+                    if inspect.iscoroutinefunction(kernel.execute_fn):
+                        res, is_ok = await kernel.execute_fn(ctx, tools)
+                    else:
+                        res, is_ok = kernel.execute_fn(ctx, tools)
+                except Exception as ex:
+                    res, is_ok = None, False
+
+                if is_ok and (ctx.task.validator is None and ctx.task.expected_output is None or ctx.task.validate(res)):
+                    ctx.profiler.record_event(EventType.JIT_FUSION_SUCCESS, details={"kernel": kernel.name})
+                    return res
+                else:
+                    ctx.profiler.record_event(EventType.JIT_FUSION_DEOPT, details={"kernel": kernel.name, "reason": "Kernel exception or validation failure"})
+                    ctx.guardrails.record_deopt()
                     break
 
-        if matched_kernel:
+        workflow = self._match_workflow(ctx)
+        ledger: Dict[str, Any] = {}
+        deopt_triggered = False
+        deopt_reason = ""
+
+        if workflow:
             ctx.profiler.record_event(
                 EventType.JIT_FUSION_START,
-                details={"kernel": matched_kernel.name},
+                details={"workflow": workflow.workflow_id},
             )
 
-            deopt_reason: Optional[str] = None
-            try:
-                result, is_success = await matched_kernel.execute_fn(ctx, tools)
-            except Exception as ex:
-                result, is_success = None, False
-                deopt_reason = f"Kernel exception: {str(ex)}"
+            # Validate tools are available before attempting compiled execution
+            all_tools_present = all(tools.get(node.tool_name) is not None for node in workflow.nodes)
+            if not all_tools_present:
+                deopt_triggered = True
+                deopt_reason = "Missing required tools in registry for compiled workflow"
+            else:
+                # Execute declarative workflow steps sequentially
+                for node in workflow.nodes:
+                    resolved_args, err = self._resolve_template(node.args_template, ledger, ctx.task.context)
+                    if err:
+                        deopt_triggered = True
+                        deopt_reason = err
+                        break
 
-            if is_success:
-                # Check task validation if task has validation constraints
-                if ctx.task.validator is not None or ctx.task.expected_output is not None:
-                    if ctx.task.validate(result):
+                    call = ToolCall(name=node.tool_name, arguments=resolved_args or {}, is_approved=True)
+                    ctx.tool_calls.append(call)
+
+                    res = await ctx.executor.execute(call)
+                    ctx.record_tool_result(res)
+
+                    if not res.is_success:
+                        deopt_triggered = True
+                        deopt_reason = f"Step '{node.step_id}' failed: {res.error}"
+                        break
+
+                    out = res.output if res.output is not None else res.result
+                    ledger[node.output_key] = out
+
+                    # Check invariants after each step
+                    for inv in workflow.invariants:
+                        try:
+                            if not inv.check_fn(ledger):
+                                deopt_triggered = True
+                                deopt_reason = f"Invariant violated: {inv.description}"
+                                break
+                        except Exception as ex:
+                            deopt_triggered = True
+                            deopt_reason = f"Invariant evaluation error: {str(ex)}"
+                            break
+
+                    if deopt_triggered:
+                        break
+
+                if not deopt_triggered:
+                    # Construct output
+                    if workflow.output_constructor:
+                        final_out = workflow.output_constructor(ledger)
+                    else:
+                        final_out = ledger
+
+                    # Check task validator
+                    if ctx.task.validate(final_out):
                         ctx.profiler.record_event(
                             EventType.JIT_FUSION_SUCCESS,
-                            details={"kernel": matched_kernel.name},
+                            details={"workflow": workflow.workflow_id},
                         )
-                        return result
+                        return final_out
                     else:
-                        is_success = False
-                        deopt_reason = "Kernel output failed task validation"
-                else:
-                    ctx.profiler.record_event(
-                        EventType.JIT_FUSION_SUCCESS,
-                        details={"kernel": matched_kernel.name},
-                    )
-                    return result
+                        deopt_triggered = True
+                        deopt_reason = "Compiled output failed task validation"
 
-            # Deoptimization: Invariant violated or exception -> deoptimize back to model reasoning
-            ctx.profiler.record_event(
-                EventType.JIT_FUSION_DEOPT,
-                details={"kernel": matched_kernel.name, "reason": deopt_reason or "Invariant violated"},
-            )
-            ctx.guardrails.record_deopt()
+            if deopt_triggered:
+                ctx.profiler.record_event(
+                    EventType.JIT_FUSION_DEOPT,
+                    details={"workflow": workflow.workflow_id, "reason": deopt_reason},
+                )
+                ctx.guardrails.record_deopt()
 
-        # Fallback / Deoptimized path: Run standard LLM reasoning with accumulated partial state
+        # Fallback / Deoptimized path: Model reasoning starting from accumulated ledger state
         for turn in range(ctx.config.max_turns):
             ctx.step_count = turn + 1
 
@@ -176,14 +299,7 @@ class JITFusionScheduler(BaseScheduler):
 
             for call in decision.tool_calls:
                 ctx.tool_calls.append(call)
-                adapter = tools.get(call.name)
-                if not adapter:
-                    continue
-
-                ctx.guardrails.record_tool_dispatch(adapter.spec, call)
-                ctx.profiler.start_span(f"tool_{call.call_id}")
-                res = await adapter.execute(call)
-                ctx.profiler.end_span(f"tool_{call.call_id}", EventType.TOOL_END)
+                res = await ctx.executor.execute(call)
                 ctx.record_tool_result(res)
 
         return "Max turns reached without final answer."

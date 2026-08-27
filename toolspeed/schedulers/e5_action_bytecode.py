@@ -1,10 +1,11 @@
-"""Experiment E5: Action Bytecode Engine and Scheduler."""
+"""Experiment E5: Action Bytecode Transport Codec & Execution Scheduler."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import json
 import struct
+import time
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
 from toolspeed.core.types import EventType, ToolCall, ToolResult, ToolSpec
@@ -12,7 +13,14 @@ from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
 
 
 class ActionBytecodeCodec:
-    """Encodes and decodes ToolCalls into compact binary / token-efficient bytecodes."""
+    """E5a: Compact binary transport codec for tool calls.
+    
+    Format:
+      [Version (1B)] [Opcode (2B >H)] [ArgCount (2B >H)]
+      Repeated per argument:
+        [KeyLen (2B >H)] [ValLen (4B >I)] [KeyBytes] [ValBytes (JSON)]
+    """
+    PROTOCOL_VERSION = 0x02
 
     def __init__(self, tool_specs: Optional[List[ToolSpec]] = None) -> None:
         self.tool_to_opcode: Dict[str, int] = {}
@@ -23,70 +31,88 @@ class ActionBytecodeCodec:
             for idx, spec in enumerate(tool_specs, start=1):
                 self.register_tool(spec.name, list(spec.parameters.get("properties", {}).keys()) or spec.required_args, opcode=idx)
 
-    def register_tool(self, name: str, arg_order: List[str], opcode: Optional[int] = None) -> int:
+    def register_tool(self, name: str, arg_order: Optional[List[str]] = None, opcode: Optional[int] = None) -> int:
+        if name in self.tool_to_opcode:
+            return self.tool_to_opcode[name]
+
         op = opcode if opcode is not None else (len(self.tool_to_opcode) + 1)
+        if op in self.opcode_to_tool and self.opcode_to_tool[op] != name:
+            raise ValueError(f"Opcode collision: opcode {op} is already registered to tool '{self.opcode_to_tool[op]}'")
+        if op > 65535 or op <= 0:
+            raise ValueError(f"Opcode out of range: must be 1..65535, got {op}")
+
         self.tool_to_opcode[name] = op
         self.opcode_to_tool[op] = name
-        self.tool_arg_order[name] = list(arg_order)
+        self.tool_arg_order[name] = list(arg_order or [])
         return op
 
     def encode(self, call: ToolCall) -> bytes:
-        """Encodes a ToolCall into a compact binary packet: [Opcode (1B)] [ArgCount (2B)] [KeyLen (2B), ValLen (4B), Key, Val...]."""
+        """Encodes a ToolCall into a compact binary packet with 16-bit opcode support."""
         tool_name = call.name or call.tool_name or "default_tool"
-        op = self.tool_to_opcode.get(tool_name, 0)
-        if op == 0:
-            # Dynamic register
+        op = self.tool_to_opcode.get(tool_name)
+        if op is None:
             op = self.register_tool(tool_name, list(call.arguments.keys()))
 
-        # Pack arguments with exact key names and JSON-serialized values
         payload_parts = []
         for k, v in call.arguments.items():
             k_bytes = k.encode("utf-8")
-            v_bytes = json.dumps(v).encode("utf-8")
+            v_bytes = json.dumps(v, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            if len(k_bytes) > 65535:
+                raise ValueError(f"Argument key '{k}' exceeds maximum length of 65535 bytes")
+            if len(v_bytes) > 100_000_000:
+                raise ValueError(f"Argument value for '{k}' exceeds maximum payload limit")
             payload_parts.append(
                 struct.pack(">HI", len(k_bytes), len(v_bytes)) + k_bytes + v_bytes
             )
 
         body = b"".join(payload_parts)
-        header = struct.pack(">BH", min(255, op), len(call.arguments))
+        # Header: Version (1B), Opcode (2B >H), ArgCount (2B >H) = 5 bytes
+        header = struct.pack(">BHH", self.PROTOCOL_VERSION, op, len(call.arguments))
         return header + body
 
     def decode(self, data: bytes) -> ToolCall:
-        """Decodes binary bytecode back into a structured ToolCall."""
-        if len(data) < 3:
-            raise ValueError("Bytecode packet too short: minimum header is 3 bytes")
+        """Decodes binary bytecode back into a structured ToolCall, validating length and bounds."""
+        if len(data) < 5:
+            raise ValueError(f"Bytecode packet too short: expected at least 5 bytes header, got {len(data)}")
 
-        op, arg_count = struct.unpack(">BH", data[:3])
-        if op == 0:
-            raise ValueError(f"Invalid opcode: {op}")
-        tool_name = self.opcode_to_tool.get(op, f"unknown_tool_{op}")
+        version, op, arg_count = struct.unpack(">BHH", data[:5])
+        if version != self.PROTOCOL_VERSION:
+            raise ValueError(f"Unsupported bytecode protocol version: {version}")
+        if op == 0 or op not in self.opcode_to_tool:
+            raise ValueError(f"Unknown or invalid opcode: {op}")
 
-        offset = 3
+        tool_name = self.opcode_to_tool[op]
+        offset = 5
         args: Dict[str, Any] = {}
+
         for i in range(arg_count):
             if offset + 6 > len(data):
-                raise ValueError("Bytecode packet truncated: missing argument header")
+                raise ValueError(f"Bytecode packet truncated: missing header for argument {i}")
             k_len, val_len = struct.unpack(">HI", data[offset : offset + 6])
             offset += 6
             if offset + k_len + val_len > len(data):
                 raise ValueError(f"Bytecode packet truncated: expected {k_len + val_len} bytes for argument {i}, got {len(data) - offset}")
-            key = data[offset : offset + k_len].decode("utf-8", errors="replace")
+
+            key = data[offset : offset + k_len].decode("utf-8")
             offset += k_len
             val_bytes = data[offset : offset + val_len]
             offset += val_len
 
             try:
                 parsed_val = json.loads(val_bytes.decode("utf-8"))
-            except Exception:
-                parsed_val = val_bytes.decode("utf-8", errors="replace")
+            except Exception as ex:
+                raise ValueError(f"Malformed JSON argument value for key '{key}': {ex}")
 
             args[key] = parsed_val
+
+        if offset != len(data):
+            raise ValueError(f"Bytecode packet contains {len(data) - offset} unexpected trailing bytes")
 
         return ToolCall(name=tool_name, tool_name=tool_name, arguments=args)
 
     def calculate_compression_ratio(self, call: ToolCall) -> Tuple[int, int, float]:
-        """Compares verbose JSON schema character count to compact binary bytecode size."""
-        json_len = len(json.dumps({"name": call.name, "arguments": call.arguments}))
+        """Compares JSON character count to compact binary bytecode size."""
+        json_len = len(json.dumps({"name": call.name or call.tool_name, "arguments": call.arguments}, separators=(",", ":")))
         bc_len = len(self.encode(call))
         ratio = json_len / max(1, bc_len)
         return json_len, bc_len, ratio
@@ -95,8 +121,8 @@ class ActionBytecodeCodec:
 class ActionBytecodeScheduler(BaseScheduler):
     """Experiment E5: Action Bytecode Engine.
     
-    Replaces verbose JSON generation with compact Action ByteCode (ABC), cutting decode token count
-    and latency by 2x+ while deterministically expanding to full tool schemas.
+    Evaluates binary transport codec compression and decoding throughput.
+    Note: Direct model action-token generation is scoped as E5b and marked unimplemented for live models.
     """
 
     def __init__(self, config=None) -> None:
@@ -109,7 +135,6 @@ class ActionBytecodeScheduler(BaseScheduler):
         model: BaseLLMAdapter,
         tools: ToolRegistry,
     ) -> Any:
-        # Initialize codec with tools
         for spec in tools.list_specs():
             self.codec.register_tool(spec.name, spec.required_args or list(spec.parameters.get("properties", {}).keys()))
 
@@ -132,14 +157,16 @@ class ActionBytecodeScheduler(BaseScheduler):
             if decision.final_answer is not None or not decision.tool_calls:
                 return decision.final_answer
 
-            # Process tool calls through bytecode encode/decode cycle to simulate compact generation
             for raw_call in decision.tool_calls:
-                # 1. Encode to compact bytecode
+                # 1. Transport encode
+                t_enc_start = time.perf_counter()
                 encoded_bytes = self.codec.encode(raw_call)
+                t_enc_ms = (time.perf_counter() - t_enc_start) * 1000.0
                 json_size, bc_size, comp_ratio = self.codec.calculate_compression_ratio(raw_call)
 
                 ctx.profiler.record_event(
                     EventType.BYTECODE_ENCODE,
+                    duration_ms=t_enc_ms,
                     details={
                         "tool": raw_call.name,
                         "json_bytes": json_size,
@@ -148,33 +175,21 @@ class ActionBytecodeScheduler(BaseScheduler):
                     },
                 )
 
-                # 2. Deterministic expansion to ToolCall schema
+                # 2. Transport decode
+                t_dec_start = time.perf_counter()
                 decoded_call = self.codec.decode(encoded_bytes)
+                t_dec_ms = (time.perf_counter() - t_dec_start) * 1000.0
                 decoded_call.call_id = raw_call.call_id
                 ctx.tool_calls.append(decoded_call)
 
                 ctx.profiler.record_event(
                     EventType.BYTECODE_DECODE,
+                    duration_ms=t_dec_ms,
                     details={"tool": decoded_call.name, "call_id": decoded_call.call_id},
                 )
 
-                # 3. Execute tool call
-                adapter = tools.get(decoded_call.name)
-                if not adapter:
-                    continue
-
-                ctx.guardrails.record_tool_dispatch(adapter.spec, decoded_call, is_speculative=False)
-                ctx.profiler.start_span(f"tool_{decoded_call.call_id}")
-                ctx.guardrails.record_concurrency_enter()
-
-                await ctx.rate_limiter.acquire()
-                try:
-                    res = await adapter.execute(decoded_call)
-                finally:
-                    ctx.rate_limiter.release()
-                    ctx.guardrails.record_concurrency_exit()
-
-                ctx.profiler.end_span(f"tool_{decoded_call.call_id}", EventType.TOOL_END)
+                # 3. Tool execution via ToolExecutor
+                res = await ctx.executor.execute(decoded_call)
                 ctx.record_tool_result(res)
 
         return "Max turns reached without final answer."

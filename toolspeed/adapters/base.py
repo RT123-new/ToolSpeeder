@@ -40,6 +40,7 @@ class ToolSchema:
     description: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
     is_side_effect: bool = False
+    is_read_only: bool = True
     requires_approval: bool = False
     cost_usd: float = 0.0
     cache_ttl_s: Optional[float] = None
@@ -47,9 +48,11 @@ class ToolSchema:
     commit_horizon_args: List[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    @property
-    def is_read_only(self) -> bool:
-        return not self.is_side_effect
+    def __post_init__(self) -> None:
+        if not self.is_read_only:
+            self.is_side_effect = True
+        elif self.is_side_effect:
+            self.is_read_only = False
 
     @property
     def side_effects(self) -> bool:
@@ -124,16 +127,22 @@ class BaseToolAdapter(ABC):
     def name(self) -> str:
         if hasattr(self, "config") and hasattr(self.config, "name"):
             return self.config.name
-        if self._spec:
-            return self._spec.name
-        if self._schema:
-            return self._schema.name
-        return self.__class__.__name__
+        spec = getattr(self, "_spec", None)
+        if spec:
+            return spec.name
+        schema = getattr(self, "_schema", None)
+        if schema:
+            return schema.name
+        try:
+            return self.get_schema().name
+        except Exception:
+            return getattr(self, "_name", self.__class__.__name__)
 
     @property
     def spec(self) -> ToolSpec:
-        if self._spec is not None:
-            return self._spec
+        spec = getattr(self, "_spec", None)
+        if spec is not None:
+            return spec
         schema = self.get_schema()
         return ToolSpec(
             name=schema.name,
@@ -142,12 +151,14 @@ class BaseToolAdapter(ABC):
             required_args=schema.required_args or list(schema.parameters.get("required", [])),
             is_read_only=not schema.is_side_effect,
             side_effects=schema.is_side_effect,
+            requires_approval=getattr(schema, "requires_approval", False),
         )
 
     def get_schema(self) -> ToolSchema:
         """Return schema and metadata for this tool."""
-        if self._schema is not None:
-            return self._schema
+        schema = getattr(self, "_schema", None)
+        if schema is not None:
+            return schema
         if hasattr(self, "config"):
             c = getattr(self, "config")
             return ToolSchema(

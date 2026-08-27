@@ -5,10 +5,36 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
+import hashlib
 import json
+import math
+import os
+import platform
+import sys
 import time
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
 import uuid
+
+
+class EvidenceLevel(str, Enum):
+    """Scientific evidence classification hierarchy."""
+    SYNTHETIC = "synthetic"
+    REPLAY_INTEGRATION = "replay_integration"
+    LOCAL_WALL_CLOCK = "local_wall_clock"
+    LIVE = "live"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class VerdictState(str, Enum):
+    """Scientific hypothesis verdict status."""
+    PASSED = "passed"
+    FALSIFIED = "falsified"
+    INCONCLUSIVE = "inconclusive"
+
+    def __str__(self) -> str:
+        return self.value
 
 
 class EventType(str, Enum):
@@ -30,9 +56,9 @@ class EventType(str, Enum):
     SPECULATION_HIT = "speculation_hit"
     SPECULATION_MISS = "speculation_miss"
     SPECULATION_CANCELLED = "speculation_cancelled"
-    SPECULATIVE_LAUNCH = "speculative_launch"
-    SPECULATIVE_CANCEL = "speculative_cancel"
-    SPECULATIVE_COMMIT = "speculative_commit"
+    SPECULATIVE_LAUNCH = "speculation_start"
+    SPECULATIVE_CANCEL = "speculation_cancelled"
+    SPECULATIVE_COMMIT = "speculation_hit"
     CACHE_HIT = "cache_hit"
     CACHE_MISS = "cache_miss"
     CACHE_FRESHNESS_VIOLATION = "cache_freshness_violation"
@@ -56,6 +82,168 @@ class EventType(str, Enum):
 
     def __str__(self) -> str:
         return self.value
+
+
+def sanitize_for_json(obj: Any) -> Any:
+    """Recursively converts non-standard float values (NaN, Inf) to None for standards-compliant JSON."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    elif isinstance(obj, dict):
+        return {str(k): sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple, set)):
+        return [sanitize_for_json(item) for item in obj]
+    elif isinstance(obj, Enum):
+        return obj.value
+    elif hasattr(obj, "to_dict") and callable(getattr(obj, "to_dict")):
+        return sanitize_for_json(obj.to_dict())
+    return obj
+
+
+def strict_json_dumps(obj: Any, indent: Optional[int] = 2) -> str:
+    """Strict JSON serializer enforcing standards compliance (no NaN / Infinity)."""
+    sanitized = sanitize_for_json(obj)
+    return json.dumps(sanitized, indent=indent, allow_nan=False)
+
+
+@dataclass(frozen=True)
+class CommittedCall:
+    """Immutable representation of a tool call that has safely crossed the commit horizon."""
+    tool_name: str
+    arguments: Tuple[Tuple[str, Any], ...]
+    call_id: str
+    schema_hash: str
+    semantic_fingerprint: str
+
+    @classmethod
+    def from_call(cls, call: ToolCall, schema_hash: str = "") -> CommittedCall:
+        sorted_args = tuple(sorted((k, json.dumps(v, sort_keys=True)) for k, v in call.arguments.items()))
+        fp_payload = f"{call.name}:{sorted_args}:{schema_hash}".encode("utf-8")
+        fingerprint = hashlib.sha256(fp_payload).hexdigest()
+        return cls(
+            tool_name=call.name or call.tool_name,
+            arguments=sorted_args,
+            call_id=call.call_id,
+            schema_hash=schema_hash,
+            semantic_fingerprint=fingerprint,
+        )
+
+
+@dataclass
+class ArtifactManifest:
+    """Provenance and execution environment metadata for benchmark artifact bundles."""
+    git_sha: str = "unknown"
+    git_dirty: bool = False
+    command: str = ""
+    evidence_level: EvidenceLevel = EvidenceLevel.SYNTHETIC
+    timestamp_utc: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    seed: int = 0
+    python_version: str = platform.python_version()
+    os_platform: str = f"{platform.system()} {platform.release()} ({platform.machine()})"
+    hardware_info: Dict[str, Any] = field(default_factory=dict)
+    dependency_versions: Dict[str, str] = field(default_factory=dict)
+    benchmark_config_hash: str = ""
+    workload_fixture_hash: str = ""
+    raw_trace_hash: str = ""
+    report_generator_version: str = "2.0.0"
+    is_simulated: bool = True
+
+    @property
+    def commit_sha(self) -> str:
+        return self.git_sha
+
+    @property
+    def dirty(self) -> bool:
+        return self.git_dirty
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "git_sha": self.git_sha,
+            "git_dirty": self.git_dirty,
+            "command": self.command,
+            "evidence_level": self.evidence_level.value if isinstance(self.evidence_level, EvidenceLevel) else str(self.evidence_level),
+            "timestamp_utc": self.timestamp_utc,
+            "seed": self.seed,
+            "python_version": self.python_version,
+            "os_platform": self.os_platform,
+            "hardware_info": self.hardware_info,
+            "dependency_versions": self.dependency_versions,
+            "benchmark_config_hash": self.benchmark_config_hash,
+            "workload_fixture_hash": self.workload_fixture_hash,
+            "raw_trace_hash": self.raw_trace_hash,
+            "report_generator_version": self.report_generator_version,
+            "is_simulated": self.is_simulated,
+        }
+
+    @classmethod
+    def create(
+        cls,
+        evidence_level: EvidenceLevel = EvidenceLevel.SYNTHETIC,
+        seed: int = 42,
+        command: str = "toolspeed",
+        is_simulated: bool = False,
+        config_data: Any = None,
+        fixture_data: Any = None,
+        trace_data: Any = None,
+    ) -> ArtifactManifest:
+        return cls.create_current(
+            command=command,
+            evidence_level=evidence_level,
+            seed=seed,
+            is_simulated=is_simulated,
+            config_data=config_data,
+            fixture_data=fixture_data,
+            trace_data=trace_data,
+        )
+
+    @classmethod
+    def create_current(
+        cls,
+        command: str,
+        evidence_level: EvidenceLevel,
+        seed: int,
+        is_simulated: bool,
+        config_data: Any = None,
+        fixture_data: Any = None,
+        trace_data: Any = None,
+    ) -> ArtifactManifest:
+        sha = "unknown"
+        dirty = False
+        try:
+            import subprocess
+            res_sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=2)
+            if res_sha.returncode == 0:
+                sha = res_sha.stdout.strip()
+            res_status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, timeout=2)
+            if res_status.returncode == 0:
+                dirty = len(res_status.stdout.strip()) > 0
+        except Exception:
+            pass
+
+        deps: Dict[str, str] = {}
+        try:
+            import numpy
+            deps["numpy"] = numpy.__version__
+        except Exception:
+            pass
+
+        config_hash = hashlib.sha256(json.dumps(sanitize_for_json(config_data), sort_keys=True).encode("utf-8")).hexdigest() if config_data else ""
+        fixture_hash = hashlib.sha256(json.dumps(sanitize_for_json(fixture_data), sort_keys=True).encode("utf-8")).hexdigest() if fixture_data else ""
+        trace_hash = hashlib.sha256(json.dumps(sanitize_for_json(trace_data), sort_keys=True).encode("utf-8")).hexdigest() if trace_data else ""
+
+        return cls(
+            git_sha=sha,
+            git_dirty=dirty,
+            command=command,
+            evidence_level=evidence_level,
+            seed=seed,
+            dependency_versions=deps,
+            benchmark_config_hash=config_hash,
+            workload_fixture_hash=fixture_hash,
+            raw_trace_hash=trace_hash,
+            is_simulated=is_simulated,
+        )
 
 
 @dataclass
@@ -97,6 +285,7 @@ class ToolSpec:
     is_read_only: bool = True
     is_idempotent: bool = True
     side_effects: bool = False
+    requires_approval: bool = False
     estimated_latency_ms: float = 200.0
 
     def get_commit_args(self) -> Set[str]:
@@ -336,71 +525,24 @@ class LatencyProfile:
 
 
 @dataclass
-class DependencyNode:
-    """Node in an argument data-dependency DAG."""
-    node_id: str
-    tool_name: str = ""
-    call: Optional[ToolCall] = None
-    args_template: dict[str, Any] = field(default_factory=dict)
-    dependencies: list[str] = field(default_factory=list)
-    depends_on: list[str] = field(default_factory=list)
-    dependents: list[str] = field(default_factory=list)
-    arg_bindings: dict[str, str] = field(default_factory=dict)
-    is_side_effect: bool = False
-    requires_approval: bool = False
-    is_ready: bool = False
-    is_executed: bool = False
-    result: Optional[ToolResult] = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.dependencies and self.depends_on:
-            self.dependencies = list(self.depends_on)
-        elif not self.depends_on and self.dependencies:
-            self.depends_on = list(self.dependencies)
-        if not self.tool_name and self.call is not None:
-            self.tool_name = self.call.tool_name
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "node_id": self.node_id,
-            "tool_name": self.tool_name,
-            "dependencies": self.dependencies,
-            "depends_on": self.depends_on,
-            "dependents": self.dependents,
-            "arg_bindings": self.arg_bindings,
-            "is_side_effect": self.is_side_effect,
-            "requires_approval": self.requires_approval,
-            "metadata": self.metadata,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> DependencyNode:
-        return cls(
-            node_id=data["node_id"],
-            tool_name=data.get("tool_name", ""),
-            dependencies=list(data.get("dependencies", []) or data.get("depends_on", [])),
-            depends_on=list(data.get("depends_on", []) or data.get("dependencies", [])),
-            dependents=list(data.get("dependents", [])),
-            arg_bindings=dict(data.get("arg_bindings", {})),
-            is_side_effect=bool(data.get("is_side_effect", False)),
-            requires_approval=bool(data.get("requires_approval", False)),
-            metadata=dict(data.get("metadata", {})),
-        )
-
-
-@dataclass
 class TaskInstance:
     """An individual workload task item for evaluation."""
     task_id: str
-    workload_family: str
-    prompt: str
+    workload_family: str = "default"
+    workload_id: str = ""
+    prompt: str = ""
     expected_tools: list[str] = field(default_factory=list)
     expected_output: Any = None
     expected_args: Optional[dict[str, Any]] = None
     parameters: dict[str, Any] = field(default_factory=dict)
     context: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.workload_family and self.workload_id:
+            self.workload_family = self.workload_id
+        elif not self.workload_id and self.workload_family:
+            self.workload_id = self.workload_family
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -432,15 +574,16 @@ class TaskInstance:
 
 @dataclass
 class Task:
-    """Legacy task definition for compatibility."""
+    """Task definition with mandatory correctness validation."""
     task_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     prompt: str = ""
     expected_output: Any = None
-    validator: Optional[Callable[[Any, Any], bool]] = None
+    validator: Optional[Callable[..., bool]] = None
     context: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def validate(self, actual_output: Any) -> bool:
+        """Strict validation: Task cannot automatically pass if neither validator nor expected_output is provided."""
         if self.validator is not None:
             try:
                 try:
@@ -449,8 +592,11 @@ class Task:
                     return bool(self.validator(self.expected_output, actual_output))
             except Exception:
                 return False
+
         if self.expected_output is None:
-            return True
+            # Rule: A task without expected_output or a validator must not automatically pass!
+            return False
+
         return self.expected_output == actual_output
 
 
@@ -588,10 +734,10 @@ class GuardrailMetrics:
     """Comprehensive guardrail statistics measured across evaluation runs."""
     total_tasks: int = 0
     successful_tasks: int = 0
-    exact_success: float = 1.0
-    exact_accuracy: float = 1.0
-    tool_selection_accuracy: float = 1.0
-    argument_accuracy: float = 1.0
+    exact_success: float = 0.0
+    exact_accuracy: float = 0.0
+    tool_selection_accuracy: Optional[float] = None
+    argument_accuracy: Optional[float] = None
     total_tool_calls: int = 0
     unnecessary_calls: int = 0
     duplicated_calls: int = 0
@@ -633,11 +779,22 @@ class GuardrailMetrics:
 
     def to_dict(self) -> dict[str, Any]:
         self.compute_derived()
-        return asdict(self)
+        return sanitize_for_json(asdict(self))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GuardrailMetrics:
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class DependencyNode:
+    """DAG dependency node structure."""
+    call_id: str
+    tool_name: str
+    arguments: Dict[str, Any] = field(default_factory=dict)
+    dependencies: List[str] = field(default_factory=list)
+    output: Any = None
+    status: str = "pending"
 
 
 @dataclass
@@ -672,7 +829,7 @@ class TaskResult:
     task_id: str
     success: bool
     final_answer: Any = None
-    ccl_ms: float = 0.0
+    ccl_ms: Optional[float] = None
     total_duration_ms: float = 0.0
     events: List[ExecutionEvent] = field(default_factory=list)
     tool_calls: List[ToolCall] = field(default_factory=list)
