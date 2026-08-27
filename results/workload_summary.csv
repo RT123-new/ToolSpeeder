@@ -1,0 +1,8 @@
+workload_id,name,primary_mechanisms,baseline_p50_ms,candidate_p50_ms,p50_speedup,baseline_p95_ms,candidate_p95_ms,p95_speedup,p95_reduction_pct,success_rate,central_hypothesis_passed
+W1,"W1: Independent fan-out reads","DAG Scheduler; Parallel Fan-Out",3414.63,1774.18,1.925,4742.27,2649.43,1.790,44.13,1.000,True
+W2,"W2: Deterministic dependent chains","JIT Workflow Fusion; Model Hop Elimination",4918.32,3505.31,1.403,6410.69,4799.70,1.336,25.13,1.000,True
+W3,"W3: Branching workflows","Confidence-Gated Speculation; Branch Prediction",1435.43,1102.13,1.302,2275.77,1876.18,1.213,17.56,1.000,True
+W4,"W4: Repeated workflows with plan locality","Plan Locality Cache; JIT AST Reuse",3704.03,2259.57,1.639,5478.10,3364.44,1.628,38.58,1.000,True
+W5,"W5: Large tool arguments and results","Action Bytecode; Commit-Horizon Dispatch",1799.01,1290.26,1.394,2874.44,2049.73,1.402,28.69,1.000,True
+W6,"W6: Cold-start code/browser sandboxes","Predictive Sandbox Prewarming; Warm Pool Recycling",2458.15,1456.73,1.687,3752.98,2294.93,1.635,38.85,1.000,True
+W7,"W7: Side-effecting actions requiring approval","Idempotent Commit Horizon; Side-Effect Safety Gate",1432.54,1171.58,1.223,2271.99,1902.68,1.194,16.25,1.000,True
