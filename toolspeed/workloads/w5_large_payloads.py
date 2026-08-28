@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any
 import numpy as np
-from typing import Any, Dict, List, Optional, Tuple
 
 from toolspeed.adapters.base import BaseToolAdapter
 from toolspeed.adapters.mock_tools import MockToolAdapter, MockToolConfig
@@ -105,17 +106,15 @@ class W5LargePayloadsWorkload(BaseWorkload):
         )
         return [gen_tool, agg_tool]
 
-    def generate_tasks(self, count: int = 10, seed: Optional[int] = None) -> list[TaskInstance]:
+    def generate_tasks(self, count: int = 10, seed: int | None = None) -> list[TaskInstance]:
         rng = np.random.default_rng(seed)
         tasks: list[TaskInstance] = []
 
         for idx in range(count):
             size_kb = int(rng.choice(self.payload_sizes_kb))
-            # ~100 bytes per row with padding
             num_rows = max(10, size_kb * 10)
             task_seed = int(rng.integers(1000, 99999))
 
-            # Precalculate expected values
             dataset = self._generate_dataset_handler({"num_rows": num_rows, "seed": task_seed})
             agg = self._aggregate_dataset_handler({"rows": dataset["rows"]})
 
@@ -137,7 +136,7 @@ class W5LargePayloadsWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: Optional[ExecutionTrace]) -> Tuple[bool, str, dict[str, Any]]:
+        def _validate(task: TaskInstance, output: Any, trace: ExecutionTrace | None) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 

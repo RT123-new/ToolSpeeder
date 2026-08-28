@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 import json
-import numpy as np
 import struct
 import time
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any
+import numpy as np
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, StreamingChunk, ToolSchema
 from toolspeed.core.types import LatencyProfile, Task, TokenUsage, ToolCall, ToolSpec
@@ -77,7 +78,7 @@ class ActionBytecodeCodec:
         )
 
     @classmethod
-    def estimate_token_count(cls, text_or_bytes: Union[str, bytes]) -> int:
+    def estimate_token_count(cls, text_or_bytes: str | bytes) -> int:
         """Estimate token count (approx 4 chars per token for text, 4 bytes per token for bytecode)."""
         length = len(text_or_bytes)
         return max(1, (length + 3) // 4)
@@ -104,7 +105,7 @@ class DraftPredictorModel:
         latency_ms: float = 70.0,
         accuracy: float = 0.85,
         confidence_threshold: float = 0.70,
-        seed: Optional[int] = None,
+        seed: int | None = None,
     ):
         self.latency_ms = latency_ms
         self.accuracy = accuracy
@@ -115,9 +116,9 @@ class DraftPredictorModel:
         self,
         prompt: str,
         candidate_tools: list[str],
-        ground_truth_tool: Optional[str] = None,
-        ground_truth_args: Optional[dict[str, Any]] = None,
-    ) -> Optional[Tuple[ToolCall, float]]:
+        ground_truth_tool: str | None = None,
+        ground_truth_args: dict[str, Any] | None = None,
+    ) -> tuple[ToolCall, float] | None:
         """Simulate fast draft prediction with confidence score."""
         await asyncio.sleep(max(0.0001, self.latency_ms / 1000.0))
 
@@ -150,14 +151,14 @@ class SimulatedLLM(BaseLLMAdapter):
 
     def __init__(
         self,
-        profile: Optional[LatencyProfile] = None,
+        profile: LatencyProfile | None = None,
         tokens_per_second: float = 100.0,
-        cost_config: Optional[ModelCostConfig] = None,
+        cost_config: ModelCostConfig | None = None,
         draft_accuracy: float = 0.85,
         draft_confidence_threshold: float = 0.70,
         use_bytecode: bool = False,
         commit_fraction: float = 0.5,
-        seed: Optional[int] = None,
+        seed: int | None = None,
     ):
         self.profile = profile or LatencyProfile()
         self.tokens_per_second = max(1.0, tokens_per_second)
@@ -179,12 +180,12 @@ class SimulatedLLM(BaseLLMAdapter):
     async def generate(
         self,
         prompt: str,
-        tools: Optional[list[ToolSchema]] = None,
-        expected_calls: Optional[list[ToolCall]] = None,
+        tools: list[ToolSchema] | None = None,
+        expected_calls: list[ToolCall] | None = None,
         final_answer: str = "Completed successfully.",
         is_final: bool = False,
         **kwargs: Any,
-    ) -> Tuple[str, list[ToolCall], TokenUsage]:
+    ) -> tuple[str, list[ToolCall], TokenUsage]:
         reasoning_ms = self._sample_reasoning_ms(is_final=is_final)
         await asyncio.sleep(max(0.0001, reasoning_ms / 1000.0))
 
@@ -216,8 +217,8 @@ class SimulatedLLM(BaseLLMAdapter):
     async def stream_generate(
         self,
         prompt: str,
-        tools: Optional[list[ToolSchema]] = None,
-        expected_calls: Optional[list[ToolCall]] = None,
+        tools: list[ToolSchema] | None = None,
+        expected_calls: list[ToolCall] | None = None,
         final_answer: str = "Completed successfully.",
         is_final: bool = False,
         **kwargs: Any,
@@ -247,7 +248,7 @@ class SimulatedLLM(BaseLLMAdapter):
             for idx in range(total_call_tokens):
                 await asyncio.sleep(token_delay_s)
                 chunk_delta = None
-                meta = {}
+                meta: dict[str, Any] = {}
 
                 if idx == commit_token_idx:
                     meta["commit_horizon_reached"] = True
@@ -257,6 +258,8 @@ class SimulatedLLM(BaseLLMAdapter):
                 if is_last:
                     meta["completed_calls"] = [c.to_dict() for c in calls]
 
+                fragment = json.dumps(calls[0].arguments) if (calls and idx >= commit_token_idx) else ""
+
                 yield StreamingChunk(
                     text="",
                     delta_text="",
@@ -265,20 +268,21 @@ class SimulatedLLM(BaseLLMAdapter):
                     token_index=idx,
                     parsed_tool_calls=calls if is_last else [],
                     commit_horizon_ready=calls if (idx >= commit_token_idx and idx == commit_token_idx) else [],
+                    raw_json_fragment=fragment,
                     metadata=meta,
                 )
 
     async def predict_speculative_call(
         self,
         prompt: str,
-        history: Optional[list[Any]] = None,
-        ground_truth_tool: Optional[str] = None,
-        ground_truth_args: Optional[dict[str, Any]] = None,
-        candidate_tools: Optional[list[str]] = None,
-    ) -> Optional[ToolCall]:
+        history: list[Any] | None = None,
+        ground_truth_tool: str | None = None,
+        ground_truth_args: dict[str, Any] | None = None,
+        candidate_tools: list[str] | None = None,
+    ) -> ToolCall | None:
         res = await self.draft_predictor.predict(
             prompt=prompt,
-            candidate_tools=candidate_tools or (["read_db", "fetch_url", "compute_stats"]),
+            candidate_tools=candidate_tools or ["read_db", "fetch_url", "compute_stats"],
             ground_truth_tool=ground_truth_tool,
             ground_truth_args=ground_truth_args,
         )
@@ -293,9 +297,9 @@ class MockScriptedLLM(BaseLLMAdapter):
 
     def __init__(
         self,
-        decision_steps: Optional[List[LLMDecision]] = None,
-        decision_fn: Optional[Callable[[Task, List[Dict[str, Any]]], LLMDecision]] = None,
-        draft_predictor_fn: Optional[Callable[[Task, List[Dict[str, Any]]], Optional[ToolCall]]] = None,
+        decision_steps: list[LLMDecision] | None = None,
+        decision_fn: Callable[[Task, list[dict[str, Any]]], LLMDecision] | None = None,
+        draft_predictor_fn: Callable[[Task, list[dict[str, Any]]], ToolCall | None] | None = None,
         simulated_decision_ms: float = 5.0,
         simulated_draft_ms: float = 1.0,
         commit_horizon_fraction: float = 0.4,
@@ -316,8 +320,8 @@ class MockScriptedLLM(BaseLLMAdapter):
     async def decide(
         self,
         task: Task,
-        history: List[Dict[str, Any]],
-        tools: List[ToolSpec],
+        history: list[dict[str, Any]],
+        tools: list[ToolSpec],
     ) -> LLMDecision:
         start = time.perf_counter()
         
@@ -331,9 +335,16 @@ class MockScriptedLLM(BaseLLMAdapter):
             decision = self.decision_steps[self._current_step]
             self._current_step += 1
         else:
+            # Look at observed tool results in history to synthesize final answer
+            last_tool_res = None
+            for h in reversed(history):
+                if h.get("role") == "tool":
+                    last_tool_res = h.get("output")
+                    break
+
             decision = LLMDecision(
                 reasoning="Completed task.",
-                final_answer="Task completed successfully.",
+                final_answer=last_tool_res if last_tool_res is not None else "Task completed successfully.",
                 input_tokens=150,
                 output_tokens=30,
             )
@@ -345,8 +356,8 @@ class MockScriptedLLM(BaseLLMAdapter):
     async def stream_decision(
         self,
         task: Task,
-        history: List[Dict[str, Any]],
-        tools: List[ToolSpec],
+        history: list[dict[str, Any]],
+        tools: list[ToolSpec],
     ) -> AsyncIterator[StreamingChunk]:
         if self.decision_fn:
             target = self.decision_fn(task, history)
@@ -354,9 +365,15 @@ class MockScriptedLLM(BaseLLMAdapter):
             target = self.decision_steps[self._current_step]
             self._current_step += 1
         else:
+            last_tool_res = None
+            for h in reversed(history):
+                if h.get("role") == "tool":
+                    last_tool_res = h.get("output")
+                    break
+
             target = LLMDecision(
                 reasoning="Finished.",
-                final_answer="Task completed.",
+                final_answer=last_tool_res if last_tool_res is not None else "Task completed.",
                 input_tokens=100,
                 output_tokens=20,
             )
@@ -385,9 +402,17 @@ class MockScriptedLLM(BaseLLMAdapter):
             chunk_word = words[chunk_idx] if chunk_idx < len(words) else f"token_{chunk_idx}"
             chunk_text = (chunk_word + " ") if not is_last else chunk_word
 
-            meta = {}
+            meta: dict[str, Any] = {}
             if is_last and target.final_answer is not None:
                 meta["final_answer"] = target.final_answer
+
+            fragment = ""
+            if commit_ready:
+                fragment = json.dumps(commit_ready[0].arguments)
+            elif is_last and target.tool_calls:
+                fragment = json.dumps(target.tool_calls[0].arguments)
+            elif is_last:
+                fragment = f'{{"step": {chunk_idx}}}'
 
             yield StreamingChunk(
                 text=chunk_text,
@@ -396,16 +421,16 @@ class MockScriptedLLM(BaseLLMAdapter):
                 token_index=chunk_idx,
                 parsed_tool_calls=target.tool_calls if is_last else [],
                 commit_horizon_ready=commit_ready,
-                raw_json_fragment=f'{{"step": {chunk_idx}}}' if is_last else "",
+                raw_json_fragment=fragment,
                 metadata=meta,
             )
 
     async def predict_draft(
         self,
         task: Task,
-        history: List[Dict[str, Any]],
-        tools: List[ToolSpec],
-    ) -> Optional[ToolCall]:
+        history: list[dict[str, Any]],
+        tools: list[ToolSpec],
+    ) -> ToolCall | None:
         if self.simulated_draft_ms > 0:
             await asyncio.sleep(self.simulated_draft_ms / 1000.0)
 
@@ -414,7 +439,7 @@ class MockScriptedLLM(BaseLLMAdapter):
 
         prompt_lower = task.prompt.lower()
         for t in tools:
-            if t.is_read_only and t.name.lower() in prompt_lower:
+            if t.is_read_only and not t.side_effects and not t.requires_approval and t.name.lower() in prompt_lower:
                 return ToolCall(
                     name=t.name,
                     tool_name=t.name,

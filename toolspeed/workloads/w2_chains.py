@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import hashlib
+from typing import Any
 import numpy as np
-from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from toolspeed.adapters.base import BaseToolAdapter
 from toolspeed.adapters.mock_tools import MockToolAdapter, MockToolConfig
@@ -76,7 +77,7 @@ class W2ChainsWorkload(BaseWorkload):
         )
         return [MockToolAdapter(tool_config)]
 
-    def generate_tasks(self, count: int = 10, seed: Optional[int] = None) -> list[TaskInstance]:
+    def generate_tasks(self, count: int = 10, seed: int | None = None) -> list[TaskInstance]:
         rng = np.random.default_rng(seed)
         tasks: list[TaskInstance] = []
 
@@ -104,7 +105,7 @@ class W2ChainsWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: Optional[ExecutionTrace]) -> Tuple[bool, str, dict[str, Any]]:
+        def _validate(task: TaskInstance, output: Any, trace: ExecutionTrace | None) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 
@@ -117,9 +118,18 @@ class W2ChainsWorkload(BaseWorkload):
             # If trace is present, verify sequential steps were executed
             if trace is not None:
                 expected_depth = task.parameters.get("depth", 0)
-                step_calls = [c for c in trace.tool_calls if c.tool_name == "execute_pipeline_step"]
+                step_calls = [
+                    c for c in trace.tool_calls
+                    if (c.tool_name == "execute_pipeline_step" or c.name == "execute_pipeline_step")
+                ]
+                # Fail if model emitted answer without running required steps
                 if len(step_calls) < expected_depth:
                     return False, f"Expected {expected_depth} step executions, but recorded {len(step_calls)}", {}
+
+                # Fail if any step tool resulted in an error
+                for r in trace.tool_results:
+                    if not r.is_success or r.is_error:
+                        return False, f"Tool result failed in chain: {r.error}", {}
 
             return True, "Chain validation passed", {"final_value": actual_final}
 

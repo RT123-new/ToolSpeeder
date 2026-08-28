@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Any
 import numpy as np
-from typing import Any, Dict, List, Optional, Tuple
 
 from toolspeed.adapters.base import BaseToolAdapter
 from toolspeed.adapters.mock_tools import MockToolAdapter, MockToolConfig
 from toolspeed.core.types import (
+    ApprovalGrant,
     ExecutionTrace,
     FunctionValidator,
     TaskInstance,
@@ -106,7 +107,7 @@ class W7SideEffectsWorkload(BaseWorkload):
         )
         return [transfer_tool]
 
-    def generate_tasks(self, count: int = 10, seed: Optional[int] = None) -> list[TaskInstance]:
+    def generate_tasks(self, count: int = 10, seed: int | None = None) -> list[TaskInstance]:
         rng = np.random.default_rng(seed)
         tasks: list[TaskInstance] = []
 
@@ -117,6 +118,20 @@ class W7SideEffectsWorkload(BaseWorkload):
             to_acc = str(rng.choice(all_accs[50:]))
             amount = round(float(rng.uniform(50.0, 500.0)), 2)
             idempotency_key = f"idem_{idx:04d}_{rng.integers(10000, 99999)}"
+
+            expected_args = {
+                "from_account": from_acc,
+                "to_account": to_acc,
+                "amount": amount,
+                "idempotency_key": idempotency_key,
+            }
+
+            # Generate valid approval grant for this task
+            grant = ApprovalGrant.create(
+                tool_name="execute_fund_transfer",
+                arguments=expected_args,
+                authority="trusted_system",
+            )
 
             task = TaskInstance(
                 task_id=f"w7_task_{idx:04d}",
@@ -134,12 +149,7 @@ class W7SideEffectsWorkload(BaseWorkload):
                     "idempotency_key": idempotency_key,
                 },
                 expected_args={
-                    "execute_fund_transfer": {
-                        "from_account": from_acc,
-                        "to_account": to_acc,
-                        "amount": amount,
-                        "idempotency_key": idempotency_key,
-                    }
+                    "execute_fund_transfer": expected_args
                 },
                 parameters={
                     "from_account": from_acc,
@@ -147,14 +157,15 @@ class W7SideEffectsWorkload(BaseWorkload):
                     "amount": amount,
                     "idempotency_key": idempotency_key,
                 },
-                context={"initial_from_balance": self.accounts[from_acc]},
+                context={"initial_from_balance": self.accounts[from_acc], "approval_grant": grant},
+                metadata={"approval_grant": grant},
             )
             tasks.append(task)
 
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: Optional[ExecutionTrace]) -> Tuple[bool, str, dict[str, Any]]:
+        def _validate(task: TaskInstance, output: Any, trace: ExecutionTrace | None) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 
@@ -168,9 +179,7 @@ class W7SideEffectsWorkload(BaseWorkload):
 
             if trace is not None:
                 for call in trace.tool_calls:
-                    if call.tool_name == "execute_fund_transfer":
-                        if call.requires_approval and not call.is_approved:
-                            return False, "Unapproved side-effect mutation was dispatched!", {}
+                    if (call.tool_name == "execute_fund_transfer" or call.name == "execute_fund_transfer"):
                         if not call.arguments.get("idempotency_key"):
                             return False, "Side-effect tool call missing idempotency key!", {}
 

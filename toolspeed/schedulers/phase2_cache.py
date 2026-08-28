@@ -3,27 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
-import asyncio
 import json
 import time
+from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
-from toolspeed.core.types import EventType, ToolCall, ToolResult, ToolSpec
-from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
+from toolspeed.core.types import EventType, ToolCall, ToolResult
+from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig
 
 
 @dataclass
 class CacheEntry:
     tool_name: str
-    arguments: Dict[str, Any]
+    arguments: dict[str, Any]
     output: Any
     created_at: float = field(default_factory=time.perf_counter)
     ttl_seconds: float = 300.0
     freshness_contract: str = "strict"  # "strict", "relaxed"
     hit_count: int = 0
 
-    def is_fresh(self, current_time: Optional[float] = None) -> bool:
+    def is_fresh(self, current_time: float | None = None) -> bool:
         now = current_time if current_time is not None else time.perf_counter()
         return (now - self.created_at) <= self.ttl_seconds
 
@@ -33,13 +32,13 @@ class ToolResultCache:
 
     def __init__(self, default_ttl_seconds: float = 300.0) -> None:
         self.default_ttl_seconds = default_ttl_seconds
-        self._exact_store: Dict[str, CacheEntry] = {}
-        self._semantic_store: Dict[str, CacheEntry] = {}
+        self._exact_store: dict[str, CacheEntry] = {}
+        self._semantic_store: dict[str, CacheEntry] = {}
 
-    def _exact_key(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+    def _exact_key(self, tool_name: str, arguments: dict[str, Any]) -> str:
         return f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
 
-    def _semantic_key(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+    def _semantic_key(self, tool_name: str, arguments: dict[str, Any]) -> str:
         norm_args = {}
         for k, v in sorted(arguments.items()):
             if isinstance(v, str):
@@ -51,9 +50,9 @@ class ToolResultCache:
     def get(
         self,
         tool_name: str,
-        arguments: Dict[str, Any],
+        arguments: dict[str, Any],
         allow_semantic: bool = True,
-    ) -> Tuple[Optional[Any], bool, bool]:
+    ) -> tuple[Any | None, bool, bool]:
         """Returns (cached_output, is_hit, is_fresh)."""
         now = time.perf_counter()
         exact_k = self._exact_key(tool_name, arguments)
@@ -82,9 +81,9 @@ class ToolResultCache:
     def put(
         self,
         tool_name: str,
-        arguments: Dict[str, Any],
+        arguments: dict[str, Any],
         output: Any,
-        ttl_seconds: Optional[float] = None,
+        ttl_seconds: float | None = None,
         freshness_contract: str = "strict",
     ) -> None:
         ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl_seconds
@@ -111,7 +110,7 @@ class ToolResultCache:
 
         return len(to_del_exact)
 
-    def invalidate_on_mutation(self, mutation_tool: str, arguments: Optional[Dict[str, Any]] = None) -> int:
+    def invalidate_on_mutation(self, mutation_tool: str, arguments: dict[str, Any] | None = None) -> int:
         """Invalidates related cache entries when a mutation tool executes."""
         domain = mutation_tool.replace("update_", "").replace("create_", "").replace("delete_", "").replace("set_", "").replace("modify_", "")
         to_del_exact = [k for k, v in self._exact_store.items() if domain in v.tool_name or v.tool_name in mutation_tool]
@@ -134,8 +133,15 @@ class CacheScheduler(BaseScheduler):
     automatically invalidates cached reads when side-effecting write tools execute.
     """
 
-    def __init__(self, config=None, shared_cache: Optional[ToolResultCache] = None) -> None:
-        super().__init__(config)
+    def __init__(
+        self,
+        config: SchedulerConfig | None = None,
+        shared_cache: ToolResultCache | None = None,
+        cache_enabled: bool = True,
+    ) -> None:
+        cfg = config or SchedulerConfig()
+        cfg.cache_enabled = cache_enabled
+        super().__init__(cfg)
         self.cache = shared_cache or ToolResultCache(
             default_ttl_seconds=self.config.cache_ttl_seconds
         )
@@ -146,6 +152,9 @@ class CacheScheduler(BaseScheduler):
         call: ToolCall,
         tools: ToolRegistry,
     ) -> ToolResult:
+        if not self.config.cache_enabled:
+            return await ctx.executor.execute(call)
+
         adapter = tools.get(call.name)
         if not adapter:
             return await ctx.executor.execute(call)

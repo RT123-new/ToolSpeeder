@@ -306,7 +306,11 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
             simulated_decision_ms=2.0,
         )
 
-        task = Task(prompt="Cycle test", expected_output="Recovered from cyclic deadlock")
+        task = Task(
+            prompt="Cycle test",
+            expected_output="Recovered from cyclic deadlock",
+            validator=lambda out, trace=None: out == "Recovered from cyclic deadlock",
+        )
         scheduler = DAGScheduler()
 
         # Should complete swiftly within timeout, not deadlock

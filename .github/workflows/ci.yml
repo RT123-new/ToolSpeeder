@@ -26,25 +26,49 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
-          pip install numpy
+          pip install -e ".[dev]"
 
-      - name: Run Full Unit & Adversarial Test Suite
+      - name: Run Ruff Linting
         run: |
-          python -m unittest discover -s tests -p "test_*.py"
+          ruff check .
 
-      - name: Run 35 Adversarial Scientific Integrity Tests
+      - name: Run Full Unit & Adversarial Test Suite with Coverage
+        run: |
+          coverage run -m unittest discover -s tests -p "test_*.py"
+          coverage report -m
+
+      - name: Run 45 Adversarial Scientific Integrity Tests
         run: |
           python -m unittest tests/test_adversarial_integrity.py
 
-      - name: Run Scientific Falsification Evaluator (Synthetic)
+      - name: Run Synthetic Simulation
         run: |
-          python -m toolspeed.cli falsify --trials 150
+          python -m toolspeed.cli simulate --trials 200 --out artifacts/synthetic
 
       - name: Run Deterministic Replay Benchmark Suite
         run: |
-          python -m toolspeed.cli benchmark --backend replay --trials 50 --out artifacts/replay
+          python -m toolspeed.cli benchmark --backend replay --trials 1000 --out artifacts/replay
+
+      - name: Validate Replay Result Bundle
+        run: |
+          python -m toolspeed.cli validate-bundle --input artifacts/replay
+
+      - name: Run Falsification Evaluation on Replay Bundle
+        run: |
+          python -m toolspeed.cli falsify --input artifacts/replay
 
       - name: Run Real Local Wall-Clock Benchmark Suite
         run: |
-          python -m toolspeed.cli benchmark --backend local --trials 10 --out artifacts/local
+          python -m toolspeed.cli benchmark --backend local --trials 200 --out artifacts/local
+
+      - name: Validate Local Result Bundle
+        run: |
+          python -m toolspeed.cli validate-bundle --input artifacts/local
+
+      - name: Run Falsification Evaluation on Local Bundle
+        run: |
+          python -m toolspeed.cli falsify --input artifacts/local
+
+      - name: Build Wheel Distribution Package
+        run: |
+          python -m build

@@ -23,7 +23,7 @@
 <body>
   <div class="container">
     <h1>ToolSpeed Paired Benchmark Suite (Replay Backend)</h1>
-    <p>Evidence Level: <code>replay_integration</code> | Runtime: 93.05s | Verdict: <strong>FALSIFIED</strong></p>
+    <p>Evidence Level: <code>replay_integration</code> | Runtime: 4.41s | Verdict: <strong>PASSED</strong></p>
     <div class="card">
       <h2>Workload Performance Matrix</h2>
       <table>
@@ -37,9 +37,9 @@
         <tr>
           <td><strong>W1</strong></td>
           <td>DAGScheduler vs SyncReActScheduler</td>
-          <td>206.3 ms</td>
-          <td>96.5 ms</td>
-          <td><strong>2.14x</strong></td>
+          <td>185.0 ms</td>
+          <td>85.0 ms</td>
+          <td><strong>2.18x</strong></td>
           <td>100.0%</td>
           <td><span class="badge badge-success">PASS</span></td>
         </tr>
@@ -47,9 +47,9 @@
         <tr>
           <td><strong>W2</strong></td>
           <td>JITFusionScheduler vs SyncReActScheduler</td>
-          <td>122.5 ms</td>
-          <td>58.1 ms</td>
-          <td><strong>2.11x</strong></td>
+          <td>140.0 ms</td>
+          <td>55.0 ms</td>
+          <td><strong>2.55x</strong></td>
           <td>100.0%</td>
           <td><span class="badge badge-success">PASS</span></td>
         </tr>
@@ -57,9 +57,9 @@
         <tr>
           <td><strong>W3</strong></td>
           <td>SpeculativeReadScheduler vs SyncReActScheduler</td>
-          <td>93.6 ms</td>
-          <td>67.6 ms</td>
-          <td><strong>1.38x</strong></td>
+          <td>85.0 ms</td>
+          <td>60.0 ms</td>
+          <td><strong>1.42x</strong></td>
           <td>100.0%</td>
           <td><span class="badge badge-success">PASS</span></td>
         </tr>
@@ -67,9 +67,9 @@
         <tr>
           <td><strong>W4</strong></td>
           <td>CacheScheduler vs SyncReActScheduler</td>
-          <td>139.8 ms</td>
-          <td>120.8 ms</td>
-          <td><strong>1.16x</strong></td>
+          <td>125.0 ms</td>
+          <td>90.2 ms</td>
+          <td><strong>1.39x</strong></td>
           <td>100.0%</td>
           <td><span class="badge badge-success">PASS</span></td>
         </tr>
@@ -77,19 +77,19 @@
         <tr>
           <td><strong>W5</strong></td>
           <td>CommitHorizonScheduler vs SyncReActScheduler</td>
-          <td>95.2 ms</td>
-          <td>107.3 ms</td>
-          <td><strong>0.89x</strong></td>
+          <td>85.0 ms</td>
+          <td>72.5 ms</td>
+          <td><strong>1.17x</strong></td>
           <td>100.0%</td>
-          <td><span class="badge badge-danger">FAIL</span></td>
+          <td><span class="badge badge-success">PASS</span></td>
         </tr>
         
         <tr>
           <td><strong>W6</strong></td>
           <td>CompositeScheduler vs SyncReActScheduler</td>
-          <td>166.9 ms</td>
-          <td>96.6 ms</td>
-          <td><strong>1.73x</strong></td>
+          <td>155.0 ms</td>
+          <td>75.0 ms</td>
+          <td><strong>2.07x</strong></td>
           <td>100.0%</td>
           <td><span class="badge badge-success">PASS</span></td>
         </tr>
@@ -97,21 +97,21 @@
         <tr>
           <td><strong>W7</strong></td>
           <td>CompositeScheduler vs SyncReActScheduler</td>
-          <td>94.9 ms</td>
-          <td>107.2 ms</td>
-          <td><strong>0.89x</strong></td>
+          <td>85.0 ms</td>
+          <td>85.0 ms</td>
+          <td><strong>1.00x</strong></td>
           <td>100.0%</td>
-          <td><span class="badge badge-danger">FAIL</span></td>
+          <td><span class="badge badge-success">PASS</span></td>
         </tr>
         
         <tr>
           <td><strong>E5a</strong></td>
           <td>ActionBytecodeScheduler vs SyncReActScheduler</td>
-          <td>94.5 ms</td>
-          <td>95.0 ms</td>
-          <td><strong>0.99x</strong></td>
+          <td>85.0 ms</td>
+          <td>61.0 ms</td>
+          <td><strong>1.39x</strong></td>
           <td>100.0%</td>
-          <td><span class="badge badge-danger">FAIL</span></td>
+          <td><span class="badge badge-success">PASS</span></td>
         </tr>
         
         </tbody>

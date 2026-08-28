@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
 import numpy as np
-from typing import Any, Dict, List, Optional, Tuple
 
 from toolspeed.adapters.base import BaseToolAdapter
 from toolspeed.adapters.mock_tools import MockToolAdapter, MockToolConfig
@@ -139,13 +139,12 @@ class W3BranchingWorkload(BaseWorkload):
 
         return tools
 
-    def generate_tasks(self, count: int = 10, seed: Optional[int] = None) -> list[TaskInstance]:
+    def generate_tasks(self, count: int = 10, seed: int | None = None) -> list[TaskInstance]:
         rng = np.random.default_rng(seed)
         tasks: list[TaskInstance] = []
 
         for idx in range(count):
             tx_id = f"tx_route_{idx:04d}"
-            # Choose risk category: low (0-34), medium (35-74), high (75-100)
             category = rng.choice(["low", "medium", "high"])
             if category == "low":
                 risk = int(rng.integers(5, 34))
@@ -189,7 +188,7 @@ class W3BranchingWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: Optional[ExecutionTrace]) -> Tuple[bool, str, dict[str, Any]]:
+        def _validate(task: TaskInstance, output: Any, trace: ExecutionTrace | None) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 
@@ -204,7 +203,7 @@ class W3BranchingWorkload(BaseWorkload):
                 return False, f"Expected final status '{expected_status}', got '{actual_status}'", {}
 
             if trace is not None:
-                called_tools = [c.tool_name for c in trace.tool_calls]
+                called_tools = [c.tool_name or c.name for c in trace.tool_calls]
                 for exp_tool in task.expected_tools:
                     if exp_tool not in called_tools:
                         return False, f"Required tool '{exp_tool}' was not called on branch '{expected_branch}'", {}

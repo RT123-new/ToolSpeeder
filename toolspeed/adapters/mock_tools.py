@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import inspect
 import json
-import numpy as np
-import random
 import time
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any
+import numpy as np
 
 from toolspeed.adapters.base import BaseToolAdapter, ToolSchema
 from toolspeed.core.types import ToolCall, ToolResult, ToolSpec
@@ -27,10 +27,10 @@ class MockToolConfig:
     cold_start_ms: float = 0.0
     error_rate: float = 0.0
     cost_usd: float = 0.001
-    cache_ttl_s: Optional[float] = None
+    cache_ttl_s: float | None = None
     is_side_effect: bool = False
     requires_approval: bool = False
-    handler: Optional[Callable[[dict[str, Any]], Any]] = None
+    handler: Callable[[dict[str, Any]], Any] | None = None
 
 
 class MockToolAdapter(BaseToolAdapter):
@@ -38,11 +38,11 @@ class MockToolAdapter(BaseToolAdapter):
 
     def __init__(
         self,
-        config: Optional[MockToolConfig] = None,
-        spec: Optional[ToolSpec] = None,
-        handler: Optional[Callable[[dict[str, Any]], Any]] = None,
-        seed: Optional[int] = None,
-        base_latency_ms: Optional[float] = None,
+        config: MockToolConfig | None = None,
+        spec: ToolSpec | None = None,
+        handler: Callable[[dict[str, Any]], Any] | None = None,
+        seed: int | None = None,
+        base_latency_ms: float | None = None,
         latency_jitter_ms: float = 0.0,
         error_rate: float = 0.0,
         cold_start_ms: float = 0.0,
@@ -288,11 +288,11 @@ class MockToolAdapter(BaseToolAdapter):
 class MockToolEngine:
     """Registry and execution orchestrator for multiple mock tools."""
 
-    def __init__(self, seed: Optional[int] = None):
+    def __init__(self, seed: int | None = None):
         self._tools: dict[str, MockToolAdapter] = {}
         self._seed = seed
 
-    def register_tool(self, tool_or_config: Union[MockToolAdapter, MockToolConfig]) -> MockToolAdapter:
+    def register_tool(self, tool_or_config: MockToolAdapter | MockToolConfig) -> MockToolAdapter:
         if isinstance(tool_or_config, MockToolConfig):
             adapter = MockToolAdapter(tool_or_config, seed=self._seed)
         else:
@@ -300,20 +300,22 @@ class MockToolEngine:
         self._tools[adapter.config.name] = adapter
         return adapter
 
-    def get_tool(self, name: str) -> Optional[MockToolAdapter]:
+    def get_tool(self, name: str) -> MockToolAdapter | None:
         return self._tools.get(name)
 
     def list_schemas(self) -> list[ToolSchema]:
         return [tool.get_schema() for tool in self._tools.values()]
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        tool = self._tools.get(call.tool_name)
+        tool_name = call.tool_name or call.name
+        tool = self._tools.get(tool_name)
         if tool is None:
             return ToolResult(
                 call_id=call.call_id,
-                tool_name=call.tool_name,
+                tool_name=tool_name,
+                name=tool_name,
                 result=None,
-                error=f"Tool '{call.tool_name}' not found in MockToolEngine.",
+                error=f"Tool '{tool_name}' not found in MockToolEngine.",
                 is_error=True,
                 execution_time_ns=0,
                 cost_usd=0.0,
@@ -338,13 +340,14 @@ class MockToolEngine:
             tool.clear_cache()
 
 
-def create_standard_mock_registry() -> Dict[str, MockToolAdapter]:
+def create_standard_mock_registry() -> dict[str, MockToolAdapter]:
     """Helper to build a suite of standard mock tools for testing."""
     tools = [
         MockToolAdapter(
             spec=ToolSpec(
                 name="database_query",
                 description="Query relational database records",
+                parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
                 required_args=["query"],
                 commit_horizon_args=["query"],
                 is_read_only=True,
@@ -356,6 +359,7 @@ def create_standard_mock_registry() -> Dict[str, MockToolAdapter]:
             spec=ToolSpec(
                 name="web_search",
                 description="Search the web for query terms",
+                parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
                 required_args=["query"],
                 commit_horizon_args=["query"],
                 is_read_only=True,
@@ -367,6 +371,7 @@ def create_standard_mock_registry() -> Dict[str, MockToolAdapter]:
             spec=ToolSpec(
                 name="fetch_user",
                 description="Fetch user profile by user_id",
+                parameters={"type": "object", "properties": {"user_id": {"type": "string"}}, "required": ["user_id"]},
                 required_args=["user_id"],
                 commit_horizon_args=["user_id"],
                 is_read_only=True,
@@ -378,6 +383,7 @@ def create_standard_mock_registry() -> Dict[str, MockToolAdapter]:
             spec=ToolSpec(
                 name="fetch_orders",
                 description="Fetch orders for a user_id",
+                parameters={"type": "object", "properties": {"user_id": {"type": "string"}}, "required": ["user_id"]},
                 required_args=["user_id"],
                 commit_horizon_args=["user_id"],
                 is_read_only=True,
@@ -389,6 +395,7 @@ def create_standard_mock_registry() -> Dict[str, MockToolAdapter]:
             spec=ToolSpec(
                 name="execute_payment",
                 description="Execute payment transaction (side-effecting)",
+                parameters={"type": "object", "properties": {"order_id": {"type": "string"}, "amount": {"type": "number"}}, "required": ["order_id", "amount"]},
                 required_args=["order_id", "amount"],
                 commit_horizon_args=["order_id", "amount"],
                 is_read_only=False,

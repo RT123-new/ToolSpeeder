@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
 import numpy as np
-from typing import Any, Dict, List, Optional, Tuple
 
 from toolspeed.adapters.base import BaseToolAdapter
 from toolspeed.adapters.mock_tools import MockToolAdapter, MockToolConfig
@@ -99,12 +99,10 @@ class W4LocalityWorkload(BaseWorkload):
         )
         return [user_lookup, pricing_calc]
 
-    def generate_tasks(self, count: int = 10, seed: Optional[int] = None) -> list[TaskInstance]:
+    def generate_tasks(self, count: int = 10, seed: int | None = None) -> list[TaskInstance]:
         rng = np.random.default_rng(seed)
         tasks: list[TaskInstance] = []
 
-        # Generate Zipfian / skewed distribution over user IDs
-        # First 20% of users get 80% of queries
         hot_count = max(1, int(self.num_entities * 0.2))
         hot_users = [f"usr_{i:03d}" for i in range(hot_count)]
         cold_users = [f"usr_{i:03d}" for i in range(hot_count, self.num_entities)]
@@ -135,7 +133,7 @@ class W4LocalityWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: Optional[ExecutionTrace]) -> Tuple[bool, str, dict[str, Any]]:
+        def _validate(task: TaskInstance, output: Any, trace: ExecutionTrace | None) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 

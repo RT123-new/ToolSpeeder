@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Set, Tuple
 import asyncio
+from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
 from toolspeed.core.types import EventType, ToolCall, ToolResult
@@ -26,7 +26,7 @@ class OracleDAGScheduler(BaseScheduler):
         oracle_plan = ctx.task.metadata.get("oracle_plan") or ctx.task.context.get("oracle_plan")
 
         if oracle_plan and isinstance(oracle_plan, list):
-            accumulated_outputs: Dict[str, Any] = {}
+            accumulated_outputs: dict[str, Any] = {}
 
             for wave_idx, wave_calls in enumerate(oracle_plan):
                 ctx.profiler.record_event(
@@ -34,7 +34,7 @@ class OracleDAGScheduler(BaseScheduler):
                     details={"wave": wave_idx, "call_count": len(wave_calls)},
                 )
 
-                resolved_calls: List[ToolCall] = []
+                resolved_calls: list[ToolCall] = []
                 for item in wave_calls:
                     if isinstance(item, ToolCall):
                         call = item
@@ -74,9 +74,6 @@ class OracleDAGScheduler(BaseScheduler):
             if callable(answer_fn):
                 return answer_fn(accumulated_outputs)
 
-            if ctx.task.expected_output is not None:
-                return ctx.task.expected_output
-
             return accumulated_outputs
 
         # Fallback: initial 1-shot model plan
@@ -103,4 +100,4 @@ class OracleDAGScheduler(BaseScheduler):
         ctx.profiler.end_span("oracle_synthesis", EventType.MODEL_END)
         ctx.record_model_decision(final_decision)
 
-        return final_decision.final_answer or ctx.task.expected_output
+        return final_decision.final_answer

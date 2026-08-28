@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional
-import asyncio
+from collections.abc import Callable
 import inspect
+from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
-from toolspeed.core.types import EventType, ToolCall, ToolResult
+from toolspeed.core.types import ToolCall
 from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
 
 
@@ -19,7 +19,7 @@ class HandwrittenWorkflowScheduler(BaseScheduler):
 
     def __init__(
         self,
-        custom_runner: Optional[Callable[[ExecutionContext, ToolRegistry], Any]] = None,
+        custom_runner: Callable[[ExecutionContext, ToolRegistry], Any] | None = None,
     ) -> None:
         super().__init__()
         self.custom_runner = custom_runner
@@ -44,17 +44,20 @@ class HandwrittenWorkflowScheduler(BaseScheduler):
         # Standard compiled workflow
         user_id = ctx.task.context.get("user_id") or "42"
         call_user = ToolCall(name="fetch_user", arguments={"user_id": user_id})
-        call_orders = ToolCall(name="fetch_orders", arguments={"user_id": user_id})
-        ctx.tool_calls.extend([call_user, call_orders])
+        ctx.tool_calls.append(call_user)
 
-        user_res, orders_res = await asyncio.gather(
-            ctx.executor.execute(call_user),
-            ctx.executor.execute(call_orders),
-        )
+        user_res = await ctx.executor.execute(call_user)
         ctx.record_tool_result(user_res)
-        ctx.record_tool_result(orders_res)
 
         user_data = user_res.output if user_res.output is not None else user_res.result or {}
+        actual_uid = user_data.get("user_id", user_id) if isinstance(user_data, dict) else user_id
+
+        call_orders = ToolCall(name="fetch_orders", arguments={"user_id": actual_uid})
+        ctx.tool_calls.append(call_orders)
+
+        orders_res = await ctx.executor.execute(call_orders)
+        ctx.record_tool_result(orders_res)
+
         orders_data = orders_res.output if orders_res.output is not None else orders_res.result or {}
 
         final_answer = {
@@ -62,8 +65,5 @@ class HandwrittenWorkflowScheduler(BaseScheduler):
             "orders": orders_data,
             "status": "compiled_complete",
         }
-
-        if ctx.task.expected_output is not None and isinstance(ctx.task.expected_output, dict):
-            return ctx.task.expected_output
 
         return final_answer

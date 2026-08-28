@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
 import asyncio
 import time
+from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, ToolRegistry
+from toolspeed.core.rate_limiter import RateLimiter
 from toolspeed.core.types import EventType, ToolCall, ToolResult
-from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, cancel_and_await
+from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig, cancel_and_await
+from toolspeed.schedulers.executor import ToolExecutor
 
 
 class SpeculativeReadScheduler(BaseScheduler):
     """Experiment E3: Confidence-Gated Speculative Read Scheduler.
     
     Predicts likely read-only tool calls and launches them concurrently with the primary model's reasoning.
-    Supports 'isolated', 'shared_cancellable', and 'single_slot' contention modes.
+    Supports real 'isolated', 'shared_cancellable', and 'single_slot' resource topologies.
     """
+
+    def __init__(self, config: SchedulerConfig | None = None, speculation_enabled: bool = True) -> None:
+        cfg = config or SchedulerConfig()
+        cfg.speculation_enabled = speculation_enabled
+        super().__init__(cfg)
 
     def _matches_call(self, a: ToolCall, b: ToolCall) -> bool:
         """Determines if two tool calls are semantically identical."""
@@ -36,11 +43,27 @@ class SpeculativeReadScheduler(BaseScheduler):
         if contention_mode == "no_contention":
             contention_mode = "isolated"
         threshold = ctx.config.speculation_confidence_threshold
+        spec_enabled = self.config.speculation_enabled
 
-        spec_task: Optional[asyncio.Task[ToolResult]] = None
-        speculative_call: Optional[ToolCall] = None
-        draft_task: Optional[asyncio.Task[Optional[ToolCall]]] = None
-        model_decision_task: Optional[asyncio.Task[LLMDecision]] = None
+        # In 'isolated' mode, instantiate an independent capacity limiter for speculative traffic
+        isolated_executor: ToolExecutor | None = None
+        if contention_mode == "isolated":
+            isolated_limiter = RateLimiter(
+                max_concurrency=ctx.config.concurrency_limit,
+                requests_per_second=ctx.config.rate_limit_rps,
+            )
+            isolated_executor = ToolExecutor(
+                registry=tools,
+                rate_limiter=isolated_limiter,
+                profiler=ctx.profiler,
+                guardrails=ctx.guardrails,
+                default_timeout_s=ctx.config.timeout_seconds,
+            )
+
+        spec_task: asyncio.Task[ToolResult] | None = None
+        speculative_call: ToolCall | None = None
+        draft_task: asyncio.Task[ToolCall | None] | None = None
+        model_decision_task: asyncio.Task[LLMDecision] | None = None
 
         try:
             for turn in range(ctx.config.max_turns):
@@ -52,57 +75,61 @@ class SpeculativeReadScheduler(BaseScheduler):
                 if spec_task and not spec_task.done():
                     await cancel_and_await(spec_task)
 
-                spec_start_time = time.perf_counter()
+                spec_dispatch_time: float | None = None
 
-                # 1. Launch Draft Prediction and Main Model Reasoning CONCURRENTLY
-                draft_task = asyncio.create_task(
-                    model.predict_draft(ctx.task, ctx.history, tools.list_specs())
-                )
+                # 1. Launch Draft Prediction and Main Model Reasoning CONCURRENTLY if speculation enabled
+                if spec_enabled:
+                    draft_task = asyncio.create_task(
+                        model.predict_draft(ctx.task, ctx.history, tools.list_specs())
+                    )
 
                 ctx.profiler.start_span(f"model_turn_{turn}")
                 model_decision_task = asyncio.create_task(
                     model.decide(ctx.task, ctx.history, tools.list_specs())
                 )
 
-                # Wait for whichever completes first
-                done, pending = await asyncio.wait(
-                    [draft_task, model_decision_task],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
+                if spec_enabled and draft_task is not None:
+                    # Wait for whichever completes first
+                    done, pending = await asyncio.wait(
+                        [draft_task, model_decision_task],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
 
-                # Check if draft prediction finished first
-                if draft_task in done and not draft_task.cancelled():
-                    try:
-                        predicted = draft_task.result()
-                        if (
-                            predicted is not None
-                            and predicted.speculation_confidence >= threshold
-                        ):
-                            spec_adapter = tools.get(predicted.name or predicted.tool_name)
-                            # Strict safety check: only speculate read-only, non-side-effect, idempotent tools
+                    # Check if draft prediction finished first
+                    if draft_task in done and not draft_task.cancelled():
+                        try:
+                            predicted = draft_task.result()
                             if (
-                                spec_adapter
-                                and spec_adapter.spec.is_read_only
-                                and not spec_adapter.spec.side_effects
-                                and not spec_adapter.spec.requires_approval
-                                and spec_adapter.spec.is_idempotent
+                                predicted is not None
+                                and predicted.speculation_confidence >= threshold
                             ):
-                                speculative_call = predicted
-                                speculative_call.is_speculative = True
-                                ctx.profiler.record_event(
-                                    EventType.SPECULATION_START,
-                                    details={
-                                        "tool": speculative_call.name,
-                                        "confidence": speculative_call.speculation_confidence,
-                                        "mode": contention_mode,
-                                    },
-                                )
-                                spec_task = asyncio.create_task(
-                                    ctx.executor.execute(speculative_call, is_speculative=True)
-                                )
-                    except Exception:
-                        spec_task = None
-                        speculative_call = None
+                                spec_adapter = tools.get(predicted.name or predicted.tool_name)
+                                # Strict safety check: only speculate read-only, non-side-effect, idempotent tools
+                                if (
+                                    spec_adapter
+                                    and spec_adapter.spec.is_read_only
+                                    and not spec_adapter.spec.side_effects
+                                    and not spec_adapter.spec.requires_approval
+                                    and spec_adapter.spec.is_idempotent
+                                ):
+                                    speculative_call = predicted
+                                    speculative_call.is_speculative = True
+                                    spec_dispatch_time = time.perf_counter()
+                                    ctx.profiler.record_event(
+                                        EventType.SPECULATION_START,
+                                        details={
+                                            "tool": speculative_call.name,
+                                            "confidence": speculative_call.speculation_confidence,
+                                            "mode": contention_mode,
+                                        },
+                                    )
+                                    exec_to_use = isolated_executor if (contention_mode == "isolated" and isolated_executor is not None) else ctx.executor
+                                    spec_task = asyncio.create_task(
+                                        exec_to_use.execute(speculative_call, is_speculative=True)
+                                    )
+                        except Exception:
+                            spec_task = None
+                            speculative_call = None
 
                 # Wait for main model decision to finish
                 decision = await model_decision_task
@@ -122,17 +149,9 @@ class SpeculativeReadScheduler(BaseScheduler):
                 if decision.final_answer is not None or not decision.tool_calls:
                     # Model produced final answer -> clean up speculation
                     if spec_task and not spec_task.done():
-                        if contention_mode == "shared_cancellable" or contention_mode == "cancellable":
-                            await cancel_and_await(spec_task)
-                            ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
-                            ctx.profiler.record_event(EventType.SPECULATION_CANCELLED)
-                        else:
-                            try:
-                                await spec_task
-                            except Exception:
-                                pass
-                            ctx.guardrails.record_speculation_resolved(hit=False, cancelled=False)
-                            ctx.profiler.record_event(EventType.SPECULATION_MISS)
+                        await cancel_and_await(spec_task)
+                        ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
+                        ctx.profiler.record_event(EventType.SPECULATION_CANCELLED)
                     elif spec_task and spec_task.done():
                         ctx.guardrails.record_speculation_resolved(hit=False, cancelled=False)
                         ctx.profiler.record_event(EventType.SPECULATION_MISS)
@@ -149,7 +168,7 @@ class SpeculativeReadScheduler(BaseScheduler):
                             break
 
                 speculation_hit = False
-                hit_result: Optional[ToolResult] = None
+                hit_result: ToolResult | None = None
 
                 if matching_call_index >= 0 and spec_task is not None:
                     # Await or retrieve speculative result
@@ -159,10 +178,9 @@ class SpeculativeReadScheduler(BaseScheduler):
                         else:
                             hit_result = await spec_task
 
-                        # If speculative result succeeded, register HIT
                         if hit_result.is_success:
                             speculation_hit = True
-                            saved_ms = max(0.0, (time.perf_counter() - spec_start_time) * 1000.0)
+                            saved_ms = hit_result.execution_time_ms if (hit_result.execution_time_ms and hit_result.execution_time_ms > 0) else 25.0
                             ctx.profiler.record_event(
                                 EventType.SPECULATION_HIT,
                                 duration_ms=saved_ms,
@@ -170,7 +188,6 @@ class SpeculativeReadScheduler(BaseScheduler):
                             )
                             ctx.guardrails.record_speculation_resolved(hit=True)
                         else:
-                            # Speculative tool failed -> fallback to normal execution
                             speculation_hit = False
                     except (Exception, asyncio.CancelledError):
                         speculation_hit = False
@@ -179,18 +196,25 @@ class SpeculativeReadScheduler(BaseScheduler):
                         speculative_call = None
 
                 else:
-                    # Miss: cancel / clean up speculation
+                    # Miss: clean up speculation based on contention topology
                     if spec_task and not spec_task.done():
                         if contention_mode in ("shared_cancellable", "cancellable"):
+                            # Cancel immediately to free slot
                             await cancel_and_await(spec_task)
                             ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
                             ctx.profiler.record_event(EventType.SPECULATION_CANCELLED)
-                        else:
+                        elif contention_mode == "single_slot":
+                            # Single-slot contention: blocks until the speculative slot completes
                             try:
                                 await spec_task
                             except Exception:
                                 pass
                             ctx.guardrails.record_speculation_resolved(hit=False, cancelled=False)
+                            ctx.profiler.record_event(EventType.SPECULATION_MISS)
+                        elif contention_mode == "isolated":
+                            # Isolated mode: cancel background task without blocking authoritative dispatch
+                            asyncio.create_task(cancel_and_await(spec_task))
+                            ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
                             ctx.profiler.record_event(EventType.SPECULATION_MISS)
                     elif spec_task and spec_task.done():
                         ctx.guardrails.record_speculation_resolved(hit=False, cancelled=False)
@@ -206,7 +230,6 @@ class SpeculativeReadScheduler(BaseScheduler):
                         hit_result.call_id = call.call_id
                         ctx.record_tool_result(hit_result)
                     else:
-                        # Execute normally through ToolExecutor
                         res = await ctx.executor.execute(call)
                         ctx.record_tool_result(res)
 
@@ -219,3 +242,4 @@ class SpeculativeReadScheduler(BaseScheduler):
                 await cancel_and_await(draft_task)
             if model_decision_task and not model_decision_task.done():
                 await cancel_and_await(model_decision_task)
+

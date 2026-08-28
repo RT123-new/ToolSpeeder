@@ -26,13 +26,15 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.22.0",
+    "typing-extensions>=4.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.20.0",
-    "black>=23.0.0",
+    "coverage>=7.0.0",
+    "build>=1.0.0",
     "mypy>=1.0.0",
     "ruff>=0.1.0",
 ]
@@ -47,3 +49,14 @@ include = ["toolspeed*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = false

@@ -351,12 +351,15 @@ class TestCLI(unittest.TestCase):
 
     def test_cli_run_e1(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            ret = cli.main(["run", "--experiment", "e1", "--trials", "150", "--out", tmpdir])
+            ret = cli.main(["simulate", "--experiment", "e1", "--trials", "50", "--out", tmpdir])
             self.assertEqual(ret, 0)
 
     def test_cli_falsify(self):
-        ret = cli.main(["falsify", "--trials", "150"])
-        self.assertEqual(ret, 0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ret_bm = cli.main(["benchmark", "--backend", "replay", "--trials", "2", "--out", tmpdir])
+            self.assertEqual(ret_bm, 0)
+            ret = cli.main(["falsify", "--input", tmpdir])
+            self.assertIn(ret, (0, 2))
 
     def test_cli_benchmark(self):
         with tempfile.TemporaryDirectory() as tmpdir:

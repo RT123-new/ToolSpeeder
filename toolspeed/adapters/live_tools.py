@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 from pathlib import Path
@@ -12,22 +12,22 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
-import urllib.request
+from typing import Any
 import urllib.error
+import urllib.request
 
 from toolspeed.adapters.base import BaseToolAdapter, ToolSchema
 from toolspeed.core.types import ToolCall, ToolResult
 
 
 class AsyncSQLiteTool(BaseToolAdapter):
-    """Real local asynchronous SQLite database query executor."""
+    """Real local asynchronous SQLite database query executor using parameterized queries in threadpool."""
 
     def __init__(self, db_path: str = ":memory:", name: str = "sqlite_executor"):
         self._db_path = db_path
         self._name = name
         self._lock = asyncio.Lock()
-        self._conn: Optional[sqlite3.Connection] = None
+        self._conn: sqlite3.Connection | None = None
         if db_path == ":memory:":
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
@@ -80,6 +80,7 @@ class AsyncSQLiteTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error="Missing required 'query' argument.",
                 is_error=True,
@@ -92,6 +93,7 @@ class AsyncSQLiteTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=result,
                 error=None,
                 is_error=False,
@@ -102,6 +104,7 @@ class AsyncSQLiteTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error=str(ex),
                 is_error=True,
@@ -121,7 +124,7 @@ class SafeSubprocessSandbox(BaseToolAdapter):
     def __init__(
         self,
         name: str = "subprocess_sandbox",
-        sandbox_dir: Optional[str] = None,
+        sandbox_dir: str | None = None,
         default_timeout_s: float = 10.0,
         max_output_bytes: int = 100_000,
     ):
@@ -185,6 +188,7 @@ class SafeSubprocessSandbox(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error="Missing required 'command' argument.",
                 is_error=True,
@@ -198,6 +202,7 @@ class SafeSubprocessSandbox(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=res_dict,
                 error=error_msg,
                 is_error=is_error,
@@ -208,6 +213,7 @@ class SafeSubprocessSandbox(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error=f"Command timed out after {timeout_s}s",
                 is_error=True,
@@ -218,6 +224,7 @@ class SafeSubprocessSandbox(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error=str(ex),
                 is_error=True,
@@ -231,7 +238,7 @@ class AsyncLocalFileIOTool(BaseToolAdapter):
 
     def __init__(
         self,
-        base_dir: Optional[str] = None,
+        base_dir: str | None = None,
         name: str = "file_io",
     ):
         self._name = name
@@ -265,7 +272,7 @@ class AsyncLocalFileIOTool(BaseToolAdapter):
             cost_usd=0.00005,
         )
 
-    def _sync_op(self, action: str, path_str: str, content: Optional[str]) -> Any:
+    def _sync_op(self, action: str, path_str: str, content: str | None) -> Any:
         target = self._resolve_safe(path_str)
         if action == "read":
             if not target.exists() or not target.is_file():
@@ -317,6 +324,7 @@ class AsyncLocalFileIOTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=res,
                 error=None,
                 is_error=False,
@@ -327,6 +335,7 @@ class AsyncLocalFileIOTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error=str(ex),
                 is_error=True,
@@ -384,9 +393,9 @@ class MockHTTPServer:
     def __init__(self, host: str = "127.0.0.1", port: int = 0):
         self.host = host
         self.port = port
-        self.routes: dict[Tuple[str, str], Tuple[int, Any, float]] = {}  # (method, path) -> (status, response_body, delay_s)
-        self._server: Optional[HTTPServer] = None
-        self._thread: Optional[threading.Thread] = None
+        self.routes: dict[tuple[str, str], tuple[int, Any, float]] = {}  # (method, path) -> (status, response_body, delay_s)
+        self._server: HTTPServer | None = None
+        self._thread: threading.Thread | None = None
 
     def add_route(self, method: str, path: str, response: Any, status_code: int = 200, delay_s: float = 0.0) -> None:
         self.routes[(method.upper(), path)] = (status_code, response, delay_s)
@@ -438,7 +447,7 @@ class AsyncHTTPClientTool(BaseToolAdapter):
             cost_usd=0.0002,
         )
 
-    def _sync_request(self, url: str, method: str, body: Optional[dict[str, Any]], headers: dict[str, str]) -> dict[str, Any]:
+    def _sync_request(self, url: str, method: str, body: dict[str, Any] | None, headers: dict[str, str]) -> dict[str, Any]:
         target_url = url if url.startswith("http") else f"{self._base_url}/{url.lstrip('/')}"
         data_bytes = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(target_url, data=data_bytes, method=method)
@@ -482,6 +491,7 @@ class AsyncHTTPClientTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error="Missing required 'url' argument.",
                 is_error=True,
@@ -496,6 +506,7 @@ class AsyncHTTPClientTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=res_dict["body"],
                 error=error_msg,
                 is_error=is_error,
@@ -507,6 +518,7 @@ class AsyncHTTPClientTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error=str(ex),
                 is_error=True,

@@ -2,23 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set, Tuple
 import asyncio
 import copy
+import hashlib
+import json
 import time
+from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, StreamingChunk, ToolRegistry
-from toolspeed.core.types import EventType, ToolCall, ToolResult, ToolSpec
+from toolspeed.core.types import EventType, ToolCall, ToolResult
 from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig, cancel_and_await
 from toolspeed.schedulers.e1_dag_scheduler import DAGNode, ToolDAG
-from toolspeed.schedulers.e2_jit_fusion import DeclarativeWorkflow, FusedKernel, JITFusionScheduler
+from toolspeed.schedulers.e2_jit_fusion import JITFusionScheduler
 from toolspeed.schedulers.e4_commit_horizon import IncrementalCommitParser
 from toolspeed.schedulers.e5_action_bytecode import ActionBytecodeCodec
 from toolspeed.schedulers.phase2_cache import ToolResultCache
 
 
 class CompositeScheduler(BaseScheduler):
-    """Unified Composite Optimizer combining all latency reduction mechanisms:
+    """Unified Composite Optimizer combining all verified latency reduction mechanisms:
     
     1. Predictive Prewarming for cold-start tools / sandboxes
     2. Exact & Semantic Result Caching with Freshness Contracts
@@ -31,8 +33,8 @@ class CompositeScheduler(BaseScheduler):
 
     def __init__(
         self,
-        config: Optional[SchedulerConfig] = None,
-        shared_cache: Optional[ToolResultCache] = None,
+        config: SchedulerConfig | None = None,
+        shared_cache: ToolResultCache | None = None,
     ) -> None:
         cfg = config or SchedulerConfig(
             cache_enabled=True,
@@ -42,6 +44,7 @@ class CompositeScheduler(BaseScheduler):
             commit_horizon_enabled=True,
             jit_fusion_enabled=True,
             action_bytecode_enabled=True,
+            prewarmed=True,
         )
         super().__init__(cfg)
         self.cache = shared_cache or ToolResultCache(default_ttl_seconds=cfg.cache_ttl_seconds)
@@ -50,10 +53,16 @@ class CompositeScheduler(BaseScheduler):
 
     def prewarm_tools(self, tools: ToolRegistry) -> None:
         """Prewarms all cold-start sandbox adapters."""
+        if not self.config.prewarmed:
+            return
         for spec in tools.list_specs():
             adapter = tools.get(spec.name)
             if adapter and hasattr(adapter, "prewarm"):
                 adapter.prewarm()
+
+    @staticmethod
+    def _canonical_key(tool_name: str, arguments: dict[str, Any]) -> str:
+        return f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
 
     async def _execute_internal(
         self,
@@ -66,7 +75,10 @@ class CompositeScheduler(BaseScheduler):
 
         # 2. Register tools with Bytecode Codec
         for spec in tools.list_specs():
-            self.bytecode_codec.register_tool(spec.name, spec.required_args or list(spec.parameters.get("properties", {}).keys()))
+            self.bytecode_codec.register_tool(
+                spec.name,
+                spec.required_args or list(spec.parameters.get("properties", {}).keys()),
+            )
 
         # 3. JIT Fusion Check
         if self.config.jit_fusion_enabled:
@@ -77,27 +89,26 @@ class CompositeScheduler(BaseScheduler):
                 if ctx.task.validate(res):
                     return res
 
-        spec_task: Optional[asyncio.Task[ToolResult]] = None
-        draft_task: Optional[asyncio.Task[Optional[ToolCall]]] = None
-        in_flight_commit: Dict[str, Tuple[asyncio.Task[ToolResult], ToolCall, Dict[str, Any]]] = {}
-        active_dag_tasks: Set[asyncio.Task[ToolResult]] = set()
+        spec_task: asyncio.Task[ToolResult] | None = None
+        draft_task: asyncio.Task[ToolCall | None] | None = None
+        in_flight_commit: dict[str, tuple[asyncio.Task[ToolResult], ToolCall, dict[str, Any]]] = {}
+        active_dag_tasks: dict[asyncio.Task[ToolResult], DAGNode] = {}
 
         try:
             for turn in range(ctx.config.max_turns):
                 ctx.step_count = turn + 1
 
-                # Speculative Prediction concurrently with Streaming Generation
-                spec_call: Optional[ToolCall] = None
+                # 4. Speculative Prediction concurrently with Streaming Generation
+                spec_call: ToolCall | None = None
                 if self.config.speculation_enabled:
                     draft_task = asyncio.create_task(
                         model.predict_draft(ctx.task, ctx.history, tools.list_specs())
                     )
 
                 ctx.profiler.start_span(f"composite_turn_{turn}")
-                in_flight_commit.clear()
-                collected_chunks: List[StreamingChunk] = []
-                final_calls: List[ToolCall] = []
-                reasoning_parts: List[str] = []
+                collected_chunks: list[StreamingChunk] = []
+                final_calls: list[ToolCall] = []
+                reasoning_parts: list[str] = []
 
                 async for chunk in model.stream_decision(ctx.task, ctx.history, tools.list_specs()):
                     collected_chunks.append(chunk)
@@ -133,16 +144,26 @@ class CompositeScheduler(BaseScheduler):
                     # Early commit horizon dispatch
                     if self.config.commit_horizon_enabled:
                         for early_call in chunk.commit_horizon_ready:
-                            if early_call.call_id not in in_flight_commit:
+                            cid = early_call.call_id
+                            if cid not in in_flight_commit:
                                 adapter = tools.get(early_call.name or early_call.tool_name)
                                 if adapter:
-                                    committed = IncrementalCommitParser.try_commit_call(adapter.spec, early_call, chunk.raw_json_fragment)
+                                    committed = IncrementalCommitParser.try_commit_call(
+                                        adapter.spec,
+                                        early_call,
+                                        chunk.raw_json_fragment,
+                                    )
                                     if committed is not None:
                                         early_call.committed_early = True
                                         snapshot = copy.deepcopy(early_call.arguments)
-                                        ctx.profiler.record_event(EventType.COMMIT_HORIZON_REACHED, details={"tool": early_call.name})
-                                        t = asyncio.create_task(ctx.executor.execute(early_call, is_early_dispatched=True))
-                                        in_flight_commit[early_call.call_id] = (t, early_call, snapshot)
+                                        ctx.profiler.record_event(
+                                            EventType.COMMIT_HORIZON_REACHED,
+                                            details={"tool": early_call.name, "fingerprint": committed.semantic_fingerprint},
+                                        )
+                                        t = asyncio.create_task(
+                                            ctx.executor.execute(early_call, is_early_dispatched=True)
+                                        )
+                                        in_flight_commit[cid] = (t, early_call, snapshot)
 
                     if chunk.is_final and chunk.parsed_tool_calls:
                         final_calls = chunk.parsed_tool_calls
@@ -159,8 +180,8 @@ class CompositeScheduler(BaseScheduler):
 
                 decision = LLMDecision(
                     reasoning="".join(reasoning_parts),
-                    tool_calls=final_calls or [c for _, c, _ in in_flight_commit.values()],
-                    final_answer=final_ans if not (final_calls or in_flight_commit) else None,
+                    tool_calls=final_calls,
+                    final_answer=final_ans if not final_calls else None,
                     output_tokens=len(collected_chunks),
                 )
                 ctx.record_model_decision(decision)
@@ -171,6 +192,7 @@ class CompositeScheduler(BaseScheduler):
                         ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
                     for t, _, _ in in_flight_commit.values():
                         await cancel_and_await(t)
+                    in_flight_commit.clear()
                     return decision.final_answer or "Composite execution complete."
 
                 # Action Bytecode tracking
@@ -191,7 +213,7 @@ class CompositeScheduler(BaseScheduler):
                             break
 
                 spec_hit = False
-                spec_hit_res: Optional[ToolResult] = None
+                spec_hit_res: ToolResult | None = None
                 if matching_spec_idx >= 0 and spec_task is not None:
                     try:
                         if spec_task.done():
@@ -213,18 +235,47 @@ class CompositeScheduler(BaseScheduler):
                         ctx.guardrails.record_speculation_resolved(hit=False, cancelled=False)
                     spec_task = None
 
-                # Build DAG for turn execution
+                # Build DAG for turn execution with single dispatch ownership
                 dag = ToolDAG()
                 dag.register_calls(decision.tool_calls)
 
+                # Detect cycles
+                cycle = dag.detect_cycles()
+                if cycle:
+                    ctx.profiler.record_event(
+                        EventType.GUARDRAIL_VIOLATION,
+                        details={"error": f"Cycle detected in composite scheduler: {cycle}"},
+                    )
+                    for n_id in cycle:
+                        if n_id in dag.nodes:
+                            dag.nodes[n_id].status = "failed"
+                            res_err = ToolResult(
+                                call_id=n_id,
+                                name=dag.nodes[n_id].call.name,
+                                tool_name=dag.nodes[n_id].call.name,
+                                error=f"Cycle: {' -> '.join(cycle)}",
+                                is_error=True,
+                            )
+                            dag.nodes[n_id].result = res_err
+                            ctx.record_tool_result(res_err)
+
                 # Attach in-flight commit horizon tasks or speculative hit
                 active_dag_tasks.clear()
-                for c in decision.tool_calls:
+                for idx, c in enumerate(decision.tool_calls):
                     ctx.tool_calls.append(c)
                     node = dag.nodes.get(c.call_id)
-                    if not node:
+                    if not node or node.status == "failed":
                         continue
 
+                    # Speculative hit reuse
+                    if idx == matching_spec_idx and spec_hit and spec_hit_res is not None:
+                        node.status = "completed"
+                        spec_hit_res.call_id = c.call_id
+                        node.result = spec_hit_res
+                        ctx.record_tool_result(spec_hit_res)
+                        continue
+
+                    # Early commit horizon matching
                     if c.call_id in in_flight_commit:
                         task, early_call, snapshot = in_flight_commit.pop(c.call_id)
                         if c.arguments != snapshot or (c.name or c.tool_name) != (early_call.name or early_call.tool_name):
@@ -235,32 +286,47 @@ class CompositeScheduler(BaseScheduler):
                             )
                         else:
                             node.status = "running"
-                            async def _wrap_early(t=task, n=node):
+
+                            async def _wrap_early(t: asyncio.Task[ToolResult] = task, n: DAGNode = node) -> ToolResult:
                                 try:
                                     res = await t
-                                except Exception as ex:
+                                except Exception:
                                     res = await ctx.executor.execute(n.call)
                                 n.result = res
                                 n.status = "completed" if res.is_success else "failed"
                                 ctx.record_tool_result(res)
                                 return res
-                            active_dag_tasks.add(asyncio.create_task(_wrap_early()))
+
+                            active_dag_tasks[asyncio.create_task(_wrap_early())] = node
+
+                for t, _, _ in in_flight_commit.values():
+                    await cancel_and_await(t)
+                in_flight_commit.clear()
 
                 # Dynamic DAG execution
                 while not dag.is_complete():
                     ready_nodes = dag.get_ready_nodes()
 
-                    # Record tool results for any newly failed nodes whose parent failed
                     for node in dag.nodes.values():
                         if node.status == "failed" and node.result is None:
-                            res_f = ToolResult(call_id=node.node_id, name=node.call.name, error=node.error or "Parent failed", is_error=True)
+                            res_f = ToolResult(
+                                call_id=node.node_id,
+                                name=node.call.name,
+                                error=node.error or "Parent failed",
+                                is_error=True,
+                            )
                             node.result = res_f
                             ctx.record_tool_result(res_f)
 
                     for node in ready_nodes:
                         resolved, err = dag.resolve_node_arguments(node)
                         if err:
-                            res = ToolResult(call_id=node.call.call_id, name=node.call.name, error=err, is_error=True)
+                            res = ToolResult(
+                                call_id=node.call.call_id,
+                                name=node.call.name,
+                                error=err,
+                                is_error=True,
+                            )
                             node.result = res
                             node.status = "failed"
                             ctx.record_tool_result(res)
@@ -269,14 +335,14 @@ class CompositeScheduler(BaseScheduler):
                         node.call.arguments = resolved or {}
                         node.status = "running"
 
-                        async def _exec_node(n=node):
+                        async def _exec_node(n: DAGNode = node) -> ToolResult:
                             res = await ctx.executor.execute(n.call)
                             n.result = res
                             n.status = "completed" if res.is_success else "failed"
                             ctx.record_tool_result(res)
                             return res
 
-                        active_dag_tasks.add(asyncio.create_task(_exec_node()))
+                        active_dag_tasks[asyncio.create_task(_exec_node())] = node
 
                     if not active_dag_tasks:
                         for n in dag.nodes.values():
@@ -284,8 +350,24 @@ class CompositeScheduler(BaseScheduler):
                                 n.status = "failed"
                         break
 
-                    done, pending = await asyncio.wait(active_dag_tasks, return_when=asyncio.FIRST_COMPLETED)
-                    active_dag_tasks = pending
+                    done, pending = await asyncio.wait(
+                        active_dag_tasks.keys(),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for t in done:
+                        node_done = active_dag_tasks.pop(t)
+                        if not t.cancelled():
+                            exc = t.exception()
+                            if exc is not None and node_done.result is None:
+                                res_exc = ToolResult(
+                                    call_id=node_done.node_id,
+                                    name=node_done.call.name,
+                                    error=f"Exception: {exc}",
+                                    is_error=True,
+                                )
+                                node_done.result = res_exc
+                                node_done.status = "failed"
+                                ctx.record_tool_result(res_exc)
 
             return "Max turns reached without final answer."
 
@@ -296,6 +378,7 @@ class CompositeScheduler(BaseScheduler):
                 await cancel_and_await(draft_task)
             for t, _, _ in in_flight_commit.values():
                 await cancel_and_await(t)
-            for t in list(active_dag_tasks):
+            in_flight_commit.clear()
+            for t in list(active_dag_tasks.keys()):
                 await cancel_and_await(t)
             active_dag_tasks.clear()

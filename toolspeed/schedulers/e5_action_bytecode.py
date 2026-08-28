@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set, Tuple
 import hashlib
 import json
 import struct
 import time
+from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
-from toolspeed.core.types import EventType, ToolCall, ToolResult, ToolSpec
-from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
+from toolspeed.core.types import EventType, ToolCall, ToolSpec
+from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig
 
 
 class ActionBytecodeCodec:
@@ -36,10 +36,10 @@ class ActionBytecodeCodec:
     MAX_VAL_LEN = 16 * 1024 * 1024
     MAX_ARG_COUNT = 1024
 
-    def __init__(self, tool_specs: Optional[List[ToolSpec]] = None) -> None:
-        self.tool_to_opcode: Dict[str, int] = {}
-        self.opcode_to_tool: Dict[int, str] = {}
-        self.tool_arg_order: Dict[str, List[str]] = {}
+    def __init__(self, tool_specs: list[ToolSpec] | None = None) -> None:
+        self.tool_to_opcode: dict[str, int] = {}
+        self.opcode_to_tool: dict[int, str] = {}
+        self.tool_arg_order: dict[str, list[str]] = {}
         self._schema_hash: str = ""
 
         if tool_specs:
@@ -47,7 +47,7 @@ class ActionBytecodeCodec:
                 self.register_tool(spec.name, list(spec.parameters.get("properties", {}).keys()) or spec.required_args, opcode=idx)
             self._compute_schema_hash(tool_specs)
 
-    def _compute_schema_hash(self, tool_specs: List[ToolSpec]) -> None:
+    def _compute_schema_hash(self, tool_specs: list[ToolSpec]) -> None:
         raw = json.dumps([{"name": s.name, "params": s.parameters} for s in sorted(tool_specs, key=lambda s: s.name)], sort_keys=True)
         self._schema_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -55,7 +55,7 @@ class ActionBytecodeCodec:
     def schema_hash(self) -> str:
         return self._schema_hash
 
-    def register_tool(self, name: str, arg_order: Optional[List[str]] = None, opcode: Optional[int] = None) -> int:
+    def register_tool(self, name: str, arg_order: list[str] | None = None, opcode: int | None = None) -> int:
         if name in self.tool_to_opcode:
             return self.tool_to_opcode[name]
 
@@ -80,7 +80,7 @@ class ActionBytecodeCodec:
         if len(call.arguments) > self.MAX_ARG_COUNT:
             raise ValueError(f"Argument count {len(call.arguments)} exceeds maximum limit of {self.MAX_ARG_COUNT}")
 
-        payload_parts = []
+        payload_parts: list[bytes] = []
         for k, v in call.arguments.items():
             k_bytes = k.encode("utf-8")
             v_bytes = json.dumps(v, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -117,8 +117,8 @@ class ActionBytecodeCodec:
 
         tool_name = self.opcode_to_tool[op]
         offset = 5
-        args: Dict[str, Any] = {}
-        seen_keys: Set[str] = set()
+        args: dict[str, Any] = {}
+        seen_keys: set[str] = set()
 
         for i in range(arg_count):
             if offset + 6 > len(data):
@@ -149,7 +149,7 @@ class ActionBytecodeCodec:
 
         return ToolCall(name=tool_name, tool_name=tool_name, arguments=args)
 
-    def calculate_compression_ratio(self, call: ToolCall) -> Tuple[int, int, float]:
+    def calculate_compression_ratio(self, call: ToolCall) -> tuple[int, int, float]:
         """Compares JSON character count to compact binary bytecode size."""
         json_len = len(json.dumps({"name": call.name or call.tool_name, "arguments": call.arguments}, separators=(",", ":")))
         bc_len = len(self.encode(call))
@@ -164,7 +164,7 @@ class ActionBytecodeScheduler(BaseScheduler):
     Note: Direct model action-token generation is scoped as E5b and remains UNIMPLEMENTED for live LLMs.
     """
 
-    def __init__(self, config=None) -> None:
+    def __init__(self, config: SchedulerConfig | None = None) -> None:
         super().__init__(config)
         self.codec = ActionBytecodeCodec()
 

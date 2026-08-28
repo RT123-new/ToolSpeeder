@@ -2,49 +2,53 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import json
 import threading
+from typing import Any
 
 from toolspeed.core.types import (
     EventType,
-    ExecutionEvent,
     ExecutionTrace,
     GuardrailMetrics,
-    Task,
     TaskInstance,
     ToolCall,
-    ToolResult,
-    ToolSpec,
-    sanitize_for_json,
 )
 
 
 class GuardrailTracker:
     """Computes guardrail metrics across execution traces and task instances."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._traces: list[ExecutionTrace] = []
         self._tasks: dict[str, TaskInstance] = {}
         self._active_concurrency_samples: list[int] = []
+        self._lock = threading.Lock()
 
     def register_task(self, task: TaskInstance) -> None:
         """Register a task specification for ground-truth comparison."""
-        self._tasks[task.task_id] = task
-
-    def record_trace(self, trace: ExecutionTrace, task: Optional[TaskInstance] = None) -> None:
-        """Record an execution trace for guardrail evaluation."""
-        self._traces.append(trace)
-        if task is not None:
+        with self._lock:
             self._tasks[task.task_id] = task
+
+    def record_trace(self, trace: ExecutionTrace, task: TaskInstance | None = None) -> None:
+        """Record an execution trace for guardrail evaluation."""
+        with self._lock:
+            self._traces.append(trace)
+            if task is not None:
+                self._tasks[task.task_id] = task
 
     def record_active_concurrency(self, active_count: int) -> None:
         """Record an observed active concurrency sample."""
-        self._active_concurrency_samples.append(active_count)
+        with self._lock:
+            self._active_concurrency_samples.append(active_count)
 
     def calculate_metrics(self) -> GuardrailMetrics:
         """Calculate comprehensive guardrail metrics across all recorded traces."""
-        total_tasks = len(self._traces)
+        with self._lock:
+            traces = list(self._traces)
+            tasks = dict(self._tasks)
+            concurrency_samples = list(self._active_concurrency_samples)
+
+        total_tasks = len(traces)
         if total_tasks == 0:
             return GuardrailMetrics()
 
@@ -55,19 +59,29 @@ class GuardrailTracker:
         speculative_cancelled = 0
         speculative_wasted = 0
         speculative_committed = 0
+        speculative_launched = 0
+        cache_hits = 0
+        cache_misses = 0
         cache_freshness_violations = 0
+        unapproved_side_effects = 0
         unsafe_side_effects = 0
+        blocked_unsafe_attempts = 0
         rate_limit_errors = 0
+        rate_limit_failures = 0
+        total_deopts = 0
+        total_model_calls = 0
+        total_model_input_tokens = 0
+        total_model_output_tokens = 0
         total_cost_usd = 0.0
 
         tool_selection_scores: list[float] = []
         argument_accuracy_scores: list[float] = []
 
-        for trace in self._traces:
+        for trace in traces:
             if trace.success:
                 successful_tasks += 1
 
-            task = self._tasks.get(trace.task_id)
+            task = tasks.get(trace.task_id)
             expected_tools = set(task.expected_tools) if task else None
             expected_args = task.expected_args if task else None
 
@@ -98,11 +112,11 @@ class GuardrailTracker:
                                 matched_args += 1
                         elif call.arguments == target:
                             matched_args += 1
-                arg_score = matched_args / total_expected_args if total_expected_args > 0 else 1.0
+                arg_score = (matched_args / total_expected_args) if total_expected_args > 0 else 1.0
                 argument_accuracy_scores.append(min(1.0, arg_score))
 
             # Track unnecessary and duplicated calls
-            seen_calls: Set[str] = set()
+            seen_calls: set[str] = set()
             for call in trace.tool_calls:
                 call_name = call.name or call.tool_name
                 total_tool_calls += 1
@@ -115,79 +129,111 @@ class GuardrailTracker:
                 else:
                     seen_calls.add(call_signature)
 
-                # Check unsafe side effects
-                if call.requires_approval and not call.is_approved:
-                    unsafe_side_effects += 1
+                if call.is_speculative:
+                    speculative_launched += 1
 
-            # Track speculative calls and rate limits from events
+                # Check unapproved side effects
+                if call.requires_approval and not call.is_approved:
+                    unapproved_side_effects += 1
+
+            # Track events
             for event in trace.events:
                 ev_type = str(event.event_type)
-                if ev_type in (EventType.SPECULATION_CANCELLED.value, "speculative_cancel"):
+                if ev_type in (EventType.SPECULATION_CANCELLED.value, "speculative_cancel", "speculation_cancelled"):
                     speculative_cancelled += 1
-                elif ev_type in (EventType.SPECULATION_HIT.value, "speculative_commit"):
+                elif ev_type in (EventType.SPECULATION_HIT.value, "speculative_commit", "speculation_hit"):
                     speculative_committed += 1
+                elif ev_type in (EventType.SPECULATION_START.value, "speculation_start"):
+                    speculative_launched = max(speculative_launched, speculative_launched + 1)
+                elif ev_type in (EventType.CACHE_HIT.value, "cache_hit"):
+                    cache_hits += 1
+                elif ev_type in (EventType.CACHE_MISS.value, "cache_miss"):
+                    cache_misses += 1
+                elif ev_type in (EventType.CACHE_FRESHNESS_VIOLATION.value, "cache_freshness_violation"):
+                    cache_freshness_violations += 1
                 elif ev_type in (EventType.RATE_LIMIT_ERROR.value, "rate_limit_error"):
                     rate_limit_errors += 1
+                    rate_limit_failures += 1
+                elif ev_type in (EventType.JIT_FUSION_DEOPT.value, "jit_fusion_deopt"):
+                    total_deopts += 1
+                elif ev_type in (EventType.APPROVAL_REJECTED.value, "approval_rejected", EventType.GUARDRAIL_VIOLATION.value, "guardrail_violation"):
+                    blocked_unsafe_attempts += 1
 
-            # Speculative wasted = speculative calls executed but not hit or cancelled
+            # Speculative wasted = speculative calls executed but not committed or hit
             for call in trace.tool_calls:
-                if call.is_speculative and not call.metadata.get("committed", False):
+                if call.requires_approval and not call.is_approved:
+                    unsafe_side_effects += 1
+                if call.is_speculative and not call.metadata.get("committed", False) and not call.metadata.get("hit", False):
                     if not call.metadata.get("cancelled", False):
                         speculative_wasted += 1
 
-            # Check cache freshness violations from tool results or events
+            # Check cache freshness violations from tool results
             for res in trace.tool_results:
                 if res.cached and res.metadata.get("is_stale", False):
                     cache_freshness_violations += 1
+                if res.metadata.get("unsafe_executed", False):
+                    unsafe_side_effects += 1
                 total_cost_usd += res.cost_usd
 
-            for ev in trace.events:
-                if ev.data.get("cache_stale_violation", False) or ev.details.get("cache_stale_violation", False):
-                    cache_freshness_violations += 1
-
-            # Add token costs
+            # Add token costs and usage
             total_cost_usd += trace.token_usage.cost_usd
+            total_model_input_tokens += trace.token_usage.prompt_tokens
+            total_model_output_tokens += trace.token_usage.completion_tokens
+            total_model_calls += 1
 
         # Calculate peak concurrency
-        peak_concurrency = self._compute_peak_concurrency()
+        peak_concurrency = self._compute_peak_concurrency_locked(traces, concurrency_samples)
 
         exact_success = successful_tasks / total_tasks if total_tasks > 0 else 0.0
-        avg_tool_selection = (sum(tool_selection_scores) / len(tool_selection_scores)) if tool_selection_scores else None
-        avg_argument_acc = (sum(argument_accuracy_scores) / len(argument_accuracy_scores)) if argument_accuracy_scores else None
+        avg_tool_selection = (sum(tool_selection_scores) / len(tool_selection_scores)) if tool_selection_scores else 1.0
+        avg_argument_acc = (sum(argument_accuracy_scores) / len(argument_accuracy_scores)) if argument_accuracy_scores else 1.0
         cost_per_task = total_cost_usd / total_tasks if total_tasks > 0 else 0.0
 
         return GuardrailMetrics(
+            total_tasks=total_tasks,
+            successful_tasks=successful_tasks,
             exact_success=exact_success,
             exact_accuracy=exact_success,
             tool_selection_accuracy=avg_tool_selection,
             argument_accuracy=avg_argument_acc,
+            total_tool_calls=total_tool_calls,
             unnecessary_calls=unnecessary_calls,
             duplicated_calls=duplicated_calls,
+            speculative_calls_launched=max(speculative_launched, speculative_committed + speculative_wasted + speculative_cancelled),
+            speculative_calls_hit=speculative_committed,
+            speculative_calls_wasted=speculative_wasted,
+            speculative_calls_cancelled=speculative_cancelled,
             speculative_cancelled=speculative_cancelled,
             speculative_wasted=speculative_wasted,
             speculative_committed=speculative_committed,
-            cost_per_task_usd=cost_per_task,
+            cache_hits=cache_hits,
+            cache_misses=cache_misses,
             cache_freshness_violations=cache_freshness_violations,
+            unapproved_side_effects=unapproved_side_effects,
             unsafe_side_effects=unsafe_side_effects,
-            peak_concurrency=peak_concurrency,
+            blocked_unsafe_attempts=blocked_unsafe_attempts,
+            rate_limit_failures=rate_limit_failures,
             rate_limit_errors=rate_limit_errors,
-            total_tasks=total_tasks,
-            successful_tasks=successful_tasks,
-            total_tool_calls=total_tool_calls,
+            peak_concurrency=peak_concurrency,
+            total_model_input_tokens=total_model_input_tokens,
+            total_model_output_tokens=total_model_output_tokens,
+            total_model_calls=total_model_calls,
+            total_deopts=total_deopts,
+            cost_per_task_usd=cost_per_task,
             total_cost_usd=total_cost_usd,
         )
 
-    def _compute_peak_concurrency(self) -> int:
+    def _compute_peak_concurrency_locked(self, traces: list[ExecutionTrace], concurrency_samples: list[int]) -> int:
         """Compute peak concurrency across all events and active samples."""
-        max_c = max(self._active_concurrency_samples, default=0)
+        max_c = max(concurrency_samples, default=1)
 
-        intervals: list[Tuple[int, int]] = []  # (timestamp_ns, +1/-1)
-        for trace in self._traces:
+        intervals: list[tuple[int, int]] = []  # (timestamp_ns, +1/-1)
+        for trace in traces:
             for ev in trace.events:
                 ev_type = str(ev.event_type)
-                if ev_type in (EventType.TOOL_START.value, EventType.SPECULATION_START.value):
+                if ev_type in (EventType.TOOL_START.value, EventType.SPECULATION_START.value, "tool_start", "speculation_start"):
                     intervals.append((ev.timestamp_ns, 1))
-                elif ev_type in (EventType.TOOL_END.value, EventType.SPECULATION_CANCELLED.value, EventType.TOOL_CANCELLED.value):
+                elif ev_type in (EventType.TOOL_END.value, EventType.SPECULATION_CANCELLED.value, EventType.TOOL_CANCELLED.value, "tool_end", "speculation_cancelled", "tool_cancelled"):
                     intervals.append((ev.timestamp_ns, -1))
 
         intervals.sort(key=lambda x: (x[0], -x[1]))
@@ -198,12 +244,13 @@ class GuardrailTracker:
             if current > peak:
                 peak = current
 
-        return peak
+        return max(1, peak)
 
     def reset(self) -> None:
-        self._traces.clear()
-        self._tasks.clear()
-        self._active_concurrency_samples.clear()
+        with self._lock:
+            self._traces.clear()
+            self._tasks.clear()
+            self._active_concurrency_samples.clear()
 
 
 class GuardrailMonitor:
@@ -212,7 +259,7 @@ class GuardrailMonitor:
     def __init__(self) -> None:
         self.metrics = GuardrailMetrics()
         self._lock = threading.Lock()
-        self._seen_tool_calls: Set[str] = set()
+        self._seen_tool_calls: set[str] = set()
         self._current_concurrency: int = 0
 
     def record_task_start(self) -> None:

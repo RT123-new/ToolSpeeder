@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
-import time
+from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
 from toolspeed.core.types import EventType, ToolCall, ToolResult
-from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, cancel_and_await
+from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig
 
 
 @dataclass
@@ -18,12 +17,12 @@ class WorkflowNode:
     """Declarative node in a compiled workflow pipeline."""
     step_id: str
     tool_name: str
-    args_template: Dict[str, Any]
+    args_template: dict[str, Any]
     output_key: str
     is_side_effect: bool = False
     requires_approval: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -35,7 +34,7 @@ class WorkflowInvariant:
     expected_value: Any = None
     description: str = ""
 
-    def evaluate(self, ledger: Dict[str, Any], context: Dict[str, Any]) -> bool:
+    def evaluate(self, ledger: dict[str, Any], context: dict[str, Any]) -> bool:
         # Extract target field
         parts = self.field_path.split(".")
         root_key = parts[0]
@@ -79,7 +78,7 @@ class WorkflowInvariant:
         else:
             return False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -88,9 +87,9 @@ class DeclarativeWorkflow:
     """Bounded declarative workflow representation containing data only (no callables)."""
     workflow_id: str
     version: str = "1.0.0"
-    nodes: List[WorkflowNode] = field(default_factory=list)
-    invariants: List[WorkflowInvariant] = field(default_factory=list)
-    output_mapping: Dict[str, Any] = field(default_factory=dict)
+    nodes: list[WorkflowNode] = field(default_factory=list)
+    invariants: list[WorkflowInvariant] = field(default_factory=list)
+    output_mapping: dict[str, Any] = field(default_factory=dict)
     description: str = ""
 
     @property
@@ -104,7 +103,7 @@ class DeclarativeWorkflow:
         }
         return hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "workflow_id": self.workflow_id,
             "version": self.version,
@@ -135,12 +134,14 @@ class JITFusionScheduler(BaseScheduler):
     without re-executing completed side-effects.
     """
 
-    def __init__(self, config=None) -> None:
-        super().__init__(config)
-        self._compiled_kernels: Dict[str, DeclarativeWorkflow] = {}
+    def __init__(self, config: SchedulerConfig | None = None, fusion_enabled: bool = True) -> None:
+        cfg = config or SchedulerConfig()
+        cfg.fusion_enabled = fusion_enabled
+        super().__init__(cfg)
+        self._compiled_kernels: dict[str, DeclarativeWorkflow] = {}
         self._register_default_kernels()
 
-    def register_kernel(self, kernel: Union[FusedKernel, DeclarativeWorkflow]) -> None:
+    def register_kernel(self, kernel: FusedKernel | DeclarativeWorkflow) -> None:
         if isinstance(kernel, FusedKernel):
             self._compiled_kernels[kernel.name] = kernel.workflow
         elif isinstance(kernel, DeclarativeWorkflow):
@@ -189,30 +190,33 @@ class JITFusionScheduler(BaseScheduler):
         self._compiled_kernels["user_orders"] = user_orders_wf
         self._compiled_kernels["user_orders_fusion"] = user_orders_wf
 
-    def _match_workflow(self, ctx: ExecutionContext) -> Optional[DeclarativeWorkflow]:
+    def _match_workflow(self, ctx: ExecutionContext) -> DeclarativeWorkflow | None:
+        if not self.config.fusion_enabled:
+            return None
+
         # 1. Explicit declarative workflow in task metadata
         custom_wf = ctx.task.metadata.get("declarative_workflow")
         if isinstance(custom_wf, DeclarativeWorkflow):
             return custom_wf
 
         # 2. Explicit workflow identifier matching
-        wf_id = ctx.task.metadata.get("workflow")
+        wf_id = ctx.task.metadata.get("workflow") or ctx.task.metadata.get("workflow_id")
         if wf_id and wf_id in self._compiled_kernels:
             return self._compiled_kernels[wf_id]
 
-        # 3. Context & prompt heuristic matching
-        if "user_id" in ctx.task.context or ("user" in ctx.task.prompt.lower() and "order" in ctx.task.prompt.lower()):
+        # 3. Task pattern match for compiled user_orders pipeline
+        if "user_id" in ctx.task.context and ("orders" in ctx.task.prompt.lower() or "user" in ctx.task.prompt.lower()):
             return self._compiled_kernels.get("user_orders")
 
         return None
 
     def _resolve_template(
         self,
-        template: Dict[str, Any],
-        state: Dict[str, Any],
-        context: Dict[str, Any],
-    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-        resolved: Dict[str, Any] = {}
+        template: dict[str, Any],
+        state: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        resolved: dict[str, Any] = {}
         for k, v in template.items():
             if isinstance(v, str) and v.startswith("$"):
                 ref = v[1:]
@@ -237,11 +241,11 @@ class JITFusionScheduler(BaseScheduler):
 
     def _construct_output(
         self,
-        mapping: Dict[str, Any],
-        ledger: Dict[str, Any],
-        context: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        result: Dict[str, Any] = {}
+        mapping: dict[str, Any],
+        ledger: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {}
         for k, v in mapping.items():
             if isinstance(v, str) and v.startswith("$"):
                 ref = v[1:]
@@ -264,10 +268,10 @@ class JITFusionScheduler(BaseScheduler):
         tools: ToolRegistry,
     ) -> Any:
         workflow = self._match_workflow(ctx)
-        ledger: Dict[str, Any] = {}
+        ledger: dict[str, Any] = {}
+        completed_side_effects: dict[str, ToolResult] = {}
         deopt_triggered = False
         deopt_reason = ""
-        completed_side_effects: Set[str] = set()
 
         if workflow:
             ctx.profiler.record_event(
@@ -276,10 +280,21 @@ class JITFusionScheduler(BaseScheduler):
             )
 
             # Static tool and schema validation
-            all_tools_present = all(tools.get(node.tool_name) is not None for node in workflow.nodes)
+            all_tools_present = True
+            for node in workflow.nodes:
+                adapter = tools.get(node.tool_name)
+                if adapter is None:
+                    all_tools_present = False
+                    deopt_reason = f"Missing tool '{node.tool_name}' in registry"
+                    break
+                # Cross-check declared side-effects against actual ToolSpec
+                if adapter.spec.side_effects or not adapter.spec.is_read_only:
+                    node.is_side_effect = True
+                if adapter.spec.requires_approval:
+                    node.requires_approval = True
+
             if not all_tools_present:
                 deopt_triggered = True
-                deopt_reason = "Missing required tools in registry for compiled workflow"
             else:
                 # Execute declarative workflow steps sequentially
                 for node in workflow.nodes:
@@ -289,9 +304,9 @@ class JITFusionScheduler(BaseScheduler):
                         deopt_reason = err
                         break
 
-                    # Check approval: Never manufacture approval!
                     call = ToolCall(
                         name=node.tool_name,
+                        tool_name=node.tool_name,
                         arguments=resolved_args or {},
                         requires_approval=node.requires_approval,
                         is_approved=ctx.task.metadata.get("is_approved", False),
@@ -307,7 +322,7 @@ class JITFusionScheduler(BaseScheduler):
                         break
 
                     if node.is_side_effect:
-                        completed_side_effects.add(node.step_id)
+                        completed_side_effects[call.key()] = res
 
                     out = res.output if res.output is not None else res.result
                     ledger[node.output_key] = out
@@ -323,10 +338,9 @@ class JITFusionScheduler(BaseScheduler):
                         break
 
                 if not deopt_triggered:
-                    # Construct declarative output mapping
                     final_out = self._construct_output(workflow.output_mapping, ledger, ctx.task.context) if workflow.output_mapping else ledger
 
-                    # Strict task validation check
+                    temp_trace = ctx.profiler.events
                     if ctx.task.validate(final_out):
                         ctx.profiler.record_event(
                             EventType.JIT_FUSION_SUCCESS,
@@ -366,7 +380,15 @@ class JITFusionScheduler(BaseScheduler):
 
             for call in decision.tool_calls:
                 ctx.tool_calls.append(call)
-                res = await ctx.executor.execute(call)
-                ctx.record_tool_result(res)
+                call_key = call.key()
+
+                # Intercept already completed non-repeatable side effects from the ledger
+                if call_key in completed_side_effects:
+                    cached_res = completed_side_effects[call_key]
+                    cached_res.call_id = call.call_id
+                    ctx.record_tool_result(cached_res)
+                else:
+                    res = await ctx.executor.execute(call)
+                    ctx.record_tool_result(res)
 
         return "Max turns reached without final answer."

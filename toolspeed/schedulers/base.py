@@ -3,28 +3,27 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
 import asyncio
-import time
+from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, ToolRegistry
 from toolspeed.core.guardrails import GuardrailMonitor
 from toolspeed.core.profiler import LatencyProfiler
 from toolspeed.core.rate_limiter import RateLimiter
 from toolspeed.core.types import (
-    EventType,
-    ExecutionEvent,
+    ApprovalGrant,
+    ExecutionTrace,
     Task,
     TaskResult,
     ToolCall,
     ToolResult,
-    sanitize_for_json,
 )
 from toolspeed.schedulers.executor import ToolExecutor
 
 
-async def cancel_and_await(task: Optional[asyncio.Task[Any]]) -> None:
+async def cancel_and_await(task: asyncio.Task[Any] | None) -> None:
     """Safely cancel an internally managed task and await its termination, consuming internal cancellations."""
     if task is None:
         return
@@ -42,18 +41,18 @@ class TaskTracker:
     """Tracks child asyncio tasks and ensures safe cleanup on normal exit, error, or cancellation."""
 
     def __init__(self) -> None:
-        self._tasks: Set[asyncio.Task[Any]] = set()
+        self._tasks: set[asyncio.Task[Any]] = set()
 
     def track(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
 
-    def create_task(self, coro: Any, name: Optional[str] = None) -> asyncio.Task[Any]:
+    def create_task(self, coro: Any, name: str | None = None) -> asyncio.Task[Any]:
         t = asyncio.create_task(coro, name=name) if name else asyncio.create_task(coro)
         return self.track(t)
 
-    async def cancel_and_await(self, task: Optional[asyncio.Task[Any]]) -> None:
+    async def cancel_and_await(self, task: asyncio.Task[Any] | None) -> None:
         if task is None:
             return
         self._tasks.discard(task)
@@ -79,18 +78,23 @@ class SchedulerConfig:
 
     max_turns: int = 20
     concurrency_limit: int = 16
-    rate_limit_rps: Optional[float] = None
+    rate_limit_rps: float | None = None
     timeout_seconds: float = 60.0
+    parallelism_enabled: bool = True
     cache_enabled: bool = False
     cache_ttl_seconds: float = 300.0
     speculation_enabled: bool = False
     speculation_confidence_threshold: float = 0.70
-    speculation_contention_mode: str = "cancellable"  # "no_contention", "cancellable", "single_slot"
+    speculation_contention_mode: str = "cancellable"  # "isolated", "cancellable", "single_slot"
     commit_horizon_enabled: bool = False
+    early_dispatch_enabled: bool = True
     jit_fusion_enabled: bool = False
+    fusion_enabled: bool = True
     action_bytecode_enabled: bool = False
-    shared_rate_limiter: Optional[RateLimiter] = None
-    custom_options: Dict[str, Any] = field(default_factory=dict)
+    prewarmed: bool = True
+    atomic_idempotency_enabled: bool = True
+    shared_rate_limiter: RateLimiter | None = None
+    custom_options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -104,12 +108,13 @@ class ExecutionContext:
     guardrails: GuardrailMonitor = field(default_factory=GuardrailMonitor)
     rate_limiter: RateLimiter = field(default_factory=RateLimiter)
     executor: ToolExecutor = field(init=False)
-    history: List[Dict[str, Any]] = field(default_factory=list)
-    tool_calls: List[ToolCall] = field(default_factory=list)
-    tool_results: List[ToolResult] = field(default_factory=list)
+    history: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    tool_results: list[ToolResult] = field(default_factory=list)
     step_count: int = 0
     cancellation_requested: bool = False
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    trusted_grants: dict[str, ApprovalGrant] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.config.shared_rate_limiter is not None:
@@ -126,6 +131,10 @@ class ExecutionContext:
             guardrails=self.guardrails,
             default_timeout_s=self.config.timeout_seconds,
         )
+        # Populate any initial trusted grants from task metadata
+        grant = self.task.metadata.get("approval_grant")
+        if grant is not None and isinstance(grant, ApprovalGrant):
+            self.trusted_grants[grant.tool_name] = grant
 
     def record_model_decision(self, decision: LLMDecision) -> None:
         self.guardrails.record_model_usage(
@@ -157,7 +166,7 @@ class ExecutionContext:
 class BaseScheduler(ABC):
     """Abstract base class for all execution schedulers."""
 
-    def __init__(self, config: Optional[SchedulerConfig] = None) -> None:
+    def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
 
     @property
@@ -176,7 +185,7 @@ class BaseScheduler(ABC):
         ctx.profiler.start()
 
         final_answer: Any = None
-        error: Optional[str] = None
+        error: str | None = None
         success: bool = False
 
         try:
@@ -188,8 +197,16 @@ class BaseScheduler(ABC):
             else:
                 final_answer = await self._execute_internal(ctx, model, tools)
 
-            # Strict correctness validation
-            success = task.validate(final_answer)
+            # Strict correctness validation with trace verification
+            temp_trace = ExecutionTrace(
+                task_id=task.task_id,
+                success=True,
+                final_output=final_answer,
+                tool_calls=list(ctx.tool_calls),
+                tool_results=list(ctx.tool_results),
+                events=list(ctx.profiler.events),
+            )
+            success = task.validate(final_answer, trace=temp_trace)
 
         except asyncio.TimeoutError:
             error = f"Execution timed out after {self.config.timeout_seconds}s"
@@ -202,11 +219,11 @@ class BaseScheduler(ABC):
             error = f"Scheduler execution error: {str(e)}"
             success = False
         finally:
-            total_ms = ctx.profiler.finish()
+            total_ms = ctx.profiler.finish(ctx)
             ctx.guardrails.record_task_finish(task, final_answer, success)
 
         # Correct Completion Latency (CCL): only valid when task passes validation
-        ccl_ms: Optional[float] = total_ms if success else None
+        ccl_ms: float | None = total_ms if success else None
 
         return TaskResult(
             task_id=task.task_id,
