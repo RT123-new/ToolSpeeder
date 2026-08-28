@@ -1,76 +1,79 @@
-# ⚡ ToolSpeed
+# ⚡ ToolSpeed (ToolSpeeder)
 
 **Scientific Benchmark Suite & Runtime Optimization Schedulers for AI Agent Tool Calling**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-115%20passed-brightgreen.svg)]()
-[![Evidence Level](https://img.shields.io/badge/evidence-Replay%20%26%20Local%20Validated-informational.svg)]()
 
-ToolSpeed evaluates and optimizes the serial critical path latency (Correct Completion Latency, CCL) between model reasoning and tool execution in autonomous AI agents.
+ToolSpeed evaluates and optimizes the serial critical path latency (Correct Completion Latency, CCL) between model reasoning and tool execution in autonomous AI agent systems.
 
 ---
 
-## 🔬 Evidence Taxonomy
+## 🔬 Evidence Taxonomy & Scientific Hierarchy
 
-To maintain rigorous scientific integrity, ToolSpeed categorizes all benchmark evidence into four strictly separated levels:
+ToolSpeed strictly classifies experimental data and claims under four discrete evidence levels:
 
-1. **`SYNTHETIC`**: Mathematical simulation models evaluating theoretical limits and hypothesis boundaries.
-2. **`REPLAY_INTEGRATION`**: Real scheduler code executing deterministic virtual-delay adapters on canonical workload traces.
-3. **`LOCAL_WALL_CLOCK`**: Real scheduler code executing real local tools (SQLite, mock HTTP servers, sandboxed file I/O, and subprocesses).
-4. **`LIVE`**: Real schedulers connected to live external LLM endpoints and third-party APIs.
+1. **`SYNTHETIC`**: Mathematical simulation models evaluating theoretical limits and hypothesis boundaries. Real-world claims are marked **`INCONCLUSIVE`**.
+2. **`REPLAY_INTEGRATION`**: Real scheduler code executing deterministic virtual-delay adapters on canonical workload traces (W1–W7, E5a).
+3. **`LOCAL_WALL_CLOCK`**: Real scheduler code executing real local tools (SQLite databases, mock HTTP servers, sandboxed file I/O, and subprocess sandboxes).
+4. **`LIVE_PRODUCTION`**: Real schedulers connected to live cloud LLM APIs and third-party remote endpoints (scoped as future work).
 
 ---
 
 ## 🎯 Optimization Schedulers (E1 – E5)
 
-1. **E1 — Dynamic DAG Scheduler (`DAGScheduler`)**: Two-pass dependency discovery and DFS cycle detection; executes ready tool waves with concurrency backpressure.
+1. **E1 — Dynamic DAG Scheduler (`DAGScheduler`)**: Two-pass dependency discovery and DFS cycle detection; executes ready tool waves concurrently with dependency data binding.
 2. **E2 — Declarative JIT Fusion (`JITFusionScheduler`)**: Safe declarative AST (`DeclarativeWorkflow`, `WorkflowNode`, `WorkflowInvariant`) executed locally with side-effect tracking and safe fallback deoptimization.
-3. **E3 — Speculative Reads (`SpeculativeReadScheduler`)**: Concurrent draft prediction during model reasoning, multi-call matching across decision steps, and leak-free task cancellation.
+3. **E3 — Speculative Reads (`SpeculativeReadScheduler`)**: Concurrent draft prediction during model reasoning, multi-call matching across decision steps, and cancellation-safe task lifecycles.
 4. **E4 — Commit-Horizon Streaming (`CommitHorizonScheduler`)**: Incremental streaming parser (`IncrementalCommitParser`) early-dispatching read-only tools upon argument immutability closure.
-5. **E5 — Action Bytecode Codec (`ActionBytecodeScheduler`)**: Compact 16-bit big-endian binary transport codec (`ActionBytecodeCodec`) supporting up to 65,535 tools with strict length and boundary checks.
+5. **E5a — Action Bytecode Codec (`ActionBytecodeScheduler`)**: Compact binary transport codec (`ActionBytecodeCodec`) with strict length and duplicate key validation.
 6. **Phase 2 Caching (`CacheScheduler`)**: TTL-aware exact and normalized parameter caching with domain-level invalidation upon mutative actions.
-7. **Composite Pipeline (`CompositeScheduler`)**: Unified adaptive execution coordinating DAG scheduling, caching, speculation, and streaming.
+7. **Composite Pipeline (`CompositeScheduler`)**: Unified adaptive execution coordinating DAG scheduling, caching, speculation, and streaming commit horizons.
 
 ---
 
-## 🚀 Quick Start
+## 🚀 CLI Commands & Workflows
 
-### Installation
-
+### 1. Run Real Paired Benchmark Suite
+Executes real schedulers on genuine backends (`replay` or `local`), produces immutable bundles, and computes paired bootstrap confidence intervals.
 ```bash
-git clone https://github.com/RT123-new/ToolSpeeder.git
-cd ToolSpeeder
-pip install -e ".[dev]"
-```
-
-### CLI Commands
-
-```bash
-# 1. Run Real Paired Benchmark Suite (Replay Backend)
+# Trace Replay Backend
 toolspeed benchmark --backend replay --trials 50 --out artifacts/replay
 
-# 2. Run Real Local Wall-Clock Benchmark Suite
+# Local Wall-Clock Backend (HTTP, SQLite, File, Subprocess)
 toolspeed benchmark --backend local --trials 10 --out artifacts/local
+```
 
-# 3. Run Hypothesis Falsification Evaluator (Synthetic)
-toolspeed falsify --trials 150
+### 2. Evaluate Hypothesis Falsification
+Evaluates an existing benchmark bundle against falsification criteria:
+```bash
+# Returns exit code 0 (passed), 1 (falsified), or 2 (inconclusive)
+toolspeed falsify --input artifacts/replay/benchmark_result.json
+```
 
-# 4. Generate Markdown Evidence Log and Interactive HTML Dashboard
-toolspeed report --trials 150 --out results
+### 3. Generate Reports from Immutable Bundles
+Renders Markdown and interactive HTML dashboards directly from existing bundles without rerunning simulations:
+```bash
+toolspeed report --input artifacts/replay/benchmark_result.json --out artifacts/replay
+```
 
-# 5. Run 22 Adversarial Scientific Integrity Unit Tests
-python3 -m unittest tests/test_adversarial_integrity.py
+### 4. Run Synthetic Analytical Simulation
+```bash
+toolspeed simulate --experiment all --trials 1000 --out artifacts/synthetic
+```
 
-# 6. Run Full Unit Test Discovery (115 tests)
-python3 -m unittest discover -s tests -p "test_*.py"
+### 5. Run Test Suite
+```bash
+# Run 35+ unit & adversarial scientific integrity tests
+uv run python -m unittest discover -s tests -p "test_*.py"
 ```
 
 ---
 
-## 🛡️ Runtime Safety & Security
+## 🛡️ Runtime Safety & Security Boundaries
 
 - **Centralized Execution Authority**: All schedulers route tool calls through `ToolExecutor`.
-- **Approval Gating**: Mutative tools (`is_read_only=False` or `side_effects=True`) require explicit approval (`is_approved=True`).
+- **Approval Gating**: Mutative tools (`is_read_only=False` or `side_effects=True`) require explicit approval (`is_approved=True`). Schedulers cannot manufacture approval.
+- **Shared Idempotency Store**: Prevents duplicate execution of side-effecting operations across task lifecycles.
 - **Resource Sandboxing**: Subprocess sandboxing enforces working directory containment, timeout enforcement, and SIGKILL process tree termination.
-- **Leak-Free Async Execution**: Speculative cancellations await task cleanup to prevent unhandled background coroutine exceptions.
+- **Cancellation Safety**: All cancelled child tasks are cleanly awaited via `cancel_and_await` to prevent unhandled background coroutine exceptions across Python 3.10–3.13.

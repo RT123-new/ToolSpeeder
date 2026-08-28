@@ -46,6 +46,10 @@ from toolspeed.schedulers.e2_jit_fusion import (
 from toolspeed.schedulers.e3_speculation import SpeculativeReadScheduler
 from toolspeed.schedulers.e4_commit_horizon import CommitHorizonScheduler, IncrementalCommitParser
 from toolspeed.schedulers.e5_action_bytecode import ActionBytecodeCodec, ActionBytecodeScheduler
+import toolspeed.benchmarks.harness
+import toolspeed.schedulers.executor
+import toolspeed.schedulers.phase2_cache
+import toolspeed.visualization.report
 
 
 class SimpleMockTool(BaseToolAdapter):
@@ -506,6 +510,155 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
         current = asyncio.current_task()
         pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
         self.assertEqual(len(pending), 0, f"Leaked tasks detected: {pending}")
+
+    # 23. ToolExecutor: Schema validation rejects invalid argument types
+    async def test_tool_executor_schema_validation_types(self):
+        tools = ToolRegistry()
+        tools.register(SimpleMockTool("query_tool"))
+        executor = toolspeed.schedulers.executor.ToolExecutor(tools)
+        call = ToolCall(name="query_tool", arguments={"amount": "not_a_number"})
+        res = await executor.execute(call)
+        self.assertTrue(res.is_error)
+        self.assertIn("expected number", res.error)
+
+    # 24. ToolExecutor: Unapproved mutative calls rejected
+    async def test_tool_executor_approval_enforced(self):
+        tools = ToolRegistry()
+        tools.register(SimpleMockTool("transfer", is_read_only=False, side_effects=True, requires_approval=True))
+        executor = toolspeed.schedulers.executor.ToolExecutor(tools)
+        call = ToolCall(name="transfer", arguments={"amount": 100}, is_approved=False)
+        res = await executor.execute(call)
+        self.assertTrue(res.is_error)
+        self.assertIn("requires explicit approval", res.error)
+
+    # 25. Idempotency: Shared store prevents duplicate execution
+    async def test_idempotency_store_replay(self):
+        tools = ToolRegistry()
+        t = SimpleMockTool("idempotent_write", is_read_only=False, side_effects=True)
+        tools.register(t)
+        store = toolspeed.schedulers.executor.SharedIdempotencyStore()
+        executor = toolspeed.schedulers.executor.ToolExecutor(tools, idempotency_store=store)
+
+        call1 = ToolCall(name="idempotent_write", arguments={"amount": 50}, idempotency_key="key_123")
+        res1 = await executor.execute(call1)
+        self.assertFalse(res1.is_error)
+        self.assertEqual(len(t.executions), 1)
+
+        # Second call with same idempotency key
+        call2 = ToolCall(name="idempotent_write", arguments={"amount": 50}, idempotency_key="key_123")
+        res2 = await executor.execute(call2)
+        self.assertTrue(res2.cached)
+        self.assertEqual(len(t.executions), 1)  # NOT executed again!
+
+    # 26. Cache: Invalidation on mutation
+    async def test_cache_invalidation_on_mutation(self):
+        cache = toolspeed.schedulers.phase2_cache.ToolResultCache()
+        cache.put("get_user", {"user_id": "u1"}, {"name": "Alice"})
+        cached, hit, _ = cache.get("get_user", {"user_id": "u1"})
+        self.assertTrue(hit)
+
+        # Mutate user
+        cache.invalidate_on_mutation("update_user")
+        cached2, hit2, _ = cache.get("get_user", {"user_id": "u1"})
+        self.assertFalse(hit2)
+
+    # 27. Cache: Strict freshness contract rejects expired items
+    def test_cache_freshness_contract(self):
+        entry = toolspeed.schedulers.phase2_cache.CacheEntry(
+            tool_name="get_data",
+            arguments={},
+            output={"val": 1},
+            created_at=time.perf_counter() - 100.0,
+            ttl_seconds=60.0,
+            freshness_contract="strict",
+        )
+        self.assertFalse(entry.is_fresh())
+
+    # 28. Negative Control E1: Disabled produces null speedup
+    async def test_negative_control_e1_null_speedup(self):
+        harness = toolspeed.benchmarks.harness.BenchmarkHarness()
+        controls = await harness.run_negative_controls(trials=5)
+        e1_ctrl = next(c for c in controls if c["control"] == "E1_disabled")
+        self.assertTrue(e1_ctrl["passed_expected_null"])
+
+    # 29. Negative Control E3: Disabled produces null speedup
+    async def test_negative_control_e3_null_speedup(self):
+        harness = toolspeed.benchmarks.harness.BenchmarkHarness()
+        controls = await harness.run_negative_controls(trials=5)
+        e3_ctrl = next(c for c in controls if c["control"] == "E3_disabled")
+        self.assertTrue(e3_ctrl["passed_expected_null"])
+
+    # 30. Negative Control E4: Disabled produces null speedup
+    async def test_negative_control_e4_null_speedup(self):
+        harness = toolspeed.benchmarks.harness.BenchmarkHarness()
+        controls = await harness.run_negative_controls(trials=5)
+        e4_ctrl = next(c for c in controls if c["control"] == "E4_disabled")
+        self.assertTrue(e4_ctrl["passed_expected_null"])
+
+    # 31. Benchmark Backend Spy Isolation
+    async def test_benchmark_backend_spy_isolation(self):
+        h_replay = toolspeed.benchmarks.harness.BenchmarkHarness(
+            toolspeed.benchmarks.harness.BenchmarkConfig(evidence_level=toolspeed.core.types.EvidenceLevel.REPLAY_INTEGRATION)
+        )
+        self.assertEqual(h_replay.backend.evidence_level, toolspeed.core.types.EvidenceLevel.REPLAY_INTEGRATION)
+
+        h_local = toolspeed.benchmarks.harness.BenchmarkHarness(
+            toolspeed.benchmarks.harness.BenchmarkConfig(evidence_level=toolspeed.core.types.EvidenceLevel.LOCAL_WALL_CLOCK)
+        )
+        self.assertEqual(h_local.backend.evidence_level, toolspeed.core.types.EvidenceLevel.LOCAL_WALL_CLOCK)
+
+    # 32. CLI Falsify Exit Codes
+    def test_cli_falsify_exit_codes(self):
+        import toolspeed.cli as cli
+        # Synthetic bundle -> exit code 2 (inconclusive for real-world claims)
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "summary_report.json"
+            p.write_text('{"evidence_level": "synthetic", "evaluations": []}', encoding="utf-8")
+            code = cli.main(["falsify", "--input", str(p)])
+            self.assertEqual(code, 2)
+
+    # 33. CLI Report Preserves Provenance
+    def test_cli_report_preserves_provenance(self):
+        import toolspeed.cli as cli
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "benchmark_result.json"
+            p.write_text('{"evidence_level": "replay_integration", "title": "Test Bundle", "evaluations": []}', encoding="utf-8")
+            code = cli.main(["report", "--input", str(p), "--out", tmpdir])
+            self.assertEqual(code, 0)
+            md = (Path(tmpdir) / "report.md").read_text(encoding="utf-8")
+            self.assertIn("replay_integration", md)
+
+    # 34. CCL Excludes Failed Tasks
+    def test_ccl_excludes_failed_tasks(self):
+        import numpy as np
+        from toolspeed.experiments.runner import compute_summary
+        baseline = np.array([100.0, 100.0, 100.0])
+        candidate = np.array([1.0, 1.0, 1.0])
+        # Candidate failed all tasks
+        summary = compute_summary(
+            baseline=baseline,
+            candidate=candidate,
+            baseline_success=np.array([True, True, True]),
+            candidate_success=np.array([False, False, False]),
+        )
+        self.assertIn(summary.candidate_p50_ms, (None, 0.0))
+        self.assertEqual(summary.candidate_success_rate, 0.0)
+
+    # 35. Paired Bootstrap CI Resampling
+    def test_paired_bootstrap_ci_coverage(self):
+        import numpy as np
+        from toolspeed.experiments.runner import paired_bootstrap_p95_ci
+        base = np.array([100.0] * 50)
+        cand = np.array([50.0] * 50)
+        low, high = paired_bootstrap_p95_ci(base, cand, num_samples=100)
+        self.assertIsNotNone(low)
+        self.assertIsNotNone(high)
+        self.assertAlmostEqual(low, 50.0, delta=1.0)
+        self.assertAlmostEqual(high, 50.0, delta=1.0)
 
 
 if __name__ == "__main__":

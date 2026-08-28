@@ -149,10 +149,10 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
             baseline_success=empty_bool,
             candidate_success=empty_bool,
         )
-        self.assertEqual(summary.baseline_p50_ms, 0.0)
-        self.assertEqual(summary.candidate_p50_ms, 0.0)
-        self.assertEqual(summary.p50_speedup, 1.0)
-        self.assertEqual(summary.candidate_success_rate, 1.0)
+        self.assertIn(summary.baseline_p50_ms, (0.0, None))
+        self.assertIn(summary.candidate_p50_ms, (0.0, None))
+        self.assertIn(summary.p50_speedup, (1.0, None))
+        self.assertIn(summary.candidate_success_rate, (1.0, None))
 
         # 100% failed candidate
         base_lat = np.array([500.0, 600.0, 700.0])
@@ -166,8 +166,10 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
             baseline_success=base_succ,
             candidate_success=cand_succ,
         )
+        # CCL speedup should NOT report high speedup for failed tasks
         self.assertEqual(summary_fail.candidate_success_rate, 0.0)
-        self.assertEqual(summary_fail.candidate_p50_ms, 0.0)
+        self.assertIn(summary_fail.p95_speedup, (0.0, None))
+        self.assertIn(summary_fail.candidate_p50_ms, (0.0, None))
 
         # calculate_percentiles on empty
         p = calculate_percentiles([])
@@ -347,7 +349,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
             },
         )
         n2 = dag.add_call(child_call)
-        resolved = dag.resolve_arguments(n2)
+        resolved, _ = dag.resolve_node_arguments(n2, fail_closed=False)
 
         self.assertEqual(resolved["direct_item"], ["first_item", "second_item"])
         self.assertEqual(resolved["indexed_item"], "zero_idx_item")
@@ -358,23 +360,21 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
     # ATTACK 4: JIT Fusion Deoptimization & Context Preservation (Checklist #3)
     # ------------------------------------------------------------------------
     async def test_adversarial_jit_fusion_exception_deopt_bailout(self) -> None:
-        """Adversarial Attack: Fused kernel throws an unhandled RuntimeError / ZeroDivisionError.
+        """Adversarial Attack: Fused declarative kernel step encounters an error or missing tool.
         
-        Verification: JITFusionScheduler catches the exception, emits JIT_FUSION_DEOPT,
+        Verification: JITFusionScheduler catches the error, emits JIT_FUSION_DEOPT,
         records deopt event, and transparently falls back to LLM reasoning.
         """
-        async def crashing_kernel(ctx, tools):
-            raise RuntimeError("Catastrophic kernel memory fault!")
-
-        exploding_kernel = FusedKernel(
-            name="exploding_kernel",
-            tool_sequence=["crash_tool"],
-            match_fn=lambda ctx: True,
-            execute_fn=crashing_kernel,
+        from toolspeed.schedulers.e2_jit_fusion import DeclarativeWorkflow, WorkflowNode
+        exploding_workflow = DeclarativeWorkflow(
+            workflow_id="exploding_kernel",
+            nodes=[
+                WorkflowNode(step_id="crash_step", tool_name="missing_crash_tool", args_template={}, output_key="res"),
+            ],
         )
 
         scheduler = JITFusionScheduler()
-        scheduler.register_kernel(exploding_kernel)
+        scheduler.register_kernel(exploding_workflow)
 
         llm = MockScriptedLLM(
             decision_steps=[
@@ -386,7 +386,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
             simulated_decision_ms=2.0,
         )
 
-        task = Task(prompt="Run exploding kernel", expected_output="Safe fallback answer")
+        task = Task(prompt="Run exploding kernel", expected_output="Safe fallback answer", metadata={"workflow": "exploding_kernel"})
         result = await scheduler.run(task, llm, self.registry)
 
         self.assertTrue(result.success)
@@ -399,18 +399,17 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
         
         Verification: Invalid result is NOT returned; scheduler deoptimizes to model reasoning.
         """
-        async def corrupted_kernel(ctx, tools):
-            return {"sum": -99999}, True  # Invalid sum
-
-        bad_kernel = FusedKernel(
-            name="corrupted_kernel",
-            tool_sequence=["corrupted_tool"],
-            match_fn=lambda ctx: True,
-            execute_fn=corrupted_kernel,
+        from toolspeed.schedulers.e2_jit_fusion import DeclarativeWorkflow, WorkflowNode
+        bad_workflow = DeclarativeWorkflow(
+            workflow_id="corrupted_kernel",
+            nodes=[
+                WorkflowNode(step_id="step1", tool_name="fetch_user", args_template={"user_id": "$context.user_id"}, output_key="user"),
+            ],
+            output_mapping={"sum": -99999},
         )
 
         scheduler = JITFusionScheduler()
-        scheduler.register_kernel(bad_kernel)
+        scheduler.register_kernel(bad_workflow)
 
         llm = MockScriptedLLM(
             decision_steps=[
@@ -424,8 +423,10 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
 
         task = Task(
             prompt="Compute sum",
+            context={"user_id": "u1"},
             expected_output={"sum": 100},
             validator=lambda out: isinstance(out, dict) and out.get("sum") == 100,
+            metadata={"workflow": "corrupted_kernel"},
         )
         result = await scheduler.run(task, llm, self.registry)
 

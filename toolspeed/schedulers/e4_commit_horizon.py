@@ -12,11 +12,27 @@ import time
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, StreamingChunk, ToolRegistry
 from toolspeed.core.types import CommittedCall, EventType, ToolCall, ToolResult, ToolSpec
-from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
+from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, cancel_and_await
+
+
+def _reject_duplicate_keys_hook(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    """Strict JSON object hook rejecting duplicate keys."""
+    res: Dict[str, Any] = {}
+    for k, v in pairs:
+        if k in res:
+            raise ValueError(f"Duplicate JSON key: '{k}'")
+        res[k] = v
+    return res
 
 
 class IncrementalCommitParser:
-    """Incremental streaming parser and schema-aware commit validator."""
+    """Incremental streaming parser and schema-aware commit validator.
+    
+    Verifies that a tool call has crossed the commit horizon:
+    1. Tool identity is fixed, read-only, and idempotent.
+    2. All required semantics-changing arguments are syntactically closed.
+    3. JSON fragments are valid, well-formed, reject duplicate keys, and match schemas.
+    """
 
     @staticmethod
     def is_syntax_closed(json_fragment: str) -> bool:
@@ -24,11 +40,35 @@ class IncrementalCommitParser:
         s = json_fragment.strip()
         if not s:
             return False
+        # Fast reject unclosed string quotes, unclosed brackets, dangling escapes
+        if s.endswith("\\"):
+            return False
         try:
-            json.loads(s)
+            json.loads(s, object_pairs_hook=_reject_duplicate_keys_hook)
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def validate_schema_types(parameters: Dict[str, Any], arguments: Dict[str, Any]) -> bool:
+        """Validates that provided arguments match parameter types declared in schema."""
+        properties = parameters.get("properties", {})
+        for k, v in arguments.items():
+            if k in properties:
+                expected_type = properties[k].get("type")
+                if expected_type == "string" and not isinstance(v, str):
+                    return False
+                elif expected_type == "integer" and not (isinstance(v, int) and not isinstance(v, bool)):
+                    return False
+                elif expected_type == "number" and not (isinstance(v, (int, float)) and not isinstance(v, bool)):
+                    return False
+                elif expected_type == "boolean" and not isinstance(v, bool):
+                    return False
+                elif expected_type == "array" and not isinstance(v, list):
+                    return False
+                elif expected_type == "object" and not isinstance(v, dict):
+                    return False
+        return True
 
     @classmethod
     def try_commit_call(
@@ -40,10 +80,10 @@ class IncrementalCommitParser:
         """Proves a tool call has crossed the commit horizon:
         1. Tool identity is fixed.
         2. All required semantics-changing arguments are syntactically closed.
-        3. Tool is read-only and idempotent.
+        3. Tool is read-only and idempotent (no unapproved mutative actions).
         """
-        # Strict safety check: Mutative side-effects CANNOT be early dispatched!
-        if not tool_spec.is_read_only or tool_spec.side_effects:
+        # Strict safety check: Mutative side-effects or approval-requiring tools CANNOT be early dispatched!
+        if not tool_spec.is_read_only or tool_spec.side_effects or tool_spec.requires_approval or not tool_spec.is_idempotent:
             return None
 
         # Check required commit arguments are present
@@ -52,8 +92,19 @@ class IncrementalCommitParser:
             if req_arg not in raw_call.arguments:
                 return None
 
-        # If raw JSON fragment is provided, ensure syntax closure
-        if raw_fragment and not cls.is_syntax_closed(raw_fragment):
+        # If raw JSON fragment is provided, ensure syntax closure and duplicate key rejection
+        if raw_fragment:
+            if not cls.is_syntax_closed(raw_fragment):
+                return None
+            try:
+                parsed = json.loads(raw_fragment, object_pairs_hook=_reject_duplicate_keys_hook)
+                if not isinstance(parsed, dict):
+                    return None
+            except Exception:
+                return None
+
+        # Validate argument types against schema
+        if not cls.validate_schema_types(tool_spec.parameters, raw_call.arguments):
             return None
 
         # Generate committed immutable call
@@ -74,7 +125,7 @@ class CommitHorizonScheduler(BaseScheduler):
         model: BaseLLMAdapter,
         tools: ToolRegistry,
     ) -> Any:
-        in_flight_tasks: Dict[str, Tuple[asyncio.Task[ToolResult], ToolCall, Dict[str, Any]]] = {}
+        in_flight_tasks: Dict[str, Tuple[asyncio.Task[ToolResult], ToolCall, Dict[str, Any], CommittedCall]] = {}
 
         try:
             for turn in range(ctx.config.max_turns):
@@ -102,7 +153,7 @@ class CommitHorizonScheduler(BaseScheduler):
                             if not adapter:
                                 continue
 
-                            # Validate immutability and eligibility
+                            # Validate immutability, closure, and eligibility
                             committed = IncrementalCommitParser.try_commit_call(
                                 adapter.spec,
                                 candidate_call,
@@ -127,7 +178,7 @@ class CommitHorizonScheduler(BaseScheduler):
                                 early_task = asyncio.create_task(
                                     ctx.executor.execute(candidate_call, is_early_dispatched=True)
                                 )
-                                in_flight_tasks[call_id] = (early_task, candidate_call, snapshot_args)
+                                in_flight_tasks[call_id] = (early_task, candidate_call, snapshot_args, committed)
 
                     if chunk.is_final and chunk.parsed_tool_calls:
                         final_tool_calls = chunk.parsed_tool_calls
@@ -146,18 +197,16 @@ class CommitHorizonScheduler(BaseScheduler):
 
                 decision = LLMDecision(
                     reasoning="".join(final_reasoning),
-                    tool_calls=final_tool_calls or [c for _, c, _ in in_flight_tasks.values()],
+                    tool_calls=final_tool_calls or [c for _, c, _, _ in in_flight_tasks.values()],
                     final_answer=final_ans if not (final_tool_calls or in_flight_tasks) else None,
                     output_tokens=len(collected_chunks),
                 )
                 ctx.record_model_decision(decision)
 
                 if decision.is_final and (decision.final_answer is not None or not decision.tool_calls):
-                    # Clean up all in-flight early tasks
-                    for task, _, _ in in_flight_tasks.values():
-                        if not task.done():
-                            task.cancel()
-                    await asyncio.gather(*[t for t, _, _ in in_flight_tasks.values()], return_exceptions=True)
+                    # Clean up all in-flight early tasks cleanly
+                    for task, _, _, _ in in_flight_tasks.values():
+                        await cancel_and_await(task)
                     in_flight_tasks.clear()
                     return decision.final_answer
 
@@ -165,14 +214,10 @@ class CommitHorizonScheduler(BaseScheduler):
                 final_call_map = {c.call_id: c for c in decision.tool_calls}
 
                 # Cancel and discard any omitted / retracted early calls
-                for early_id, (task, early_call, _) in list(in_flight_tasks.items()):
+                for early_id, (task, early_call, _, _) in list(in_flight_tasks.items()):
                     if early_id not in final_call_map:
-                        if not task.done():
-                            task.cancel()
-                        try:
-                            await task
-                        except Exception:
-                            pass
+                        # Retracted call: cancel child task without escaping to parent
+                        await cancel_and_await(task)
                         in_flight_tasks.pop(early_id, None)
 
                 # Execute / reconcile all authoritative final calls
@@ -180,18 +225,14 @@ class CommitHorizonScheduler(BaseScheduler):
                     ctx.tool_calls.append(call)
 
                     if call.call_id in in_flight_tasks:
-                        task, early_call, snapshot_args = in_flight_tasks.pop(call.call_id)
+                        task, early_call, snapshot_args, committed = in_flight_tasks.pop(call.call_id)
                         early_tool_name = early_call.name or early_call.tool_name
                         final_tool_name = call.name or call.tool_name
 
                         # Check for semantic mutation (arguments mutated or tool renamed)
                         if call.arguments != snapshot_args or early_tool_name != final_tool_name:
-                            if not task.done():
-                                task.cancel()
-                            try:
-                                await task
-                            except Exception:
-                                pass
+                            # Cancel early task cleanly using cross-version safe helper
+                            await cancel_and_await(task)
 
                             ctx.profiler.record_event(
                                 EventType.GUARDRAIL_VIOLATION,
@@ -204,10 +245,13 @@ class CommitHorizonScheduler(BaseScheduler):
                             # Re-execute with mutated arguments
                             res = await ctx.executor.execute(call)
                         else:
-                            # Re-use early executed result
+                            # Re-use early executed result safely
                             try:
                                 res = await task
-                            except Exception as ex:
+                            except asyncio.CancelledError:
+                                # Early task was cancelled -> re-execute
+                                res = await ctx.executor.execute(call)
+                            except Exception:
                                 res = await ctx.executor.execute(call)
 
                         ctx.record_tool_result(res)
@@ -221,8 +265,6 @@ class CommitHorizonScheduler(BaseScheduler):
 
         finally:
             if in_flight_tasks:
-                for task, _, _ in in_flight_tasks.values():
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*[t for t, _, _ in in_flight_tasks.values()], return_exceptions=True)
+                for task, _, _, _ in in_flight_tasks.values():
+                    await cancel_and_await(task)
                 in_flight_tasks.clear()

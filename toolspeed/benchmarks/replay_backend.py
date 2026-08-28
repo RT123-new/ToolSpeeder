@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 import time
 
 from toolspeed.adapters.base import (
@@ -29,19 +29,27 @@ class ReplayToolAdapter(BaseToolAdapter):
     def __init__(
         self,
         name: str,
-        latency_ms: float = 50.0,
+        latency_ms: float = 30.0,
         output: Any = None,
         is_read_only: bool = True,
         side_effects: bool = False,
         requires_approval: bool = False,
+        is_idempotent: bool = True,
+        cold_start_ms: float = 0.0,
     ):
         self._name = name
         self.latency_ms = latency_ms
+        self.cold_start_ms = cold_start_ms
         self.fixed_output = output
         self._is_read_only = is_read_only
         self._side_effects = side_effects
         self._requires_approval = requires_approval
+        self._is_idempotent = is_idempotent
         self.call_count = 0
+        self.is_warmed = False
+
+    def prewarm(self) -> None:
+        self.is_warmed = True
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -57,8 +65,14 @@ class ReplayToolAdapter(BaseToolAdapter):
     async def execute(self, call: ToolCall) -> ToolResult:
         start_ns = time.perf_counter_ns()
         self.call_count += 1
-        if self.latency_ms > 0:
-            await asyncio.sleep(self.latency_ms / 1000.0)
+        
+        delay_ms = self.latency_ms
+        if not self.is_warmed and self.cold_start_ms > 0:
+            delay_ms += self.cold_start_ms
+            self.is_warmed = True
+
+        if delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000.0)
 
         out = self.fixed_output if self.fixed_output is not None else {"status": "ok", "call": call.arguments}
         return ToolResult(
@@ -81,14 +95,27 @@ class ReplayLLMAdapter(BaseLLMAdapter):
         self,
         decisions: Optional[List[LLMDecision]] = None,
         draft_prediction: Optional[ToolCall] = None,
-        decision_delay_ms: float = 40.0,
-        stream_chunks_count: int = 5,
+        decision_delay_ms: float = 30.0,
+        stream_chunks_count: int = 4,
     ):
         self.decisions = list(decisions or [])
         self.draft_prediction = draft_prediction
         self.decision_delay_ms = decision_delay_ms
         self.stream_chunks_count = stream_chunks_count
         self._turn_index = 0
+
+    def _get_decision_sync(self, task: Task) -> LLMDecision:
+        if self._turn_index < len(self.decisions):
+            decision = self.decisions[self._turn_index]
+            self._turn_index += 1
+            return decision
+        return LLMDecision(
+            reasoning="Task complete.",
+            tool_calls=[],
+            final_answer=task.expected_output or {"status": "done"},
+            input_tokens=100,
+            output_tokens=20,
+        )
 
     async def decide(
         self,
@@ -98,20 +125,7 @@ class ReplayLLMAdapter(BaseLLMAdapter):
     ) -> LLMDecision:
         if self.decision_delay_ms > 0:
             await asyncio.sleep(self.decision_delay_ms / 1000.0)
-
-        if self._turn_index < len(self.decisions):
-            decision = self.decisions[self._turn_index]
-            self._turn_index += 1
-            return decision
-
-        # Default final decision
-        return LLMDecision(
-            reasoning="Task complete.",
-            tool_calls=[],
-            final_answer=task.expected_output or {"status": "done"},
-            input_tokens=100,
-            output_tokens=20,
-        )
+        return self._get_decision_sync(task)
 
     async def predict_draft(
         self,
@@ -119,8 +133,7 @@ class ReplayLLMAdapter(BaseLLMAdapter):
         history: List[Dict[str, Any]],
         available_tools: List[ToolSpec],
     ) -> Optional[ToolCall]:
-        # Fast draft latency
-        await asyncio.sleep(max(0.001, self.decision_delay_ms * 0.2 / 1000.0))
+        await asyncio.sleep(max(0.001, self.decision_delay_ms * 0.15 / 1000.0))
         return self.draft_prediction
 
     async def stream_decision(
@@ -129,7 +142,7 @@ class ReplayLLMAdapter(BaseLLMAdapter):
         history: List[Dict[str, Any]],
         available_tools: List[ToolSpec],
     ) -> AsyncIterator[StreamingChunk]:
-        decision = await self.decide(task, history, available_tools)
+        decision = self._get_decision_sync(task)
         chunk_delay = (self.decision_delay_ms / 1000.0) / max(1, self.stream_chunks_count)
 
         for i in range(self.stream_chunks_count):
@@ -152,13 +165,24 @@ class ReplayBackend:
 
     def __init__(self, evidence_level: EvidenceLevel = EvidenceLevel.REPLAY_INTEGRATION):
         self.evidence_level = evidence_level
+        self._prepared = False
+
+    async def prepare_run(self, plan: Any) -> None:
+        self._prepared = True
+
+    async def finalize_run(self) -> Dict[str, Any]:
+        return {"backend": "ReplayBackend", "evidence_level": self.evidence_level.value}
+
+    async def close(self) -> None:
+        pass
 
     def create_workload_environment(
         self,
         workload_id: str,
-        tool_delay_ms: float = 30.0,
-        model_delay_ms: float = 40.0,
-    ) -> tuple[ToolRegistry, ReplayLLMAdapter]:
+        tool_delay_ms: float = 25.0,
+        model_delay_ms: float = 30.0,
+        trial_index: int = 0,
+    ) -> Tuple[ToolRegistry, ReplayLLMAdapter]:
         registry = ToolRegistry()
 
         if workload_id == "W1":
@@ -175,13 +199,13 @@ class ReplayBackend:
 
         elif workload_id == "W2":
             # W2: Dependent chains
-            registry.register(ReplayToolAdapter("fetch_user", latency_ms=tool_delay_ms, output={"user_id": "u42", "org_id": "org9"}))
+            registry.register(ReplayToolAdapter("fetch_user", latency_ms=tool_delay_ms, output={"user_id": "u42", "name": "Alice", "org_id": "org9"}))
             registry.register(ReplayToolAdapter("fetch_orders", latency_ms=tool_delay_ms, output={"user_id": "u42", "orders": [101, 102]}))
             c1 = ToolCall(call_id="c1", name="fetch_user", arguments={"user_id": "u42"})
             c2 = ToolCall(call_id="c2", name="fetch_orders", arguments={"user_id": "$c1.user_id"})
             decisions = [
                 LLMDecision(reasoning="Chain", tool_calls=[c1, c2]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"orders": [101, 102]}),
+                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"user": {"user_id": "u42", "name": "Alice", "org_id": "org9"}, "orders": {"user_id": "u42", "orders": [101, 102]}, "fused": True}),
             ]
             model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
 
@@ -197,11 +221,14 @@ class ReplayBackend:
 
         elif workload_id == "W4":
             # W4: Repeated workflows with plan locality (caching)
-            registry.register(ReplayToolAdapter("cached_query", latency_ms=tool_delay_ms, output={"result": "cached_payload"}))
-            c = ToolCall(name="cached_query", arguments={"key": "lookup_1"})
+            # Repeated keys to test caching hit rate
+            user_key = f"usr_{trial_index % 3:03d}"
+            registry.register(ReplayToolAdapter("lookup_user_profile", latency_ms=tool_delay_ms, output={"user_id": user_key, "tier": "enterprise", "discount_pct": 20}))
+            registry.register(ReplayToolAdapter("calculate_final_invoice", latency_ms=10.0, output={"final_price": 80.0, "currency": "USD"}))
             decisions = [
-                LLMDecision(reasoning="Lookup", tool_calls=[c]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"result": "cached_payload"}),
+                LLMDecision(reasoning="Lookup", tool_calls=[ToolCall(name="lookup_user_profile", arguments={"user_id": user_key})]),
+                LLMDecision(reasoning="Invoice", tool_calls=[ToolCall(name="calculate_final_invoice", arguments={"user_id": user_key, "tier": "enterprise", "base_amount": 100.0, "discount_pct": 20})]),
+                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"user_id": user_key, "tier": "enterprise", "final_price": 80.0}),
             ]
             model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
 
@@ -216,22 +243,33 @@ class ReplayBackend:
             model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
 
         elif workload_id == "W6":
-            # W6: Cold-start tool / sandbox
-            registry.register(ReplayToolAdapter("sandbox_run", latency_ms=tool_delay_ms * 2.5, output={"exit": 0}))
-            c = ToolCall(name="sandbox_run", arguments={"code": "print(1)"})
+            # W6: Cold-start tool / sandbox (cold_start_ms=80ms vs warm=20ms)
+            registry.register(ReplayToolAdapter("sandbox_python_eval", latency_ms=15.0, cold_start_ms=80.0, output={"result": 42}))
+            c = ToolCall(name="sandbox_python_eval", arguments={"expression": "6 * 7"})
             decisions = [
                 LLMDecision(reasoning="Run", tool_calls=[c]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"exit": 0}),
+                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"result": 42}),
             ]
             model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
 
         elif workload_id == "W7":
             # W7: Side-effecting actions requiring approval
-            registry.register(ReplayToolAdapter("execute_payment", latency_ms=tool_delay_ms, output={"tx": "tx99"}, is_read_only=False, side_effects=True, requires_approval=True))
-            c = ToolCall(name="execute_payment", arguments={"amount": 50}, is_approved=True)
+            idem_key = f"idem_w7_{trial_index:04d}"
+            registry.register(ReplayToolAdapter("execute_fund_transfer", latency_ms=tool_delay_ms, output={"status": "TRANSFERRED", "tx": "tx99"}, is_read_only=False, side_effects=True, requires_approval=True))
+            c = ToolCall(name="execute_fund_transfer", arguments={"from_account": "acc_001", "to_account": "acc_002", "amount": 100.0, "idempotency_key": idem_key}, is_approved=True)
             decisions = [
-                LLMDecision(reasoning="Pay", tool_calls=[c]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"tx": "tx99"}),
+                LLMDecision(reasoning="Transfer", tool_calls=[c]),
+                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"status": "TRANSFERRED"}),
+            ]
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
+
+        elif workload_id in ("E5", "E5a"):
+            # E5a: Action Bytecode Transport Codec
+            registry.register(ReplayToolAdapter("process_packet", latency_ms=tool_delay_ms, output={"parsed": True}))
+            c = ToolCall(name="process_packet", arguments={"header": "v2", "payload": "data_packet"})
+            decisions = [
+                LLMDecision(reasoning="Encode", tool_calls=[c]),
+                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"parsed": True}),
             ]
             model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
 

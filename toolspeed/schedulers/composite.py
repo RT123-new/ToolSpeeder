@@ -9,7 +9,7 @@ import time
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, StreamingChunk, ToolRegistry
 from toolspeed.core.types import EventType, ToolCall, ToolResult, ToolSpec
-from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig
+from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig, cancel_and_await
 from toolspeed.schedulers.e1_dag_scheduler import DAGNode, ToolDAG
 from toolspeed.schedulers.e2_jit_fusion import DeclarativeWorkflow, FusedKernel, JITFusionScheduler
 from toolspeed.schedulers.e4_commit_horizon import IncrementalCommitParser
@@ -70,19 +70,17 @@ class CompositeScheduler(BaseScheduler):
 
         # 3. JIT Fusion Check
         if self.config.jit_fusion_enabled:
-            for kernel in self.jit_scheduler._compiled_kernels.values():
-                if kernel.matcher(ctx):
-                    ctx.profiler.record_event(EventType.JIT_FUSION_START, details={"workflow": kernel.name})
-                    # Execute declarative workflow through JIT scheduler internal
-                    res = await self.jit_scheduler._execute_internal(ctx, model, tools)
-                    if ctx.task.validate(res):
-                        return res
-                    break
+            wf = self.jit_scheduler._match_workflow(ctx)
+            if wf is not None:
+                ctx.profiler.record_event(EventType.JIT_FUSION_START, details={"workflow": wf.workflow_id})
+                res = await self.jit_scheduler._execute_internal(ctx, model, tools)
+                if ctx.task.validate(res):
+                    return res
 
         spec_task: Optional[asyncio.Task[ToolResult]] = None
         draft_task: Optional[asyncio.Task[Optional[ToolCall]]] = None
         in_flight_commit: Dict[str, Tuple[asyncio.Task[ToolResult], ToolCall, Dict[str, Any]]] = {}
-        active_dag_tasks: Set[asyncio.Task] = set()
+        active_dag_tasks: Set[asyncio.Task[ToolResult]] = set()
 
         try:
             for turn in range(ctx.config.max_turns):
@@ -107,7 +105,7 @@ class CompositeScheduler(BaseScheduler):
                         reasoning_parts.append(chunk.delta_text)
 
                     # Check if draft prediction is ready
-                    if draft_task and draft_task.done() and spec_task is None:
+                    if draft_task and draft_task.done() and not draft_task.cancelled() and spec_task is None:
                         try:
                             predicted = draft_task.result()
                             if (
@@ -115,7 +113,13 @@ class CompositeScheduler(BaseScheduler):
                                 and predicted.speculation_confidence >= self.config.speculation_confidence_threshold
                             ):
                                 spec_adapter = tools.get(predicted.name or predicted.tool_name)
-                                if spec_adapter and spec_adapter.spec.is_read_only and not spec_adapter.spec.side_effects:
+                                if (
+                                    spec_adapter
+                                    and spec_adapter.spec.is_read_only
+                                    and not spec_adapter.spec.side_effects
+                                    and not spec_adapter.spec.requires_approval
+                                    and spec_adapter.spec.is_idempotent
+                                ):
                                     spec_call = predicted
                                     spec_call.is_speculative = True
                                     ctx.profiler.record_event(EventType.SPECULATION_START, details={"tool": predicted.name})
@@ -145,6 +149,9 @@ class CompositeScheduler(BaseScheduler):
 
                 ctx.profiler.end_span(f"composite_turn_{turn}", EventType.MODEL_END)
 
+                if draft_task and not draft_task.done():
+                    await cancel_and_await(draft_task)
+
                 last_meta = collected_chunks[-1].metadata if collected_chunks else {}
                 final_ans = last_meta.get("final_answer")
                 if final_ans is None and not (final_calls or in_flight_commit):
@@ -158,17 +165,22 @@ class CompositeScheduler(BaseScheduler):
                 )
                 ctx.record_model_decision(decision)
 
-                if decision.is_final:
+                if decision.is_final and (decision.final_answer is not None or not decision.tool_calls):
                     if spec_task and not spec_task.done():
-                        spec_task.cancel()
+                        await cancel_and_await(spec_task)
                         ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
+                    for t, _, _ in in_flight_commit.values():
+                        await cancel_and_await(t)
                     return decision.final_answer or "Composite execution complete."
 
                 # Action Bytecode tracking
                 if self.config.action_bytecode_enabled:
                     for c in decision.tool_calls:
-                        encoded = self.bytecode_codec.encode(c)
-                        ctx.profiler.record_event(EventType.BYTECODE_ENCODE, details={"bytes": len(encoded)})
+                        try:
+                            encoded = self.bytecode_codec.encode(c)
+                            ctx.profiler.record_event(EventType.BYTECODE_ENCODE, details={"bytes": len(encoded)})
+                        except Exception:
+                            pass
 
                 # Resolve Speculation
                 matching_spec_idx = -1
@@ -195,11 +207,7 @@ class CompositeScheduler(BaseScheduler):
                         spec_task = None
                 elif spec_task is not None:
                     if not spec_task.done():
-                        spec_task.cancel()
-                        try:
-                            await spec_task
-                        except Exception:
-                            pass
+                        await cancel_and_await(spec_task)
                         ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
                     else:
                         ctx.guardrails.record_speculation_resolved(hit=False, cancelled=False)
@@ -219,13 +227,8 @@ class CompositeScheduler(BaseScheduler):
 
                     if c.call_id in in_flight_commit:
                         task, early_call, snapshot = in_flight_commit.pop(c.call_id)
-                        if c.arguments != snapshot:
-                            if not task.done():
-                                task.cancel()
-                            try:
-                                await task
-                            except Exception:
-                                pass
+                        if c.arguments != snapshot or (c.name or c.tool_name) != (early_call.name or early_call.tool_name):
+                            await cancel_and_await(task)
                             ctx.profiler.record_event(
                                 EventType.GUARDRAIL_VIOLATION,
                                 details={"error": "Semantic mutation after commit horizon", "tool": c.name},
@@ -233,7 +236,10 @@ class CompositeScheduler(BaseScheduler):
                         else:
                             node.status = "running"
                             async def _wrap_early(t=task, n=node):
-                                res = await t
+                                try:
+                                    res = await t
+                                except Exception as ex:
+                                    res = await ctx.executor.execute(n.call)
                                 n.result = res
                                 n.status = "completed" if res.is_success else "failed"
                                 ctx.record_tool_result(res)
@@ -243,8 +249,16 @@ class CompositeScheduler(BaseScheduler):
                 # Dynamic DAG execution
                 while not dag.is_complete():
                     ready_nodes = dag.get_ready_nodes()
+
+                    # Record tool results for any newly failed nodes whose parent failed
+                    for node in dag.nodes.values():
+                        if node.status == "failed" and node.result is None:
+                            res_f = ToolResult(call_id=node.node_id, name=node.call.name, error=node.error or "Parent failed", is_error=True)
+                            node.result = res_f
+                            ctx.record_tool_result(res_f)
+
                     for node in ready_nodes:
-                        resolved, err = dag.resolve_arguments(node)
+                        resolved, err = dag.resolve_node_arguments(node)
                         if err:
                             res = ToolResult(call_id=node.call.call_id, name=node.call.name, error=err, is_error=True)
                             node.result = res
@@ -276,16 +290,12 @@ class CompositeScheduler(BaseScheduler):
             return "Max turns reached without final answer."
 
         finally:
-            tasks_to_cancel = list(active_dag_tasks)
             if spec_task and not spec_task.done():
-                tasks_to_cancel.append(spec_task)
+                await cancel_and_await(spec_task)
             if draft_task and not draft_task.done():
-                tasks_to_cancel.append(draft_task)
+                await cancel_and_await(draft_task)
             for t, _, _ in in_flight_commit.values():
-                if not t.done():
-                    tasks_to_cancel.append(t)
-            for t in tasks_to_cancel:
-                if not t.done():
-                    t.cancel()
-            if tasks_to_cancel:
-                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+                await cancel_and_await(t)
+            for t in list(active_dag_tasks):
+                await cancel_and_await(t)
+            active_dag_tasks.clear()

@@ -1,0 +1,386 @@
+{
+  "title": "ToolSpeed Paired Benchmark Suite",
+  "evidence_level": "local_wall_clock",
+  "evaluations": [
+    {
+      "workload_id": "W1",
+      "baseline_name": "SyncReActScheduler",
+      "candidate_name": "DAGScheduler",
+      "evidence_level": "local_wall_clock",
+      "trials": 10,
+      "summary": {
+        "baseline_p50_ms": 244.76447950291913,
+        "candidate_p50_ms": 116.68939651281107,
+        "p50_speedup": 2.097572588577463,
+        "baseline_p90_ms": 245.86837080132682,
+        "candidate_p90_ms": 118.38942498143297,
+        "p90_speedup": 2.076776459045108,
+        "baseline_p95_ms": 246.12653940421296,
+        "candidate_p95_ms": 119.64683748228708,
+        "p95_speedup": 2.057108608830972,
+        "baseline_p99_ms": 246.33307428652188,
+        "candidate_p99_ms": 120.65276748297038,
+        "p99_speedup": 2.0416694902691788,
+        "baseline_mean_ms": 244.48578779993113,
+        "candidate_mean_ms": 117.0549128059065,
+        "mean_speedup": 2.0886418343271327,
+        "baseline_success_rate": 1.0,
+        "candidate_success_rate": 1.0,
+        "success_rate_delta": 0.0,
+        "wasted_call_rate": 0.0,
+        "cost_multiplier": 1.0,
+        "rate_limit_error_rate": 0.0,
+        "input_tokens_baseline": 0.0,
+        "input_tokens_candidate": 0.0,
+        "token_reduction_pct": 0.0,
+        "deopt_rate": 0.0,
+        "tool_start_p50_ms": 0.0,
+        "tool_start_p95_ms": 0.0,
+        "tool_start_speedup_p95": 1.0,
+        "semantic_mutation_rate": 0.0,
+        "p95_reduction_ci": [
+          0.0,
+          0.0
+        ],
+        "extra_metrics": {}
+      },
+      "verdict": {
+        "experiment_id": "W1",
+        "hypothesis": "Candidate DAGScheduler outperforms SyncReActScheduler on W1",
+        "passed": true,
+        "falsified": false,
+        "state": "passed",
+        "evidence_level": "local_wall_clock",
+        "summary": "P95 speedup: 2.06x, P50 speedup: 2.10x, Success: 100.0%",
+        "checks": [
+          {
+            "name": "P95 Speedup",
+            "target": ">= 1.05x",
+            "measured": "2.06x",
+            "passed": true,
+            "detail": "P95 speedup check"
+          },
+          {
+            "name": "Success Rate",
+            "target": ">= 95%",
+            "measured": "100.0%",
+            "passed": true,
+            "detail": "Candidate success rate"
+          }
+        ],
+        "evidence_log_row": {}
+      }
+    },
+    {
+      "workload_id": "W2",
+      "baseline_name": "SyncReActScheduler",
+      "candidate_name": "JITFusionScheduler",
+      "evidence_level": "local_wall_clock",
+      "trials": 10,
+      "summary": {
+        "baseline_p50_ms": 147.95329149637837,
+        "candidate_p50_ms": 212.39237501868047,
+        "p50_speedup": 0.6966035926824844,
+        "baseline_p90_ms": 150.1569034793647,
+        "candidate_p90_ms": 213.94225390686188,
+        "p90_speedup": 0.7018571634976528,
+        "baseline_p95_ms": 150.2575347360107,
+        "candidate_p95_ms": 214.16633545741206,
+        "p95_speedup": 0.701592686894949,
+        "baseline_p99_ms": 150.33803974132752,
+        "candidate_p99_ms": 214.3456006978522,
+        "p99_speedup": 0.7013815037577953,
+        "baseline_mean_ms": 147.9947208048543,
+        "candidate_mean_ms": 212.0368791074725,
+        "mean_speedup": 0.6979668887214759,
+        "baseline_success_rate": 1.0,
+        "candidate_success_rate": 1.0,
+        "success_rate_delta": 0.0,
+        "wasted_call_rate": 0.0,
+        "cost_multiplier": 1.0,
+        "rate_limit_error_rate": 0.0,
+        "input_tokens_baseline": 0.0,
+        "input_tokens_candidate": 0.0,
+        "token_reduction_pct": 0.0,
+        "deopt_rate": 0.0,
+        "tool_start_p50_ms": 0.0,
+        "tool_start_p95_ms": 0.0,
+        "tool_start_speedup_p95": 1.0,
+        "semantic_mutation_rate": 0.0,
+        "p95_reduction_ci": [
+          0.0,
+          0.0
+        ],
+        "extra_metrics": {}
+      },
+      "verdict": {
+        "experiment_id": "W2",
+        "hypothesis": "Candidate JITFusionScheduler outperforms SyncReActScheduler on W2",
+        "passed": false,
+        "falsified": true,
+        "state": "falsified",
+        "evidence_level": "local_wall_clock",
+        "summary": "P95 speedup: 0.70x, P50 speedup: 0.70x, Success: 100.0%",
+        "checks": [
+          {
+            "name": "P95 Speedup",
+            "target": ">= 1.05x",
+            "measured": "0.70x",
+            "passed": false,
+            "detail": "P95 speedup check"
+          },
+          {
+            "name": "Success Rate",
+            "target": ">= 95%",
+            "measured": "100.0%",
+            "passed": true,
+            "detail": "Candidate success rate"
+          }
+        ],
+        "evidence_log_row": {}
+      }
+    },
+    {
+      "workload_id": "W3",
+      "baseline_name": "SyncReActScheduler",
+      "candidate_name": "SpeculativeReadScheduler",
+      "evidence_level": "local_wall_clock",
+      "trials": 10,
+      "summary": {
+        "baseline_p50_ms": 116.58283350698184,
+        "candidate_p50_ms": 84.01618750940543,
+        "p50_speedup": 1.3876234683218713,
+        "baseline_p90_ms": 117.6018965052208,
+        "candidate_p90_ms": 85.38365419080947,
+        "p90_speedup": 1.3773350135895126,
+        "baseline_p95_ms": 117.94699026359012,
+        "candidate_p95_ms": 85.47716059401864,
+        "p95_speedup": 1.3798655622615943,
+        "baseline_p99_ms": 118.22306527028559,
+        "candidate_p99_ms": 85.55196571658598,
+        "p99_speedup": 1.3818860183988226,
+        "baseline_mean_ms": 116.32753350422718,
+        "candidate_mean_ms": 84.00784590339754,
+        "mean_speedup": 1.3847222512763242,
+        "baseline_success_rate": 1.0,
+        "candidate_success_rate": 1.0,
+        "success_rate_delta": 0.0,
+        "wasted_call_rate": 0.0,
+        "cost_multiplier": 1.0,
+        "rate_limit_error_rate": 0.0,
+        "input_tokens_baseline": 0.0,
+        "input_tokens_candidate": 0.0,
+        "token_reduction_pct": 0.0,
+        "deopt_rate": 0.0,
+        "tool_start_p50_ms": 0.0,
+        "tool_start_p95_ms": 0.0,
+        "tool_start_speedup_p95": 1.0,
+        "semantic_mutation_rate": 0.0,
+        "p95_reduction_ci": [
+          0.0,
+          0.0
+        ],
+        "extra_metrics": {}
+      },
+      "verdict": {
+        "experiment_id": "W3",
+        "hypothesis": "Candidate SpeculativeReadScheduler outperforms SyncReActScheduler on W3",
+        "passed": true,
+        "falsified": false,
+        "state": "passed",
+        "evidence_level": "local_wall_clock",
+        "summary": "P95 speedup: 1.38x, P50 speedup: 1.39x, Success: 100.0%",
+        "checks": [
+          {
+            "name": "P95 Speedup",
+            "target": ">= 1.05x",
+            "measured": "1.38x",
+            "passed": true,
+            "detail": "P95 speedup check"
+          },
+          {
+            "name": "Success Rate",
+            "target": ">= 95%",
+            "measured": "100.0%",
+            "passed": true,
+            "detail": "Candidate success rate"
+          }
+        ],
+        "evidence_log_row": {}
+      }
+    },
+    {
+      "workload_id": "W4",
+      "baseline_name": "SyncReActScheduler",
+      "candidate_name": "CacheScheduler",
+      "evidence_level": "local_wall_clock",
+      "trials": 10,
+      "summary": {
+        "baseline_p50_ms": 115.88737450074404,
+        "candidate_p50_ms": 116.24343700532336,
+        "p50_speedup": 0.9969369238061757,
+        "baseline_p90_ms": 116.74414579756558,
+        "candidate_p90_ms": 117.0751670084428,
+        "p90_speedup": 0.9971725753690076,
+        "baseline_p95_ms": 116.76223939284682,
+        "candidate_p95_ms": 117.24954200035427,
+        "p95_speedup": 0.995843884767533,
+        "baseline_p99_ms": 116.77671426907182,
+        "candidate_p99_ms": 117.38904199388344,
+        "p99_speedup": 0.9947837744101913,
+        "baseline_mean_ms": 115.83177470311057,
+        "candidate_mean_ms": 116.17805430432782,
+        "mean_speedup": 0.9970194060892932,
+        "baseline_success_rate": 1.0,
+        "candidate_success_rate": 1.0,
+        "success_rate_delta": 0.0,
+        "wasted_call_rate": 0.0,
+        "cost_multiplier": 1.0,
+        "rate_limit_error_rate": 0.0,
+        "input_tokens_baseline": 0.0,
+        "input_tokens_candidate": 0.0,
+        "token_reduction_pct": 0.0,
+        "deopt_rate": 0.0,
+        "tool_start_p50_ms": 0.0,
+        "tool_start_p95_ms": 0.0,
+        "tool_start_speedup_p95": 1.0,
+        "semantic_mutation_rate": 0.0,
+        "p95_reduction_ci": [
+          0.0,
+          0.0
+        ],
+        "extra_metrics": {}
+      },
+      "verdict": {
+        "experiment_id": "W4",
+        "hypothesis": "Candidate CacheScheduler outperforms SyncReActScheduler on W4",
+        "passed": false,
+        "falsified": true,
+        "state": "falsified",
+        "evidence_level": "local_wall_clock",
+        "summary": "P95 speedup: 1.00x, P50 speedup: 1.00x, Success: 100.0%",
+        "checks": [
+          {
+            "name": "P95 Speedup",
+            "target": ">= 1.05x",
+            "measured": "1.00x",
+            "passed": false,
+            "detail": "P95 speedup check"
+          },
+          {
+            "name": "Success Rate",
+            "target": ">= 95%",
+            "measured": "100.0%",
+            "passed": true,
+            "detail": "Candidate success rate"
+          }
+        ],
+        "evidence_log_row": {}
+      }
+    },
+    {
+      "workload_id": "W5",
+      "baseline_name": "SyncReActScheduler",
+      "candidate_name": "CommitHorizonScheduler",
+      "evidence_level": "local_wall_clock",
+      "trials": 10,
+      "summary": {
+        "baseline_p50_ms": 115.92777050100267,
+        "candidate_p50_ms": 213.28035449550953,
+        "p50_speedup": 0.5435464076155381,
+        "baseline_p90_ms": 116.6361042211065,
+        "candidate_p90_ms": 216.20791721215937,
+        "p90_speedup": 0.5394626881616663,
+        "baseline_p95_ms": 116.80757311551133,
+        "candidate_p95_ms": 216.4867291066912,
+        "p95_speedup": 0.5395599702462364,
+        "baseline_p99_ms": 116.94474823103519,
+        "candidate_p99_ms": 216.70977862231666,
+        "p99_speedup": 0.5396376156834497,
+        "baseline_mean_ms": 115.83392490574624,
+        "candidate_mean_ms": 213.27504599757958,
+        "mean_speedup": 0.5431199152434403,
+        "baseline_success_rate": 1.0,
+        "candidate_success_rate": 1.0,
+        "success_rate_delta": 0.0,
+        "wasted_call_rate": 0.0,
+        "cost_multiplier": 1.0,
+        "rate_limit_error_rate": 0.0,
+        "input_tokens_baseline": 0.0,
+        "input_tokens_candidate": 0.0,
+        "token_reduction_pct": 0.0,
+        "deopt_rate": 0.0,
+        "tool_start_p50_ms": 0.0,
+        "tool_start_p95_ms": 0.0,
+        "tool_start_speedup_p95": 1.0,
+        "semantic_mutation_rate": 0.0,
+        "p95_reduction_ci": [
+          0.0,
+          0.0
+        ],
+        "extra_metrics": {}
+      },
+      "verdict": {
+        "experiment_id": "W5",
+        "hypothesis": "Candidate CommitHorizonScheduler outperforms SyncReActScheduler on W5",
+        "passed": false,
+        "falsified": true,
+        "state": "falsified",
+        "evidence_level": "local_wall_clock",
+        "summary": "P95 speedup: 0.54x, P50 speedup: 0.54x, Success: 100.0%",
+        "checks": [
+          {
+            "name": "P95 Speedup",
+            "target": ">= 1.05x",
+            "measured": "0.54x",
+            "passed": false,
+            "detail": "P95 speedup check"
+          },
+          {
+            "name": "Success Rate",
+            "target": ">= 95%",
+            "measured": "100.0%",
+            "passed": true,
+            "detail": "Candidate success rate"
+          }
+        ],
+        "evidence_log_row": {}
+      }
+    }
+  ],
+  "negative_controls": [
+    {
+      "control": "E1_disabled",
+      "p95_speedup": 1.0050350730810909,
+      "passed_expected_null": true,
+      "detail": "Proves disabled E1 produces ~1.0x speedup as expected"
+    },
+    {
+      "control": "E3_disabled",
+      "p95_speedup": 1.0032724600393899,
+      "passed_expected_null": true,
+      "detail": "Proves disabled E3 produces ~1.0x speedup as expected"
+    }
+  ],
+  "manifest": {
+    "git_sha": "1d3b3a61afefcbeb64c3015579ae1d66107e8450",
+    "git_dirty": true,
+    "command": "toolspeed",
+    "evidence_level": "local_wall_clock",
+    "timestamp_utc": "2026-08-27T21:44:08Z",
+    "seed": 20260825,
+    "python_version": "3.14.6",
+    "os_platform": "Darwin 27.0.0 (arm64)",
+    "hardware_info": {},
+    "dependency_versions": {
+      "numpy": "2.4.6"
+    },
+    "benchmark_config_hash": "",
+    "workload_fixture_hash": "",
+    "raw_trace_hash": "",
+    "report_generator_version": "2.0.0",
+    "is_simulated": false
+  },
+  "overall_verdict": "falsified",
+  "total_runtime_s": 22.07094020798104
+}

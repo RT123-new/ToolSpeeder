@@ -360,17 +360,19 @@ class TestCLI(unittest.TestCase):
 
     def test_cli_benchmark(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            ret = cli.main(["benchmark", "--trials", "150", "--out", tmpdir])
+            ret = cli.main(["benchmark", "--backend", "replay", "--trials", "2", "--out", tmpdir])
             self.assertEqual(ret, 0)
-            self.assertTrue((Path(tmpdir) / "summary_report.json").exists())
-            self.assertTrue((Path(tmpdir) / "EVIDENCE_LOG.md").exists())
-            self.assertTrue((Path(tmpdir) / "dashboard.html").exists())
+            self.assertTrue((Path(tmpdir) / "benchmark_result.json").exists())
+            self.assertTrue((Path(tmpdir) / "report.md").exists())
+            self.assertTrue((Path(tmpdir) / "report.html").exists())
 
     def test_cli_report(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            ret = cli.main(["report", "--trials", "150", "--out", tmpdir])
+            ret_bm = cli.main(["benchmark", "--backend", "replay", "--trials", "2", "--out", tmpdir])
+            self.assertEqual(ret_bm, 0)
+            ret = cli.main(["report", "--input", tmpdir, "--out", tmpdir])
             self.assertEqual(ret, 0)
-            self.assertTrue((Path(tmpdir) / "dashboard.html").exists())
+            self.assertTrue((Path(tmpdir) / "report.html").exists())
 
 
 if __name__ == "__main__":

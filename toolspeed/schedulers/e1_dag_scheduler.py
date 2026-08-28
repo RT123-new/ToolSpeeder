@@ -9,7 +9,7 @@ import re
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
 from toolspeed.core.types import EventType, ToolCall, ToolResult
-from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
+from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, cancel_and_await
 
 
 @dataclass
@@ -23,17 +23,6 @@ class DAGNode:
     error: Optional[str] = None
 
 
-class ResolvedArguments(dict):
-    """Dual-mode dictionary and 2-tuple (dict, error) container for DAG parameter resolution."""
-    def __init__(self, data: Optional[Dict[str, Any]] = None, error: Optional[str] = None):
-        super().__init__(data or {})
-        self.error = error
-
-    def __iter__(self):
-        yield dict(self) if not self.error else None
-        yield self.error
-
-
 class ToolDAG:
     """Manages dynamic tool dependency graphs, cycle detection, and data-flow parameter binding."""
 
@@ -42,11 +31,12 @@ class ToolDAG:
         self.name_to_node_ids: Dict[str, List[str]] = {}
 
     def _extract_references(self, value: Any) -> List[Tuple[str, Optional[str]]]:
-        """Recursively discover all references in nested dicts, lists, tuples, and strings."""
+        """Recursively discover all references in nested dicts, lists, tuples, sets, and strings."""
         refs: List[Tuple[str, Optional[str]]] = []
         if isinstance(value, str):
             if "$" in value:
-                matches = re.findall(r"\$([a-zA-Z0-9_\-]+)(?:\.([a-zA-Z0-9_]+))?", value)
+                # Matches $call_id or $call_id.field or $call_id.nested.field
+                matches = re.findall(r"\$([a-zA-Z0-9_\-]+)(?:\.([a-zA-Z0-9_\.\-]+))?", value)
                 refs.extend(matches)
         elif isinstance(value, dict):
             for v in value.values():
@@ -63,16 +53,17 @@ class ToolDAG:
 
     def register_calls(self, calls: List[ToolCall]) -> None:
         """Two-pass graph construction:
-        Pass 1: Register all nodes first.
+        Pass 1: Register all nodes first. Duplicate IDs fail closed.
         Pass 2: Resolve and validate dependencies.
         """
         # Pass 1: Register all nodes
         for call in calls:
             node_id = call.call_id
             if node_id in self.nodes:
-                # Handle duplicate IDs gracefully with unique suffix
-                node_id = f"{call.call_id}_{len(self.nodes)}"
-                call.call_id = node_id
+                # Reject duplicate call IDs: fail closed instead of silently mutating
+                dup_node = DAGNode(node_id=f"dup_{node_id}", call=call, status="failed", error=f"Duplicate tool call ID '{node_id}' rejected")
+                self.nodes[f"dup_{node_id}"] = dup_node
+                continue
 
             node = DAGNode(node_id=node_id, call=call)
             self.nodes[node_id] = node
@@ -81,24 +72,25 @@ class ToolDAG:
             self.name_to_node_ids.setdefault(call_name, []).append(node_id)
 
         # Pass 2: Resolve dependencies
-        for node in self.nodes.values():
+        for node in list(self.nodes.values()):
+            if node.status == "failed":
+                continue
             refs = self._extract_references(node.call.arguments)
             for ref_id, _ in refs:
                 # 1. Direct node_id match
                 if ref_id in self.nodes:
-                    if ref_id != node.node_id:
-                        node.dependencies.add(ref_id)
-                        self.nodes[ref_id].dependents.add(node.node_id)
+                    # If ref_id == node.node_id, self-reference cycle
+                    node.dependencies.add(ref_id)
+                    self.nodes[ref_id].dependents.add(node.node_id)
                 # 2. Tool name match
                 elif ref_id in self.name_to_node_ids:
                     matching_ids = self.name_to_node_ids[ref_id]
                     if len(matching_ids) == 1:
                         target_id = matching_ids[0]
-                        if target_id != node.node_id:
-                            node.dependencies.add(target_id)
-                            self.nodes[target_id].dependents.add(node.node_id)
+                        node.dependencies.add(target_id)
+                        self.nodes[target_id].dependents.add(node.node_id)
                     elif len(matching_ids) > 1:
-                        # Ambiguous reference
+                        # Ambiguous reference -> fail closed
                         node.status = "failed"
                         node.error = f"Ambiguous reference '${ref_id}': multiple tool calls exist with name '{ref_id}'"
                 else:
@@ -107,13 +99,16 @@ class ToolDAG:
                     node.error = f"Unknown dependency reference '${ref_id}' in tool call '{node.call.name}'"
 
     def detect_cycles(self) -> Optional[List[str]]:
-        """Detect circular dependencies using DFS and return cycle path if found."""
+        """Detect circular dependencies (including self-references) using DFS."""
         visited: Dict[str, int] = {}  # 0=unvisited, 1=visiting, 2=visited
         parent_map: Dict[str, str] = {}
 
         def _dfs(u: str) -> Optional[List[str]]:
             visited[u] = 1
             for v in self.nodes[u].dependencies:
+                if v == u:
+                    # Self-reference cycle
+                    return [u, u]
                 if visited.get(v, 0) == 1:
                     # Cycle found
                     cycle = [v, u]
@@ -140,7 +135,7 @@ class ToolDAG:
         return None
 
     def get_ready_nodes(self) -> List[DAGNode]:
-        """Returns nodes whose dependencies have all completed successfully."""
+        """Returns list of DAGNodes ready for execution, and marks nodes with failed parents as failed."""
         ready = []
         for node in self.nodes.values():
             if node.status == "pending":
@@ -151,7 +146,7 @@ class ToolDAG:
                     if dep_node and dep_node.status == "failed":
                         parent_failed = True
                         node.status = "failed"
-                        node.error = f"Parent dependency '{dep_id}' failed"
+                        node.error = f"Parent dependency '{dep_id}' failed: {dep_node.error}"
                         break
 
                 if parent_failed:
@@ -170,13 +165,29 @@ class ToolDAG:
                     ready.append(node)
         return ready
 
-    def resolve_arguments(self, node: DAGNode) -> ResolvedArguments:
-        """Resolves template references in node arguments, supporting dict and tuple access."""
-        resolved, err = self.resolve_node_arguments(node, fail_closed=True)
-        if err:
-            loose_resolved, _ = self.resolve_node_arguments(node, fail_closed=False)
-            return ResolvedArguments(data=loose_resolved or {}, error=err)
-        return ResolvedArguments(data=resolved or {}, error=None)
+    def _extract_nested_path(self, obj: Any, path: str) -> Tuple[Any, Optional[str]]:
+        """Extracts nested value by dot-separated path or array index."""
+        current = obj
+        parts = path.split(".")
+        for part in parts:
+            if not part:
+                continue
+            if isinstance(current, dict):
+                if part not in current:
+                    return None, f"Missing output field '{part}' in parent output"
+                current = current[part]
+            elif isinstance(current, (list, tuple)):
+                if part.isdigit():
+                    idx = int(part)
+                    if 0 <= idx < len(current):
+                        current = current[idx]
+                    else:
+                        return None, f"Index '{part}' out of bounds (len={len(current)})"
+                else:
+                    return None, f"Cannot index non-dict with string key '{part}'"
+            else:
+                return None, f"Cannot traverse path '{part}' on object of type {type(current).__name__}"
+        return current, None
 
     def resolve_node_arguments(self, node: DAGNode, fail_closed: bool = True) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Binds intermediate results from parent nodes recursively.
@@ -184,7 +195,7 @@ class ToolDAG:
         """
         def _resolve_val(val: Any) -> Tuple[Any, Optional[str]]:
             if isinstance(val, str) and "$" in val:
-                refs = re.findall(r"\$([a-zA-Z0-9_\-]+)(?:\.([a-zA-Z0-9_]+))?", val)
+                refs = re.findall(r"\$([a-zA-Z0-9_\-]+)(?:\.([a-zA-Z0-9_\.\-]+))?", val)
                 if not refs:
                     return val, None
 
@@ -209,24 +220,12 @@ class ToolDAG:
                     val_to_insert = output
 
                     if attr:
-                        if isinstance(output, dict):
-                            if attr not in output:
-                                if fail_closed:
-                                    return None, f"Missing output field '{attr}' in parent '{ref_id}'"
-                                continue
-                            val_to_insert = output[attr]
-                        elif isinstance(output, (list, tuple)) and attr.isdigit():
-                            idx = int(attr)
-                            if 0 <= idx < len(output):
-                                val_to_insert = output[idx]
-                            else:
-                                if fail_closed:
-                                    return None, f"Index '{attr}' out of bounds for parent '{ref_id}' output"
-                                continue
-                        else:
+                        extracted, err = self._extract_nested_path(output, attr)
+                        if err:
                             if fail_closed:
-                                return None, f"Cannot extract field '{attr}' from parent '{ref_id}' output of type {type(output).__name__}"
+                                return None, f"Failed resolving '${ref_id}.{attr}': {err}"
                             continue
+                        val_to_insert = extracted
 
                     full_ref = f"${ref_id}.{attr}" if attr else f"${ref_id}"
                     if val.strip() == full_ref:
@@ -253,9 +252,27 @@ class ToolDAG:
                     res_list.append(sub_item)
                 return res_list, None
 
+            elif isinstance(val, tuple):
+                res_tuple_items = []
+                for item in val:
+                    sub_item, err = _resolve_val(item)
+                    if err:
+                        return None, err
+                    res_tuple_items.append(sub_item)
+                return tuple(res_tuple_items), None
+
+            elif isinstance(val, set):
+                res_set_items = set()
+                for item in val:
+                    sub_item, err = _resolve_val(item)
+                    if err:
+                        return None, err
+                    res_set_items.add(sub_item)
+                return res_set_items, None
+
             return val, None
 
-        resolved_args = {}
+        resolved_args: Dict[str, Any] = {}
         for k, v in node.call.arguments.items():
             res_v, err = _resolve_val(v)
             if err:
@@ -266,6 +283,8 @@ class ToolDAG:
 
     def is_complete(self) -> bool:
         return all(node.status in ("completed", "failed") for node in self.nodes.values())
+
+    resolve_arguments = resolve_node_arguments
 
 
 class DAGScheduler(BaseScheduler):
@@ -357,7 +376,7 @@ class DAGScheduler(BaseScheduler):
                         dag.nodes[node_id].result = res_err
                         ctx.record_tool_result(res_err)
 
-            # 4. Handle pre-failed nodes (e.g. unknown reference)
+            # 4. Handle pre-failed nodes (e.g. unknown reference, duplicate ID)
             for node in dag.nodes.values():
                 if node.status == "failed" and node.result is None:
                     res_err = ToolResult(
@@ -371,11 +390,25 @@ class DAGScheduler(BaseScheduler):
                     ctx.record_tool_result(res_err)
 
             # 5. Dynamic async wave execution: execute ready nodes as soon as dependencies clear
-            active_tasks: Set[asyncio.Task] = set()
+            active_tasks: Dict[asyncio.Task[ToolResult], DAGNode] = {}
 
             try:
                 while not dag.is_complete():
                     ready_nodes = dag.get_ready_nodes()
+
+                    # Record tool results for any newly failed nodes whose parent failed
+                    for node in dag.nodes.values():
+                        if node.status == "failed" and node.result is None:
+                            res_fail = ToolResult(
+                                call_id=node.node_id,
+                                name=node.call.name,
+                                tool_name=node.call.name,
+                                error=node.error or "Parent node failure",
+                                is_error=True,
+                            )
+                            node.result = res_fail
+                            ctx.record_tool_result(res_fail)
+
                     for node in ready_nodes:
                         ctx.profiler.record_event(
                             EventType.DAG_NODE_READY,
@@ -384,7 +417,7 @@ class DAGScheduler(BaseScheduler):
                         t = asyncio.create_task(
                             self._execute_dag_node(ctx, node, dag)
                         )
-                        active_tasks.add(t)
+                        active_tasks[t] = node
 
                     if not active_tasks:
                         # Deadlock prevention: mark remaining pending nodes as failed with explicit dependency errors
@@ -403,15 +436,30 @@ class DAGScheduler(BaseScheduler):
                         break
 
                     done, pending = await asyncio.wait(
-                        active_tasks, return_when=asyncio.FIRST_COMPLETED
+                        active_tasks.keys(), return_when=asyncio.FIRST_COMPLETED
                     )
-                    active_tasks = pending
+
+                    # Retrieve results/exceptions from all completed tasks
+                    for t in done:
+                        node = active_tasks.pop(t)
+                        if not t.cancelled():
+                            exc = t.exception()
+                            if exc is not None and node.result is None:
+                                res_exc = ToolResult(
+                                    call_id=node.node_id,
+                                    name=node.call.name,
+                                    tool_name=node.call.name,
+                                    error=f"Task exception: {str(exc)}",
+                                    is_error=True,
+                                )
+                                node.result = res_exc
+                                node.status = "failed"
+                                ctx.record_tool_result(res_exc)
 
             finally:
                 if active_tasks:
-                    for t in active_tasks:
-                        if not t.done():
-                            t.cancel()
-                    await asyncio.gather(*active_tasks, return_exceptions=True)
+                    for t in list(active_tasks.keys()):
+                        await cancel_and_await(t)
+                    active_tasks.clear()
 
         return "Max turns reached without final answer."

@@ -149,9 +149,11 @@ class BaseToolAdapter(ABC):
             description=schema.description,
             parameters=schema.parameters,
             required_args=schema.required_args or list(schema.parameters.get("required", [])),
+            commit_horizon_args=getattr(schema, "commit_horizon_args", []),
             is_read_only=not schema.is_side_effect,
             side_effects=schema.is_side_effect,
             requires_approval=getattr(schema, "requires_approval", False),
+            is_idempotent=getattr(schema, "is_idempotent", True),
         )
 
     def get_schema(self) -> ToolSchema:

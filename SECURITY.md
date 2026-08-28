@@ -19,4 +19,4 @@ ToolSpeed executes and orchestrates automated AI agent tool calling pipelines. B
    `ActionBytecodeCodec` enforces strict length bounds, 16-bit opcode bounds, payload size limits (16 MB), and strict rejection of trailing corrupt bytes.
 
 ## Reporting Vulnerabilities
-Please report security vulnerabilities by filing a confidential security advisory on GitHub or emailing security@toolspeed.org.
+Please report security vulnerabilities by filing a confidential security advisory through the repository's GitHub Security Advisory tab.

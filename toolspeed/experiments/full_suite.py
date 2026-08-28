@@ -139,20 +139,28 @@ class SuiteResult:
         ]
         wl_lines = [",".join(wl_keys)]
         for w in self.workloads.values():
+            b50 = f"{w.baseline_p50_ms:.2f}" if w.baseline_p50_ms is not None else ""
+            c50 = f"{w.candidate_p50_ms:.2f}" if w.candidate_p50_ms is not None else ""
+            sp50 = f"{w.p50_speedup:.3f}" if w.p50_speedup is not None else ""
+            b95 = f"{w.baseline_p95_ms:.2f}" if w.baseline_p95_ms is not None else ""
+            c95 = f"{w.candidate_p95_ms:.2f}" if w.candidate_p95_ms is not None else ""
+            sp95 = f"{w.p95_speedup:.3f}" if w.p95_speedup is not None else ""
+            red95 = f"{w.p95_reduction_pct:.2f}" if w.p95_reduction_pct is not None else ""
+            succ = f"{w.success_rate:.3f}" if w.success_rate is not None else "1.000"
             wl_lines.append(
                 ",".join(
                     [
                         w.workload_id,
                         f'"{w.name}"',
                         f'"{"; ".join(w.primary_mechanisms)}"',
-                        f"{w.baseline_p50_ms:.2f}",
-                        f"{w.candidate_p50_ms:.2f}",
-                        f"{w.p50_speedup:.3f}",
-                        f"{w.baseline_p95_ms:.2f}",
-                        f"{w.candidate_p95_ms:.2f}",
-                        f"{w.p95_speedup:.3f}",
-                        f"{w.p95_reduction_pct:.2f}",
-                        f"{w.success_rate:.3f}",
+                        b50,
+                        c50,
+                        sp50,
+                        b95,
+                        c95,
+                        sp95,
+                        red95,
+                        succ,
                         str(w.central_hypothesis_passed),
                         w.evidence_level.value if isinstance(w.evidence_level, EvidenceLevel) else str(w.evidence_level),
                     ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Set, Tuple
+import hashlib
 import json
 import struct
 import time
@@ -19,17 +20,40 @@ class ActionBytecodeCodec:
       [Version (1B)] [Opcode (2B >H)] [ArgCount (2B >H)]
       Repeated per argument:
         [KeyLen (2B >H)] [ValLen (4B >I)] [KeyBytes] [ValBytes (JSON)]
+        
+    Enforces:
+      - Max packet size: 64 MB
+      - Max key length: 64 KB
+      - Max value size: 16 MB
+      - Max arguments: 1024
+      - Rejection of duplicate keys
+      - Rejection of unknown opcodes and trailing bytes
+      - No dynamic opcode registration during encode
     """
     PROTOCOL_VERSION = 0x02
+    MAX_PACKET_SIZE = 64 * 1024 * 1024
+    MAX_KEY_LEN = 65535
+    MAX_VAL_LEN = 16 * 1024 * 1024
+    MAX_ARG_COUNT = 1024
 
     def __init__(self, tool_specs: Optional[List[ToolSpec]] = None) -> None:
         self.tool_to_opcode: Dict[str, int] = {}
         self.opcode_to_tool: Dict[int, str] = {}
         self.tool_arg_order: Dict[str, List[str]] = {}
+        self._schema_hash: str = ""
 
         if tool_specs:
             for idx, spec in enumerate(tool_specs, start=1):
                 self.register_tool(spec.name, list(spec.parameters.get("properties", {}).keys()) or spec.required_args, opcode=idx)
+            self._compute_schema_hash(tool_specs)
+
+    def _compute_schema_hash(self, tool_specs: List[ToolSpec]) -> None:
+        raw = json.dumps([{"name": s.name, "params": s.parameters} for s in sorted(tool_specs, key=lambda s: s.name)], sort_keys=True)
+        self._schema_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @property
+    def schema_hash(self) -> str:
+        return self._schema_hash
 
     def register_tool(self, name: str, arg_order: Optional[List[str]] = None, opcode: Optional[int] = None) -> int:
         if name in self.tool_to_opcode:
@@ -47,43 +71,54 @@ class ActionBytecodeCodec:
         return op
 
     def encode(self, call: ToolCall) -> bytes:
-        """Encodes a ToolCall into a compact binary packet with 16-bit opcode support."""
+        """Encodes a ToolCall into a compact binary packet. Rejects unregistered tools (no dynamic registration)."""
         tool_name = call.name or call.tool_name or "default_tool"
         op = self.tool_to_opcode.get(tool_name)
         if op is None:
-            op = self.register_tool(tool_name, list(call.arguments.keys()))
+            raise ValueError(f"Cannot encode unregistered tool '{tool_name}' without explicit schema registration")
+
+        if len(call.arguments) > self.MAX_ARG_COUNT:
+            raise ValueError(f"Argument count {len(call.arguments)} exceeds maximum limit of {self.MAX_ARG_COUNT}")
 
         payload_parts = []
         for k, v in call.arguments.items():
             k_bytes = k.encode("utf-8")
             v_bytes = json.dumps(v, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-            if len(k_bytes) > 65535:
-                raise ValueError(f"Argument key '{k}' exceeds maximum length of 65535 bytes")
-            if len(v_bytes) > 100_000_000:
-                raise ValueError(f"Argument value for '{k}' exceeds maximum payload limit")
+            if len(k_bytes) > self.MAX_KEY_LEN:
+                raise ValueError(f"Argument key '{k}' exceeds maximum length of {self.MAX_KEY_LEN} bytes")
+            if len(v_bytes) > self.MAX_VAL_LEN:
+                raise ValueError(f"Argument value for '{k}' exceeds maximum payload limit of {self.MAX_VAL_LEN} bytes")
             payload_parts.append(
                 struct.pack(">HI", len(k_bytes), len(v_bytes)) + k_bytes + v_bytes
             )
 
         body = b"".join(payload_parts)
+        if 5 + len(body) > self.MAX_PACKET_SIZE:
+            raise ValueError(f"Total packet size exceeds maximum limit of {self.MAX_PACKET_SIZE} bytes")
+
         # Header: Version (1B), Opcode (2B >H), ArgCount (2B >H) = 5 bytes
         header = struct.pack(">BHH", self.PROTOCOL_VERSION, op, len(call.arguments))
         return header + body
 
     def decode(self, data: bytes) -> ToolCall:
-        """Decodes binary bytecode back into a structured ToolCall, validating length and bounds."""
+        """Decodes binary bytecode back into a structured ToolCall, validating length, bounds, and duplicate keys."""
         if len(data) < 5:
             raise ValueError(f"Bytecode packet too short: expected at least 5 bytes header, got {len(data)}")
+        if len(data) > self.MAX_PACKET_SIZE:
+            raise ValueError(f"Bytecode packet exceeds maximum size of {self.MAX_PACKET_SIZE} bytes")
 
         version, op, arg_count = struct.unpack(">BHH", data[:5])
         if version != self.PROTOCOL_VERSION:
             raise ValueError(f"Unsupported bytecode protocol version: {version}")
         if op == 0 or op not in self.opcode_to_tool:
             raise ValueError(f"Unknown or invalid opcode: {op}")
+        if arg_count > self.MAX_ARG_COUNT:
+            raise ValueError(f"Declared argument count {arg_count} exceeds limit of {self.MAX_ARG_COUNT}")
 
         tool_name = self.opcode_to_tool[op]
         offset = 5
         args: Dict[str, Any] = {}
+        seen_keys: Set[str] = set()
 
         for i in range(arg_count):
             if offset + 6 > len(data):
@@ -94,7 +129,11 @@ class ActionBytecodeCodec:
                 raise ValueError(f"Bytecode packet truncated: expected {k_len + val_len} bytes for argument {i}, got {len(data) - offset}")
 
             key = data[offset : offset + k_len].decode("utf-8")
+            if key in seen_keys:
+                raise ValueError(f"Duplicate argument key '{key}' in bytecode packet")
+            seen_keys.add(key)
             offset += k_len
+
             val_bytes = data[offset : offset + val_len]
             offset += val_len
 
@@ -119,10 +158,10 @@ class ActionBytecodeCodec:
 
 
 class ActionBytecodeScheduler(BaseScheduler):
-    """Experiment E5: Action Bytecode Engine.
+    """Experiment E5a: Action Bytecode Transport Codec Engine.
     
-    Evaluates binary transport codec compression and decoding throughput.
-    Note: Direct model action-token generation is scoped as E5b and marked unimplemented for live models.
+    Evaluates binary transport codec compression and wire serialization efficiency.
+    Note: Direct model action-token generation is scoped as E5b and remains UNIMPLEMENTED for live LLMs.
     """
 
     def __init__(self, config=None) -> None:

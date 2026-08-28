@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import asyncio
 import time
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, ToolRegistry
 from toolspeed.core.types import EventType, ToolCall, ToolResult
-from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
+from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, cancel_and_await
 
 
 class SpeculativeReadScheduler(BaseScheduler):
     """Experiment E3: Confidence-Gated Speculative Read Scheduler.
     
     Predicts likely read-only tool calls and launches them concurrently with the primary model's reasoning.
-    Supports 'no_contention', 'cancellable', and 'single_slot' contention modes.
+    Supports 'isolated', 'shared_cancellable', and 'single_slot' contention modes.
     """
 
     def _matches_call(self, a: ToolCall, b: ToolCall) -> bool:
@@ -33,18 +33,28 @@ class SpeculativeReadScheduler(BaseScheduler):
         tools: ToolRegistry,
     ) -> Any:
         contention_mode = ctx.config.speculation_contention_mode
+        if contention_mode == "no_contention":
+            contention_mode = "isolated"
         threshold = ctx.config.speculation_confidence_threshold
 
         spec_task: Optional[asyncio.Task[ToolResult]] = None
         speculative_call: Optional[ToolCall] = None
         draft_task: Optional[asyncio.Task[Optional[ToolCall]]] = None
+        model_decision_task: Optional[asyncio.Task[LLMDecision]] = None
 
         try:
             for turn in range(ctx.config.max_turns):
                 ctx.step_count = turn + 1
 
-                # 1. Launch Draft Prediction and Main Model Reasoning CONCURRENTLY
+                # Clean up any leftover tasks from previous turns
+                if draft_task and not draft_task.done():
+                    await cancel_and_await(draft_task)
+                if spec_task and not spec_task.done():
+                    await cancel_and_await(spec_task)
+
                 spec_start_time = time.perf_counter()
+
+                # 1. Launch Draft Prediction and Main Model Reasoning CONCURRENTLY
                 draft_task = asyncio.create_task(
                     model.predict_draft(ctx.task, ctx.history, tools.list_specs())
                 )
@@ -61,7 +71,7 @@ class SpeculativeReadScheduler(BaseScheduler):
                 )
 
                 # Check if draft prediction finished first
-                if draft_task in done:
+                if draft_task in done and not draft_task.cancelled():
                     try:
                         predicted = draft_task.result()
                         if (
@@ -69,8 +79,14 @@ class SpeculativeReadScheduler(BaseScheduler):
                             and predicted.speculation_confidence >= threshold
                         ):
                             spec_adapter = tools.get(predicted.name or predicted.tool_name)
-                            # Only speculate read-only, non-side-effect tools
-                            if spec_adapter and spec_adapter.spec.is_read_only and not spec_adapter.spec.side_effects:
+                            # Strict safety check: only speculate read-only, non-side-effect, idempotent tools
+                            if (
+                                spec_adapter
+                                and spec_adapter.spec.is_read_only
+                                and not spec_adapter.spec.side_effects
+                                and not spec_adapter.spec.requires_approval
+                                and spec_adapter.spec.is_idempotent
+                            ):
                                 speculative_call = predicted
                                 speculative_call.is_speculative = True
                                 ctx.profiler.record_event(
@@ -90,6 +106,11 @@ class SpeculativeReadScheduler(BaseScheduler):
 
                 # Wait for main model decision to finish
                 decision = await model_decision_task
+
+                # If draft prediction is still running after model decision completes, cancel and await it immediately!
+                if draft_task and not draft_task.done():
+                    await cancel_and_await(draft_task)
+
                 ctx.profiler.end_span(
                     f"model_turn_{turn}",
                     EventType.MODEL_END,
@@ -101,12 +122,8 @@ class SpeculativeReadScheduler(BaseScheduler):
                 if decision.final_answer is not None or not decision.tool_calls:
                     # Model produced final answer -> clean up speculation
                     if spec_task and not spec_task.done():
-                        if contention_mode == "cancellable":
-                            spec_task.cancel()
-                            try:
-                                await spec_task
-                            except (asyncio.CancelledError, Exception):
-                                pass
+                        if contention_mode == "shared_cancellable" or contention_mode == "cancellable":
+                            await cancel_and_await(spec_task)
                             ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
                             ctx.profiler.record_event(EventType.SPECULATION_CANCELLED)
                         else:
@@ -164,22 +181,11 @@ class SpeculativeReadScheduler(BaseScheduler):
                 else:
                     # Miss: cancel / clean up speculation
                     if spec_task and not spec_task.done():
-                        if contention_mode == "cancellable":
-                            spec_task.cancel()
-                            try:
-                                await spec_task
-                            except (asyncio.CancelledError, Exception):
-                                pass
+                        if contention_mode in ("shared_cancellable", "cancellable"):
+                            await cancel_and_await(spec_task)
                             ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
                             ctx.profiler.record_event(EventType.SPECULATION_CANCELLED)
-                        elif contention_mode == "single_slot":
-                            try:
-                                await spec_task
-                            except Exception:
-                                pass
-                            ctx.guardrails.record_speculation_resolved(hit=False, cancelled=False)
-                            ctx.profiler.record_event(EventType.SPECULATION_MISS)
-                        else:  # no_contention
+                        else:
                             try:
                                 await spec_task
                             except Exception:
@@ -208,14 +214,8 @@ class SpeculativeReadScheduler(BaseScheduler):
 
         finally:
             if spec_task and not spec_task.done():
-                spec_task.cancel()
-                try:
-                    await spec_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                await cancel_and_await(spec_task)
             if draft_task and not draft_task.done():
-                draft_task.cancel()
-                try:
-                    await draft_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                await cancel_and_await(draft_task)
+            if model_decision_task and not model_decision_task.done():
+                await cancel_and_await(model_decision_task)

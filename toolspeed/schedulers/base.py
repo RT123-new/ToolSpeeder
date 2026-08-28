@@ -24,6 +24,55 @@ from toolspeed.core.types import (
 from toolspeed.schedulers.executor import ToolExecutor
 
 
+async def cancel_and_await(task: Optional[asyncio.Task[Any]]) -> None:
+    """Safely cancel an internally managed task and await its termination, consuming internal cancellations."""
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+
+
+class TaskTracker:
+    """Tracks child asyncio tasks and ensures safe cleanup on normal exit, error, or cancellation."""
+
+    def __init__(self) -> None:
+        self._tasks: Set[asyncio.Task[Any]] = set()
+
+    def track(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    def create_task(self, coro: Any, name: Optional[str] = None) -> asyncio.Task[Any]:
+        t = asyncio.create_task(coro, name=name) if name else asyncio.create_task(coro)
+        return self.track(t)
+
+    async def cancel_and_await(self, task: Optional[asyncio.Task[Any]]) -> None:
+        if task is None:
+            return
+        self._tasks.discard(task)
+        await cancel_and_await(task)
+
+    async def cancel_all(self) -> None:
+        tasks = list(self._tasks)
+        self._tasks.clear()
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @property
+    def active_count(self) -> int:
+        return len(self._tasks)
+
+
 @dataclass
 class SchedulerConfig:
     """Universal configuration for all execution schedulers."""

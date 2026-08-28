@@ -77,37 +77,38 @@ class FalsificationVerdict:
 
 @dataclass
 class MetricSummary:
-    """Rigorous statistical summary of baseline vs candidate execution."""
-    baseline_p50_ms: float
-    candidate_p50_ms: float
-    p50_speedup: float
-    baseline_p90_ms: float
-    candidate_p90_ms: float
-    p90_speedup: float
-    baseline_p95_ms: float
-    candidate_p95_ms: float
-    p95_speedup: float
-    baseline_p99_ms: float
-    candidate_p99_ms: float
-    p99_speedup: float
-    baseline_mean_ms: float = 0.0
-    candidate_mean_ms: float = 0.0
-    mean_speedup: float = 1.0
-    baseline_success_rate: float = 1.0
-    candidate_success_rate: float = 1.0
-    success_rate_delta: float = 0.0
-    wasted_call_rate: float = 0.0
-    cost_multiplier: float = 1.0
-    rate_limit_error_rate: float = 0.0
-    input_tokens_baseline: float = 0.0
-    input_tokens_candidate: float = 0.0
-    token_reduction_pct: float = 0.0
-    deopt_rate: float = 0.0
-    tool_start_p50_ms: float = 0.0
-    tool_start_p95_ms: float = 0.0
-    tool_start_speedup_p95: float = 1.0
-    semantic_mutation_rate: float = 0.0
-    p95_reduction_ci: Tuple[float, float] = (0.0, 0.0)
+    """Rigorous statistical summary of paired baseline vs candidate execution."""
+    baseline_p50_ms: Optional[float]
+    candidate_p50_ms: Optional[float]
+    p50_speedup: Optional[float]
+    baseline_p90_ms: Optional[float]
+    candidate_p90_ms: Optional[float]
+    p90_speedup: Optional[float]
+    baseline_p95_ms: Optional[float]
+    candidate_p95_ms: Optional[float]
+    p95_speedup: Optional[float]
+    baseline_p99_ms: Optional[float]
+    candidate_p99_ms: Optional[float]
+    p99_speedup: Optional[float]
+    baseline_mean_ms: Optional[float] = None
+    candidate_mean_ms: Optional[float] = None
+    mean_speedup: Optional[float] = None
+    baseline_success_rate: Optional[float] = None
+    candidate_success_rate: Optional[float] = None
+    success_rate_delta: Optional[float] = None
+    paired_success_counts: Dict[str, int] = field(default_factory=dict)
+    wasted_call_rate: Optional[float] = None
+    cost_multiplier: Optional[float] = None
+    rate_limit_error_rate: Optional[float] = None
+    input_tokens_baseline: Optional[float] = None
+    input_tokens_candidate: Optional[float] = None
+    token_reduction_pct: Optional[float] = None
+    deopt_rate: Optional[float] = None
+    tool_start_p50_ms: Optional[float] = None
+    tool_start_p95_ms: Optional[float] = None
+    tool_start_speedup_p95: Optional[float] = None
+    semantic_mutation_rate: Optional[float] = None
+    p95_reduction_ci: Optional[Tuple[Optional[float], Optional[float]]] = None
     extra_metrics: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -168,6 +169,41 @@ def compute_percentiles(arr: np.ndarray, percentiles: Tuple[int, ...] = (50, 90,
     return res
 
 
+def paired_bootstrap_p95_ci(
+    baseline: np.ndarray,
+    candidate: np.ndarray,
+    num_samples: int = 1000,
+    ci: float = 0.95,
+    seed: Optional[int] = 42,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Paired bootstrap confidence interval for P95 speedup / reduction.
+    
+    Resamples paired indices with replacement to compute distribution of P95 reduction.
+    Returns (None, None) if sample count is insufficient (< 10).
+    """
+    n = min(len(baseline), len(candidate))
+    if n < 10:
+        return None, None
+
+    rng = np.random.default_rng(seed)
+    boot_reductions = np.empty(num_samples)
+
+    for i in range(num_samples):
+        idx = rng.choice(n, size=n, replace=True)
+        b_sample = baseline[idx]
+        c_sample = candidate[idx]
+        b_p95 = float(np.percentile(b_sample, 95))
+        c_p95 = float(np.percentile(c_sample, 95))
+        if b_p95 > 0:
+            boot_reductions[i] = ((b_p95 - c_p95) / b_p95) * 100.0
+        else:
+            boot_reductions[i] = 0.0
+
+    lower_pct = ((1.0 - ci) / 2.0) * 100.0
+    upper_pct = (1.0 - (1.0 - ci) / 2.0) * 100.0
+    return float(np.percentile(boot_reductions, lower_pct)), float(np.percentile(boot_reductions, upper_pct))
+
+
 def compute_summary(
     baseline: np.ndarray,
     candidate: np.ndarray,
@@ -176,36 +212,37 @@ def compute_summary(
     wasted_calls: Optional[np.ndarray] = None,
     cost_multipliers: Optional[np.ndarray] = None,
     rate_limit_errors: Optional[np.ndarray] = None,
-    input_tokens_base: float = 0.0,
-    input_tokens_cand: float = 0.0,
+    input_tokens_base: Optional[float] = None,
+    input_tokens_cand: Optional[float] = None,
     deopt_events: Optional[np.ndarray] = None,
     tool_start_base: Optional[np.ndarray] = None,
     tool_start_cand: Optional[np.ndarray] = None,
     semantic_mutations: Optional[np.ndarray] = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> MetricSummary:
-    """Compute comprehensive MetricSummary from trial arrays.
+    """Compute comprehensive MetricSummary from paired trial arrays.
     
-    Strict CCL invariant: Only trials with validated task success are included in
-    CCL percentiles (P50, P90, P95, P99, Mean). Failed trials are excluded from
-    CCL percentiles and strictly penalize success rate metrics.
+    Strict CCL invariant: CCL percentiles are computed on trials where tasks completed successfully.
+    Unpaired or missing evidence fields return None (null in JSON).
     """
-    b_succ = float(np.mean(baseline_success)) if baseline_success is not None and len(baseline_success) > 0 else 1.0
-    c_succ = float(np.mean(candidate_success)) if candidate_success is not None and len(candidate_success) > 0 else 1.0
-    succ_delta = float(c_succ - b_succ)
+    b_succ = float(np.mean(baseline_success)) if baseline_success is not None and len(baseline_success) > 0 else None
+    c_succ = float(np.mean(candidate_success)) if candidate_success is not None and len(candidate_success) > 0 else None
+    succ_delta = float(c_succ - b_succ) if (c_succ is not None and b_succ is not None) else None
 
-    # Filter by success for Correct Completion Latency (CCL) calculation
-    if baseline_success is not None:
-        b_mask = np.asarray(baseline_success, dtype=bool)
-        valid_baseline = baseline[b_mask] if len(baseline) == len(b_mask) else baseline
-    else:
-        valid_baseline = baseline
+    paired_counts = {}
+    if baseline_success is not None and candidate_success is not None and len(baseline_success) == len(candidate_success):
+        bs = np.asarray(baseline_success, dtype=bool)
+        cs = np.asarray(candidate_success, dtype=bool)
+        paired_counts = {
+            "both_succeeded": int(np.sum(bs & cs)),
+            "candidate_only": int(np.sum(~bs & cs)),
+            "baseline_only": int(np.sum(bs & ~cs)),
+            "both_failed": int(np.sum(~bs & ~cs)),
+        }
 
-    if candidate_success is not None:
-        c_mask = np.asarray(candidate_success, dtype=bool)
-        valid_candidate = candidate[c_mask] if len(candidate) == len(c_mask) else candidate
-    else:
-        valid_candidate = candidate
+    # Filter for CCL (Correct Completion Latency)
+    valid_baseline = baseline[baseline_success.astype(bool)] if (baseline_success is not None and len(baseline_success) == len(baseline)) else baseline
+    valid_candidate = candidate[candidate_success.astype(bool)] if (candidate_success is not None and len(candidate_success) == len(candidate)) else candidate
 
     if len(valid_baseline) > 0:
         b50 = float(np.percentile(valid_baseline, 50))
@@ -214,7 +251,7 @@ def compute_summary(
         b99 = float(np.percentile(valid_baseline, 99))
         b_mean = float(np.mean(valid_baseline))
     else:
-        b50 = b90 = b95 = b99 = b_mean = 0.0
+        b50 = b90 = b95 = b99 = b_mean = None
 
     if len(valid_candidate) > 0:
         c50 = float(np.percentile(valid_candidate, 50))
@@ -223,40 +260,38 @@ def compute_summary(
         c99 = float(np.percentile(valid_candidate, 99))
         c_mean = float(np.mean(valid_candidate))
     else:
-        c50 = c90 = c95 = c99 = c_mean = 0.0
+        c50 = c90 = c95 = c99 = c_mean = None
 
-    p50_speedup = float(b50 / c50) if c50 > 0 else 1.0
-    p90_speedup = float(b90 / c90) if c90 > 0 else 1.0
-    p95_speedup = float(b95 / c95) if c95 > 0 else 1.0
-    p99_speedup = float(b99 / c99) if c99 > 0 else 1.0
-    mean_speedup = float(b_mean / c_mean) if c_mean > 0 else 1.0
+    p50_speedup = float(b50 / c50) if (b50 is not None and c50 is not None and c50 > 0) else None
+    p90_speedup = float(b90 / c90) if (b90 is not None and c90 is not None and c90 > 0) else None
+    p95_speedup = float(b95 / c95) if (b95 is not None and c95 is not None and c95 > 0) else None
+    p99_speedup = float(b99 / c99) if (b99 is not None and c99 is not None and c99 > 0) else None
+    mean_speedup = float(b_mean / c_mean) if (b_mean is not None and c_mean is not None and c_mean > 0) else None
 
-    wasted_rate = float(np.mean(wasted_calls)) if wasted_calls is not None and len(wasted_calls) > 0 else 0.0
-    cost_mult = float(np.mean(cost_multipliers)) if cost_multipliers is not None and len(cost_multipliers) > 0 else 1.0
-    rl_err_rate = float(np.mean(rate_limit_errors)) if rate_limit_errors is not None and len(rate_limit_errors) > 0 else 0.0
+    wasted_rate = float(np.mean(wasted_calls)) if wasted_calls is not None and len(wasted_calls) > 0 else None
+    cost_mult = float(np.mean(cost_multipliers)) if cost_multipliers is not None and len(cost_multipliers) > 0 else None
+    rl_err_rate = float(np.mean(rate_limit_errors)) if rate_limit_errors is not None and len(rate_limit_errors) > 0 else None
 
     token_red = (
         float((input_tokens_base - input_tokens_cand) / input_tokens_base * 100.0)
-        if input_tokens_base > 0
-        else 0.0
+        if (input_tokens_base is not None and input_tokens_cand is not None and input_tokens_base > 0)
+        else None
     )
-    deopt_rate_val = float(np.mean(deopt_events)) if deopt_events is not None and len(deopt_events) > 0 else 0.0
+    deopt_rate_val = float(np.mean(deopt_events)) if deopt_events is not None and len(deopt_events) > 0 else None
 
-    t_start_p50 = float(np.percentile(tool_start_cand, 50)) if tool_start_cand is not None and len(tool_start_cand) > 0 else 0.0
-    t_start_p95 = float(np.percentile(tool_start_cand, 95)) if tool_start_cand is not None and len(tool_start_cand) > 0 else 0.0
+    t_start_p50 = float(np.percentile(tool_start_cand, 50)) if tool_start_cand is not None and len(tool_start_cand) > 0 else None
+    t_start_p95 = float(np.percentile(tool_start_cand, 95)) if tool_start_cand is not None and len(tool_start_cand) > 0 else None
     if tool_start_base is not None and tool_start_cand is not None and len(tool_start_base) > 0 and len(tool_start_cand) > 0:
         t_base_p95 = float(np.percentile(tool_start_base, 95))
-        t_start_speedup = float(t_base_p95 / t_start_p95) if t_start_p95 > 0 else 1.0
+        t_start_speedup = float(t_base_p95 / t_start_p95) if (t_start_p95 is not None and t_start_p95 > 0) else 1.0
     else:
-        t_start_speedup = 1.0
+        t_start_speedup = None
 
-    mutation_rate = float(np.mean(semantic_mutations)) if semantic_mutations is not None and len(semantic_mutations) > 0 else 0.0
+    mutation_rate = float(np.mean(semantic_mutations)) if semantic_mutations is not None and len(semantic_mutations) > 0 else None
 
     # Paired bootstrap CI for P95 reduction
-    ci_low, ci_high = 0.0, 0.0
-    if len(valid_baseline) > 10 and len(valid_candidate) > 10 and len(valid_baseline) == len(valid_candidate):
-        diffs = (valid_baseline - valid_candidate) / np.maximum(1.0, valid_baseline) * 100.0
-        ci_low, ci_high = bootstrap_confidence_interval(diffs, stat_func=np.median, num_samples=500)
+    ci_low, ci_high = paired_bootstrap_p95_ci(baseline, candidate, num_samples=500)
+    p95_ci = (ci_low, ci_high) if (ci_low is not None and ci_high is not None) else None
 
     return MetricSummary(
         baseline_p50_ms=b50,
@@ -277,6 +312,7 @@ def compute_summary(
         baseline_success_rate=b_succ,
         candidate_success_rate=c_succ,
         success_rate_delta=succ_delta,
+        paired_success_counts=paired_counts,
         wasted_call_rate=wasted_rate,
         cost_multiplier=cost_mult,
         rate_limit_error_rate=rl_err_rate,
@@ -288,7 +324,7 @@ def compute_summary(
         tool_start_p95_ms=t_start_p95,
         tool_start_speedup_p95=t_start_speedup,
         semantic_mutation_rate=mutation_rate,
-        p95_reduction_ci=(ci_low, ci_high),
+        p95_reduction_ci=p95_ci,
         extra_metrics=extra or {},
     )
 
@@ -300,7 +336,7 @@ def bootstrap_confidence_interval(
     ci: float = 0.95,
     seed: Optional[int] = 42,
 ) -> Tuple[float, float]:
-    """Compute bootstrap confidence interval for a metric."""
+    """Compute bootstrap confidence interval for a 1D array."""
     if len(data) == 0:
         return 0.0, 0.0
     rng = np.random.default_rng(seed)

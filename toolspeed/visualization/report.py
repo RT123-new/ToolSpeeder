@@ -478,11 +478,175 @@ def generate_json_summary(suite_result: SuiteResult) -> Dict[str, Any]:
     return suite_result.to_dict()
 
 
+def generate_benchmark_markdown_report(result: Union[Dict[str, Any], Any]) -> str:
+    """Generate Markdown report for paired benchmark run results."""
+    data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+    title = data.get("title", "ToolSpeed Paired Benchmark Suite")
+    ev_level = data.get("evidence_level", "replay_integration")
+    runtime = data.get("total_runtime_s", 0.0)
+    verdict = data.get("overall_verdict", "inconclusive")
+    manifest = data.get("manifest") or {}
+
+    lines = [
+        f"# {title}",
+        "",
+        f"**Generated:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  ",
+        f"**Evidence Level:** `{ev_level}`  ",
+        f"**Overall Verdict:** `{'PASSED' if verdict == 'passed' else ('FALSIFIED' if verdict == 'falsified' else 'INCONCLUSIVE')}`  ",
+        f"**Total Benchmark Runtime:** {runtime:.2f}s  ",
+    ]
+
+    if manifest:
+        lines.extend([
+            f"**Git Commit:** `{manifest.get('git_sha', 'unknown')}` ({'dirty' if manifest.get('git_dirty') else 'clean'})  ",
+            f"**Platform:** `{manifest.get('os_platform', '')}` | Python `{manifest.get('python_version', '')}`  ",
+        ])
+
+    lines.extend([
+        "",
+        "## Paired Workload Evaluations (W1 – W7, E5a)",
+        "",
+        "| Workload | Comparison | Baseline P95 | Candidate P95 | P95 Speedup | Candidate Success | Status | 95% Bootstrap CI |",
+        "|---|---|---|---|---|---|---|---|",
+    ])
+
+    for e in data.get("evaluations", []):
+        wl = e.get("workload_id", "")
+        comp = f"{e.get('candidate_name', '')} vs {e.get('baseline_name', '')}"
+        summ = e.get("summary", {})
+        verd = e.get("verdict", {})
+        status = "✅ PASS" if verd.get("passed") else "❌ FAIL"
+        b95 = f"{summ.get('baseline_p95_ms', 0.0):.1f}ms" if summ.get('baseline_p95_ms') is not None else "null"
+        c95 = f"{summ.get('candidate_p95_ms', 0.0):.1f}ms" if summ.get('candidate_p95_ms') is not None else "null"
+        speedup = f"{summ.get('p95_speedup', 1.0):.2f}x" if summ.get('p95_speedup') is not None else "null"
+        succ = f"{summ.get('candidate_success_rate', 1.0):.1%}" if summ.get('candidate_success_rate') is not None else "null"
+        ci = summ.get("p95_reduction_ci")
+        ci_str = f"[{ci[0]:.1f}%, {ci[1]:.1f}%]" if ci and ci[0] is not None else "null"
+        lines.append(f"| {wl} | {comp} | {b95} | {c95} | {speedup} | {succ} | {status} | {ci_str} |")
+
+    neg = data.get("negative_controls", [])
+    if neg:
+        lines.extend([
+            "",
+            "## Negative Control Verification",
+            "",
+            "| Control | Measured Speedup | Null Check (~1.0x) | Detail |",
+            "|---|---|---|---|",
+        ])
+        for nc in neg:
+            c_name = nc.get("control", "")
+            sp = f"{nc.get('p95_speedup', 1.0):.2f}x"
+            null_pass = "✅ PASS" if nc.get("passed_expected_null") else "❌ FAIL"
+            detail = nc.get("detail", "")
+            lines.append(f"| {c_name} | {sp} | {null_pass} | {detail} |")
+
+    return "\n".join(lines)
+
+
+def generate_benchmark_html_dashboard(result: Union[Dict[str, Any], Any]) -> str:
+    """Generate HTML dashboard for paired benchmark run results."""
+    data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+    title = data.get("title", "ToolSpeed Paired Benchmark Suite")
+    ev_level = data.get("evidence_level", "replay_integration")
+    runtime = data.get("total_runtime_s", 0.0)
+    verdict = data.get("overall_verdict", "inconclusive")
+    evaluations = data.get("evaluations", [])
+
+    rows_html = ""
+    for e in evaluations:
+        summ = e.get("summary", {})
+        verd = e.get("verdict", {})
+        is_pass = verd.get("passed", False)
+        b95 = f"{summ.get('baseline_p95_ms', 0.0):.1f} ms" if summ.get('baseline_p95_ms') is not None else "null"
+        c95 = f"{summ.get('candidate_p95_ms', 0.0):.1f} ms" if summ.get('candidate_p95_ms') is not None else "null"
+        sp = f"{summ.get('p95_speedup', 1.0):.2f}x" if summ.get('p95_speedup') is not None else "null"
+        succ = f"{summ.get('candidate_success_rate', 1.0):.1%}" if summ.get('candidate_success_rate') is not None else "null"
+        rows_html += f"""
+        <tr>
+          <td><strong>{e.get('workload_id', '')}</strong></td>
+          <td>{e.get('candidate_name', '')} vs {e.get('baseline_name', '')}</td>
+          <td>{b95}</td>
+          <td>{c95}</td>
+          <td><strong>{sp}</strong></td>
+          <td>{succ}</td>
+          <td><span class="badge {'badge-success' if is_pass else 'badge-danger'}">{'PASS' if is_pass else 'FAIL'}</span></td>
+        </tr>
+        """
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{title}</title>
+  <style>
+    :root {{
+      --bg: #0d1117; --card-bg: #161b22; --border: #30363d;
+      --text: #c9d1d9; --text-muted: #8b949e; --accent: #58a6ff;
+      --success: #3fb950; --danger: #f85149;
+    }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); padding: 2rem; margin: 0; }}
+    .container {{ max-width: 1200px; margin: 0 auto; }}
+    .card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); text-align: left; }}
+    th {{ color: var(--text-muted); }}
+    .badge {{ padding: 0.25rem 0.6rem; border-radius: 12px; font-weight: bold; font-size: 0.85rem; }}
+    .badge-success {{ background: rgba(63, 185, 80, 0.2); color: var(--success); }}
+    .badge-danger {{ background: rgba(248, 81, 73, 0.2); color: var(--danger); }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>{title}</h1>
+    <p>Evidence Level: <code>{ev_level}</code> | Runtime: {runtime:.2f}s | Verdict: <strong>{verdict.upper()}</strong></p>
+    <div class="card">
+      <h2>Workload Performance Matrix</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Workload</th><th>Comparison</th><th>Baseline P95</th><th>Candidate P95</th><th>Speedup</th><th>Success</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows_html}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>"""
+    return html
+
+
+def save_benchmark_reports(result: Any, out_dir: Union[str, Path]) -> Dict[str, Path]:
+    """Save benchmark result bundle reports without calling SuiteRunner."""
+    p_out = Path(out_dir)
+    p_out.mkdir(parents=True, exist_ok=True)
+
+    json_path = p_out / "benchmark_result.json"
+    data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+    json_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
+
+    md_path = p_out / "report.md"
+    md_content = generate_benchmark_markdown_report(result)
+    md_path.write_text(md_content, encoding="utf-8")
+
+    html_path = p_out / "report.html"
+    html_content = generate_benchmark_html_dashboard(result)
+    html_path.write_text(html_content, encoding="utf-8")
+
+    return {
+        "json": json_path,
+        "markdown": md_path,
+        "html": html_path,
+    }
+
+
 def save_all_reports(
     suite_result: SuiteResult,
     out_dir: Union[str, Path],
 ) -> Dict[str, Path]:
-    """Generate and save all report artifacts (MD, HTML, JSON, CSVs, SVGs)."""
+    """Generate and save all simulation report artifacts (MD, HTML, JSON, CSVs, SVGs)."""
     p_out = Path(out_dir)
     p_out.mkdir(parents=True, exist_ok=True)
 
