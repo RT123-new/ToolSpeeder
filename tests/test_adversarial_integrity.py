@@ -30,6 +30,7 @@ from toolspeed.benchmarks.harness import (
 from toolspeed.core.guardrails import GuardrailTracker
 from toolspeed.core.rate_limiter import AsyncConcurrencyLimiter, RateLimiter
 from toolspeed.core.types import (
+    AgentTask,
     ApprovalGrant,
     EventType,
     ExecutionTrace,
@@ -127,22 +128,24 @@ class MockLLM(BaseLLMAdapter):
         self.chunks = list(chunks or [])
         self._turn = 0
 
-    async def decide(self, task: Task, history: list[dict[str, Any]], available_tools: list[ToolSpec]) -> LLMDecision:
+    async def decide(
+        self, task: AgentTask, history: list[dict[str, Any]], available_tools: list[ToolSpec]
+    ) -> LLMDecision:
         if self._turn < len(self.decisions):
             d = self.decisions[self._turn]
             self._turn += 1
             return d
-        return LLMDecision(reasoning="Done", tool_calls=[], final_answer=task.expected_output or "done")
+        return LLMDecision(reasoning="Done", tool_calls=[], final_answer="done")
 
     async def predict_draft(
-        self, task: Task, history: list[dict[str, Any]], available_tools: list[ToolSpec]
+        self, task: AgentTask, history: list[dict[str, Any]], available_tools: list[ToolSpec]
     ) -> ToolCall | None:
         if self.predict_draft_raises:
             raise RuntimeError("Draft predictor failed")
         return self.draft_prediction
 
     async def stream_decision(
-        self, task: Task, history: list[dict[str, Any]], available_tools: list[ToolSpec]
+        self, task: AgentTask, history: list[dict[str, Any]], available_tools: list[ToolSpec]
     ) -> AsyncIterator[StreamingChunk]:
         if self.chunks and self._turn == 0:
             self._turn += 1
@@ -170,7 +173,7 @@ class MockLLM(BaseLLMAdapter):
                 )
             return
 
-        final_ans = task.expected_output or "done"
+        final_ans = "done"
         yield StreamingChunk(
             token_index=0,
             delta_text="done",
@@ -206,6 +209,8 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
 
         resolved, err = dag.resolve_arguments(dag.nodes["c2"])
         self.assertIsNone(err)
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
         self.assertEqual(resolved["nested"]["items"][0], "u123")
         self.assertEqual(resolved["nested"]["items"][1]["key"], "corp_a")
 
@@ -217,6 +222,7 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
         dag.register_calls([c1, c2])
         cycle = dag.detect_cycles()
         self.assertIsNotNone(cycle)
+        assert cycle is not None
         self.assertIn("a", cycle)
         self.assertIn("b", cycle)
 
@@ -289,7 +295,7 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
 
         wf = DeclarativeWorkflow(
             workflow_id="order_charge",
-            nodes=[
+            nodes=(
                 WorkflowNode(
                     step_id="s1",
                     tool_name="charge_card",
@@ -303,7 +309,7 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
                     args_template={"receipt": "$charge.charged"},
                     output_key="receipt",
                 ),
-            ],
+            ),
         )
         task = Task(
             task_id="t_deopt",
@@ -586,6 +592,18 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
         )
 
         for sched in schedulers:
+            model = MockLLM(
+                decisions=[
+                    LLMDecision(reasoning="Call", tool_calls=[ToolCall(name="t_ok", arguments={})]),
+                    LLMDecision(reasoning="Done", tool_calls=[], final_answer="val"),
+                ],
+                draft_prediction=ToolCall(name="t_ok", arguments={}, speculation_confidence=0.9),
+                chunks=[
+                    StreamingChunk(
+                        token_index=0, is_final=True, parsed_tool_calls=[ToolCall(name="t_ok", arguments={})]
+                    )
+                ],
+            )
             res = await sched.execute(task, model, tools)
             self.assertTrue(res.success)
 
@@ -632,8 +650,8 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
         executor = ToolExecutor(tools)
         args = {"amount": 100}
         grant = ApprovalGrant.create(tool_name="transfer", arguments=args, authority="trusted_system")
-        call = ToolCall(name="transfer", arguments=args, is_approved=True, approval_grant=grant)
-        res = await executor.execute(call)
+        call = ToolCall(name="transfer", arguments=args, is_approved=True)
+        res = await executor.execute(call, trusted_grant=grant)
         self.assertFalse(res.is_error)
 
     # 28. SharedIdempotencyStore: Concurrent deduplication (primary + joiners)

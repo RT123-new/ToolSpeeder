@@ -74,6 +74,8 @@ class TestToolSpeedSchedulers(unittest.TestCase):
         self.assertEqual(len(result.tool_calls), 1)
         self.assertEqual(len(result.tool_results), 1)
         self.assertFalse(result.tool_results[0].cached)
+        self.assertIsNotNone(result.ccl_ms)
+        assert result.ccl_ms is not None
         self.assertGreater(result.ccl_ms, 0.0)
 
     def test_b1_sync_react_sequential_ordering(self) -> None:
@@ -240,7 +242,9 @@ class TestToolSpeedSchedulers(unittest.TestCase):
         )
         custom_registry = ToolRegistry()
         custom_registry.register(error_tool)
-        custom_registry.register(self.registry.get("fetch_orders"))
+        fetch_orders = self.registry.get("fetch_orders")
+        assert fetch_orders is not None
+        custom_registry.register(fetch_orders)
 
         llm = MockScriptedLLM(
             decision_steps=[
@@ -430,6 +434,7 @@ class TestToolSpeedSchedulers(unittest.TestCase):
         out1, hit1, fresh1 = cache.get("web_search", {"query": "apple inc revenue"})
         self.assertTrue(hit1)
         self.assertTrue(fresh1)
+        assert out1 is not None
         self.assertEqual(out1["revenue"], 383e9)
 
         # Semantic match (different spacing / case)

@@ -126,8 +126,14 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
             candidate_success=success_mask,
         )
 
+        self.assertIsNotNone(summary.candidate_success_rate)
+        assert summary.candidate_success_rate is not None
         self.assertAlmostEqual(summary.candidate_success_rate, 0.10)
+        self.assertIsNotNone(summary.candidate_p50_ms)
+        assert summary.candidate_p50_ms is not None
         self.assertGreaterEqual(summary.candidate_p50_ms, 1000.0)
+        self.assertIsNotNone(summary.candidate_p95_ms)
+        assert summary.candidate_p95_ms is not None
         self.assertGreaterEqual(summary.candidate_p95_ms, 1800.0)
 
     def test_adversarial_metric_zero_division_and_empty_arrays(self) -> None:
@@ -201,7 +207,9 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
         )
         reg = ToolRegistry()
         reg.register(slow_tool)
-        reg.register(self.registry.get("fetch_user"))
+        fetch_u = self.registry.get("fetch_user")
+        assert fetch_u is not None
+        reg.register(fetch_u)
 
         # LLM decides to NOT call slow_read_db, but calls fetch_user instead
         llm = MockScriptedLLM(
@@ -255,7 +263,9 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
         )
         reg = ToolRegistry()
         reg.register(spec_tool)
-        reg.register(self.registry.get("fetch_user"))
+        fetch_u2 = self.registry.get("fetch_user")
+        assert fetch_u2 is not None
+        reg.register(fetch_u2)
 
         llm = MockScriptedLLM(
             decision_steps=[
@@ -358,7 +368,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
         )
         n2 = dag.add_call(child_call)
         resolved, _ = dag.resolve_node_arguments(n2, fail_closed=False)
-
+        assert resolved is not None
         self.assertEqual(resolved["direct_item"], ["first_item", "second_item"])
         self.assertEqual(resolved["indexed_item"], "zero_idx_item")
         self.assertEqual(resolved["missing_ref"], "$non_existent_node.val")
@@ -377,9 +387,9 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
 
         exploding_workflow = DeclarativeWorkflow(
             workflow_id="exploding_kernel",
-            nodes=[
+            nodes=(
                 WorkflowNode(step_id="crash_step", tool_name="missing_crash_tool", args_template={}, output_key="res"),
-            ],
+            ),
         )
 
         scheduler = JITFusionScheduler()
@@ -416,14 +426,14 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
 
         bad_workflow = DeclarativeWorkflow(
             workflow_id="corrupted_kernel",
-            nodes=[
+            nodes=(
                 WorkflowNode(
                     step_id="step1",
                     tool_name="fetch_user",
                     args_template={"user_id": "$context.user_id"},
                     output_key="user",
                 ),
-            ],
+            ),
             output_mapping={"sum": -99999},
         )
 
@@ -625,6 +635,8 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
         res = await tool.execute(unapproved_call)
         self.assertFalse(res.is_success)
         self.assertTrue(res.is_error)
+        self.assertIsNotNone(res.error)
+        assert res.error is not None
         self.assertIn("explicit approval", res.error)
         self.assertEqual(w7.accounts["acc_001"], 10_000.0, "Balance must remain unchanged on unapproved mutation!")
 
