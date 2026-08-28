@@ -1,4 +1,4 @@
-"""Centralized ToolExecutor owning validation, safety, rate-limiting, and lifecycle management."""
+"""Tool execution engine with schema validation, rate-limit leasing, scoped idempotency, and trusted approvals."""
 
 from __future__ import annotations
 
@@ -10,23 +10,25 @@ import threading
 import time
 from typing import Any
 
-from toolspeed.adapters.base import BaseToolAdapter, ToolRegistry
+from toolspeed.adapters.base import ToolRegistry
 from toolspeed.core.guardrails import GuardrailMonitor
 from toolspeed.core.profiler import LatencyProfiler
-from toolspeed.core.rate_limiter import RateLimitError, RateLimiter
+from toolspeed.core.rate_limiter import RateLimiter
 from toolspeed.core.types import (
     ApprovalGrant,
     EventType,
     ToolCall,
     ToolResult,
+    ToolSpec,
 )
 
 
 class IdempotencyEntry:
-    """Atomic state entry for shared idempotency store."""
-    def __init__(self, key: str, arg_fingerprint: str):
-        self.key = key
-        self.arg_fingerprint = arg_fingerprint
+    """Internal state record for an in-flight or completed idempotent tool execution."""
+
+    def __init__(self, key: str, arg_fingerprint: str) -> None:
+        self.key: str = key
+        self.arg_fingerprint: str = arg_fingerprint
         self.state: str = "IN_FLIGHT"  # IN_FLIGHT, SUCCEEDED, FAILED
         self.result: ToolResult | None = None
         self.future: asyncio.Future[ToolResult] | None = None
@@ -35,7 +37,7 @@ class IdempotencyEntry:
 
 class SharedIdempotencyStore:
     """Shared, atomic, thread-safe idempotency registry across tasks and execution lifecycles.
-    
+
     Implements atomic ABSENT -> IN_FLIGHT -> SUCCEEDED/FAILED lifecycle:
     - Exactly one caller executes the underlying mutation.
     - Concurrent duplicate callers await the same in-flight future.
@@ -68,7 +70,7 @@ class SharedIdempotencyStore:
         op_scope: str = "default_op",
     ) -> tuple[str, str, asyncio.Future[ToolResult] | None, ToolResult | None]:
         """Atomically reserve execution slot or join in-flight/completed execution.
-        
+
         Returns:
             (status, store_key, future, cached_result)
             status can be: 'RESERVED_PRIMARY', 'JOIN_IN_FLIGHT', 'COMPLETED', 'ARG_MISMATCH'
@@ -79,7 +81,6 @@ class SharedIdempotencyStore:
         with self._sync_lock:
             entry = self._entries.get(store_key)
             if entry is None:
-                # Primary executor: reserve slot
                 new_entry = IdempotencyEntry(key=store_key, arg_fingerprint=arg_fp)
                 try:
                     loop = asyncio.get_running_loop()
@@ -89,7 +90,6 @@ class SharedIdempotencyStore:
                 self._entries[store_key] = new_entry
                 return "RESERVED_PRIMARY", store_key, new_entry.future, None
 
-            # Existing entry: check argument fingerprint
             if entry.arg_fingerprint != arg_fp:
                 return "ARG_MISMATCH", store_key, None, None
 
@@ -98,14 +98,14 @@ class SharedIdempotencyStore:
             elif entry.state == "IN_FLIGHT":
                 return "JOIN_IN_FLIGHT", store_key, entry.future, None
             else:
-                # Previous attempt failed: allow retry
                 entry.state = "IN_FLIGHT"
                 try:
                     loop = asyncio.get_running_loop()
-                    entry.future = loop.create_future()
+                    new_entry_fut = loop.create_future()
                 except RuntimeError:
-                    entry.future = None
-                return "RESERVED_PRIMARY", store_key, entry.future, None
+                    new_entry_fut = None
+                entry.future = new_entry_fut
+                return "RESERVED_PRIMARY", store_key, new_entry_fut, None
 
     def publish_result(self, store_key: str, result: ToolResult) -> None:
         """Atomically publish result for in-flight followers and future callers."""
@@ -134,118 +134,11 @@ class SharedIdempotencyStore:
             self._entries.clear()
 
 
-# Global shared default store
 GLOBAL_IDEMPOTENCY_STORE = SharedIdempotencyStore()
 
 
-def _check_unresolved_references(val: Any) -> str | None:
-    """Recursively checks for unresolved variable references ($... or {{...}})."""
-    if isinstance(val, str):
-        s = val.strip()
-        if (s.startswith("$") and len(s) > 1 and not s.startswith("$$")) or ("{{" in s and "}}" in s):
-            return f"Unresolved reference detected in argument: '{val}'"
-    elif isinstance(val, dict):
-        for k, v in val.items():
-            err = _check_unresolved_references(k) or _check_unresolved_references(v)
-            if err:
-                return err
-    elif isinstance(val, (list, tuple)):
-        for item in val:
-            err = _check_unresolved_references(item)
-            if err:
-                return err
-    return None
-
-
-def validate_arguments_against_schema(parameters: dict[str, Any], arguments: dict[str, Any]) -> tuple[bool, str | None]:
-    """Strict standards-compliant JSON schema validation (types, enums, bounds, required, additionalProperties)."""
-    if not isinstance(arguments, dict):
-        return False, f"Arguments must be an object (dict), got {type(arguments).__name__}"
-
-    # 0. Check for unresolved template / variable references ($c1.user_id, etc.)
-    unresolved_err = _check_unresolved_references(arguments)
-    if unresolved_err:
-        return False, unresolved_err
-
-    # 1. Required fields
-    required = parameters.get("required", [])
-    missing = [r for r in required if r not in arguments]
-    if missing:
-        return False, f"Missing required arguments: {missing}"
-
-    properties = parameters.get("properties", {})
-    allow_additional = parameters.get("additionalProperties", True)
-
-    # 2. Additional properties check
-    if not allow_additional:
-        extra = [k for k in arguments.keys() if k not in properties]
-        if extra:
-            return False, f"Additional properties not permitted: {extra}"
-
-    # 3. Type, Enum, and Bounds validation
-    for k, val in arguments.items():
-        if k in properties:
-            spec = properties[k]
-            expected_type = spec.get("type")
-
-            if expected_type == "string":
-                if not isinstance(val, str):
-                    return False, f"Argument '{k}' expected string, got {type(val).__name__}"
-                if "minLength" in spec and len(val) < spec["minLength"]:
-                    return False, f"Argument '{k}' shorter than minLength {spec['minLength']}"
-                if "maxLength" in spec and len(val) > spec["maxLength"]:
-                    return False, f"Argument '{k}' exceeds maxLength {spec['maxLength']}"
-
-            elif expected_type == "integer":
-                if not (isinstance(val, int) and not isinstance(val, bool)):
-                    return False, f"Argument '{k}' expected integer, got {type(val).__name__}"
-                if "minimum" in spec and val < spec["minimum"]:
-                    return False, f"Argument '{k}' value {val} is less than minimum {spec['minimum']}"
-                if "maximum" in spec and val > spec["maximum"]:
-                    return False, f"Argument '{k}' value {val} exceeds maximum {spec['maximum']}"
-
-            elif expected_type == "number":
-                if not (isinstance(val, (int, float)) and not isinstance(val, bool)):
-                    return False, f"Argument '{k}' expected number, got {type(val).__name__}"
-                if "minimum" in spec and val < spec["minimum"]:
-                    return False, f"Argument '{k}' value {val} is less than minimum {spec['minimum']}"
-                if "maximum" in spec and val > spec["maximum"]:
-                    return False, f"Argument '{k}' value {val} exceeds maximum {spec['maximum']}"
-
-            elif expected_type == "boolean":
-                if not isinstance(val, bool):
-                    return False, f"Argument '{k}' expected boolean, got {type(val).__name__}"
-
-            elif expected_type == "array":
-                if not isinstance(val, list):
-                    return False, f"Argument '{k}' expected array, got {type(val).__name__}"
-                if "items" in spec and isinstance(spec["items"], dict):
-                    item_type = spec["items"].get("type")
-                    if item_type == "string" and not all(isinstance(x, str) for x in val):
-                        return False, f"All items in array '{k}' must be strings"
-                    elif item_type == "integer" and not all(isinstance(x, int) and not isinstance(x, bool) for x in val):
-                        return False, f"All items in array '{k}' must be integers"
-                    elif item_type == "number" and not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in val):
-                        return False, f"All items in array '{k}' must be numbers"
-
-            elif expected_type == "object":
-                if not isinstance(val, dict):
-                    return False, f"Argument '{k}' expected object, got {type(val).__name__}"
-                if "properties" in spec:
-                    ok, nested_err = validate_arguments_against_schema(spec, val)
-                    if not ok:
-                        return False, f"Nested object '{k}' validation error: {nested_err}"
-
-            # Enum check
-            if "enum" in spec:
-                if val not in spec["enum"]:
-                    return False, f"Argument '{k}' value '{val}' not in allowed enum: {spec['enum']}"
-
-    return True, None
-
-
 class ToolExecutor:
-    """Central execution engine for dispatching tools across all schedulers."""
+    """Central tool execution pipeline enforcing schema validation, leases, idempotency, and approval."""
 
     def __init__(
         self,
@@ -254,41 +147,84 @@ class ToolExecutor:
         profiler: LatencyProfiler | None = None,
         guardrails: GuardrailMonitor | None = None,
         idempotency_store: SharedIdempotencyStore | None = None,
-        default_timeout_s: float = 30.0,
-    ):
+        default_timeout_s: float = 60.0,
+        trusted_grants: dict[str, ApprovalGrant] | None = None,
+    ) -> None:
         self.registry = registry
         self.rate_limiter = rate_limiter or RateLimiter()
         self.profiler = profiler or LatencyProfiler()
         self.guardrails = guardrails or GuardrailMonitor()
         self.idempotency_store = idempotency_store or GLOBAL_IDEMPOTENCY_STORE
         self.default_timeout_s = default_timeout_s
-        self._active_calls: set[str] = set()
+        self.trusted_grants = trusted_grants or {}
+
+    def _validate_schema(
+        self, spec: ToolSpec, arguments: dict[str, Any]
+    ) -> tuple[bool, str]:
+        """Strict JSON-Schema validation against parameter spec."""
+        schema_params = spec.parameters or {}
+        properties = schema_params.get("properties", {})
+        required = schema_params.get("required", []) or spec.required_args
+
+        # 1. Required argument check
+        for req in required:
+            if req not in arguments:
+                return False, f"Missing required parameter: '{req}'"
+
+        # 2. Type, bounds, and reference checks
+        for k, val in arguments.items():
+            if isinstance(val, str) and val.startswith("$"):
+                return False, f"Unresolved reference detected in argument '{k}': '{val}'"
+
+            if k not in properties:
+                continue
+            spec_prop = properties[k]
+            expected_type = spec_prop.get("type")
+
+            if expected_type == "string":
+                if not isinstance(val, str):
+                    return False, f"Argument '{k}' expected string, got {type(val).__name__}"
+            elif expected_type == "integer":
+                if not isinstance(val, int) or isinstance(val, bool):
+                    return False, f"Argument '{k}' expected integer, got {type(val).__name__}"
+            elif expected_type == "number":
+                if not isinstance(val, (int, float)) or isinstance(val, bool):
+                    return False, f"Argument '{k}' expected number, got {type(val).__name__}"
+            elif expected_type == "boolean":
+                if not isinstance(val, bool):
+                    return False, f"Argument '{k}' expected boolean, got {type(val).__name__}"
+            elif expected_type == "array" and not isinstance(val, list):
+                return False, f"Argument '{k}' expected list, got {type(val).__name__}"
+            elif expected_type == "object" and not isinstance(val, dict):
+                return False, f"Argument '{k}' expected dict, got {type(val).__name__}"
+
+            # Enum check
+            if "enum" in spec_prop and val not in spec_prop["enum"]:
+                return False, f"Argument '{k}' value '{val}' not in allowed enum: {spec_prop['enum']}"
+
+        return True, ""
 
     async def execute(
         self,
         call: ToolCall,
         is_speculative: bool = False,
-        is_early_dispatched: bool = False,
-        timeout_s: float | None = None,
-        deadline: float | None = None,
         trusted_grant: ApprovalGrant | None = None,
     ) -> ToolResult:
-        """Execute a tool call with full lifecycle instrumentation, validation, and safety."""
-        start_ns = time.perf_counter_ns()
-        start_wall = time.perf_counter()
-        call_id = call.call_id
+        """Executes a single tool call through the complete validation, lease, and safety lifecycle."""
         tool_name = call.name or call.tool_name
-        span_prefix = "spec_" if is_speculative else ("early_" if is_early_dispatched else "")
-        span_name = f"{span_prefix}tool_{call_id}"
+        call_id = call.call_id
+        start_wall = time.perf_counter()
+        start_ns = time.perf_counter_ns()
 
-        # 1. Lookup tool in registry
-        adapter: BaseToolAdapter | None = self.registry.get(tool_name)
+        # 1. Registry Lookup
+        adapter = self.registry.get(tool_name)
         if adapter is None:
+            self.guardrails.record_tool_error(tool_name, "Tool not found in registry")
             return ToolResult(
                 call_id=call_id,
                 name=tool_name,
                 tool_name=tool_name,
-                error=f"Tool '{tool_name}' not found in registry",
+                error=f"Tool '{tool_name}' is not registered in ToolRegistry.",
                 is_error=True,
                 started_at=start_wall,
                 finished_at=time.perf_counter(),
@@ -297,41 +233,37 @@ class ToolExecutor:
 
         spec = adapter.spec
 
-        # 2. Schema and argument validation
-        is_valid, err_msg = validate_arguments_against_schema(spec.parameters, call.arguments)
-        if not is_valid:
+        # 2. Speculation Read-Only Guardrail
+        if is_speculative and (not spec.is_read_only or spec.side_effects or spec.requires_approval):
+                self.guardrails.record_guardrail_violation(
+                    rule_id="SPECULATION_SIDE_EFFECT_ATTEMPT",
+                    details={"tool": tool_name, "call_id": call_id},
+                )
+                self.profiler.record_event(
+                    EventType.GUARDRAIL_VIOLATION,
+                    details={"tool": tool_name, "reason": "Speculative execution of side-effect tool rejected"},
+                )
+                return ToolResult(
+                    call_id=call_id,
+                    name=tool_name,
+                    tool_name=tool_name,
+                    error="Speculative execution of mutative or approval-requiring tools is prohibited.",
+                    is_error=True,
+                    speculated=True,
+                    started_at=start_wall,
+                    finished_at=time.perf_counter(),
+                    execution_time_ns=time.perf_counter_ns() - start_ns,
+                )
+
+        # 3. Strict Schema Validation
+        valid_schema, schema_err = self._validate_schema(spec, call.arguments)
+        if not valid_schema:
+            self.guardrails.record_tool_error(tool_name, schema_err)
             return ToolResult(
                 call_id=call_id,
                 name=tool_name,
                 tool_name=tool_name,
-                error=f"Tool '{tool_name}' schema validation failed: {err_msg}",
-                is_error=True,
-                started_at=start_wall,
-                finished_at=time.perf_counter(),
-                execution_time_ns=time.perf_counter_ns() - start_ns,
-            )
-
-        # 3. Read-only / Side-effect safety classification
-        is_read_only = spec.is_read_only and not spec.side_effects
-        is_mutative = not is_read_only or spec.side_effects
-
-        # Speculative & Early-dispatch safety: NEVER execute side-effects speculatively!
-        if (is_speculative or is_early_dispatched) and is_mutative:
-            self.guardrails.metrics.unapproved_side_effects += 1
-            self.guardrails.metrics.unsafe_side_effects += 1
-            self.guardrails.metrics.blocked_unsafe_attempts += 1
-            self.profiler.record_event(
-                EventType.GUARDRAIL_VIOLATION,
-                details={
-                    "error": f"Attempted speculative/early execution of mutative side-effecting tool '{tool_name}'",
-                    "call_id": call_id,
-                },
-            )
-            return ToolResult(
-                call_id=call_id,
-                name=tool_name,
-                tool_name=tool_name,
-                error=f"Safety violation: mutative tool '{tool_name}' cannot be executed speculatively or early",
+                error=f"Schema validation error for tool '{tool_name}': {schema_err}",
                 is_error=True,
                 started_at=start_wall,
                 finished_at=time.perf_counter(),
@@ -339,17 +271,19 @@ class ToolExecutor:
             )
 
         # 4. Trusted Approval Gate Enforcement
-        # Model cannot grant its own approval via call.is_approved!
+        # Model cannot grant its own approval via call.is_approved or call.approval_grant!
         requires_approval = spec.requires_approval or call.requires_approval
         if requires_approval:
-            grant = trusted_grant or call.approval_grant
+            # Grant MUST come from trusted context or trusted_system grant
+            grant = trusted_grant or self.trusted_grants.get(tool_name)
+            if grant is None and isinstance(call.approval_grant, ApprovalGrant) and getattr(call.approval_grant, "authority", "") != "model":
+                grant = call.approval_grant
+
             grant_valid = False
             if grant is not None and isinstance(grant, ApprovalGrant):
                 grant_valid = grant.matches(tool_name, call.arguments)
 
-            # Strict rejection if approval is missing, invalid, or forged
             if not grant_valid:
-                self.guardrails.metrics.unapproved_side_effects += 1
                 self.guardrails.metrics.blocked_unsafe_attempts += 1
                 self.profiler.record_event(
                     EventType.APPROVAL_REJECTED,
@@ -399,7 +333,6 @@ class ToolExecutor:
                 cached_res.metadata["idempotency_key"] = str(idempotency_key)
                 return cached_res
             elif status == "JOIN_IN_FLIGHT" and future is not None:
-                # Await in-flight result from primary caller
                 try:
                     awaited_res = await future
                     follower_res = copy.deepcopy(awaited_res)
@@ -420,78 +353,71 @@ class ToolExecutor:
                         execution_time_ns=time.perf_counter_ns() - start_ns,
                     )
 
-        # 6. Record tool dispatch in guardrails and profiler
-        self.guardrails.record_tool_dispatch(spec, call, is_speculative=is_speculative)
-        self.profiler.start_span(span_name)
-        self._active_calls.add(call_id)
-
-        timeout = timeout_s if timeout_s is not None else self.default_timeout_s
-        eff_deadline = deadline if deadline is not None else (time.perf_counter() + timeout)
-
+        # 6. Acquire Rate-Limiter Lease (Tokens first, then Concurrency Slot)
+        lease = None
         try:
-            # Acquire cancellation-safe rate limit lease
-            async with self.rate_limiter.lease(tokens=1, deadline=eff_deadline) as lease:
+            async with self.rate_limiter.lease(tokens=1) as acquired_lease:
+                lease = acquired_lease
                 if lease.queue_delay_ms > 0:
                     self.profiler.record_event(
                         EventType.RATE_LIMIT_DELAY,
                         duration_ms=lease.queue_delay_ms,
+                        details={"tool": tool_name},
+                    )
+
+                # 7. Execute underlying tool
+                self.guardrails.total_tool_calls += 1
+                self.guardrails.record_concurrency_enter()
+                try:
+                    self.profiler.record_event(EventType.TOOL_START, details={"tool": tool_name, "call_id": call_id})
+                    exec_start = time.perf_counter()
+
+                    res = await asyncio.wait_for(
+                        adapter.execute(call),
+                        timeout=self.default_timeout_s,
+                    )
+                    exec_duration_ms = (time.perf_counter() - exec_start) * 1000.0
+
+                    self.profiler.record_event(
+                        EventType.TOOL_END,
+                        duration_ms=exec_duration_ms,
                         details={"tool": tool_name, "call_id": call_id},
                     )
-                self.guardrails.record_concurrency_enter()
-
-                try:
-                    remaining_timeout = max(0.001, eff_deadline - time.perf_counter())
-                    res = await asyncio.wait_for(adapter.execute(call), timeout=remaining_timeout)
                 finally:
                     self.guardrails.record_concurrency_exit()
 
-        except RateLimitError as rle:
-            self.guardrails.record_rate_limit_failure()
-            self.profiler.record_event(
-                EventType.RATE_LIMIT_ERROR,
-                details={"tool": tool_name, "error": str(rle)},
-            )
-            res = ToolResult(
-                call_id=call_id,
-                name=tool_name,
-                tool_name=tool_name,
-                error=f"Rate limit exceeded: {str(rle)}",
-                is_error=True,
-                started_at=start_wall,
-                finished_at=time.perf_counter(),
-                execution_time_ns=time.perf_counter_ns() - start_ns,
-            )
+                res.call_id = call_id
+                res.tool_name = tool_name
+                res.name = tool_name
+                res.started_at = start_wall
+                res.finished_at = time.perf_counter()
+                res.execution_time_ns = time.perf_counter_ns() - start_ns
+                res.execution_time_ms = exec_duration_ms
+
+                # Publish result to idempotency store if reserved
+                if idempotency_store_key:
+                    res.metadata["idempotency_key"] = str(idempotency_key)
+                    self.idempotency_store.publish_result(idempotency_store_key, res)
+
+                return res
 
         except asyncio.TimeoutError:
             res = ToolResult(
                 call_id=call_id,
                 name=tool_name,
                 tool_name=tool_name,
-                error=f"Tool execution timed out after {timeout:.1f}s",
+                error=f"Tool execution timed out after {self.default_timeout_s}s",
                 is_error=True,
-                started_at=start_wall,
-                finished_at=time.perf_counter(),
-                execution_time_ns=time.perf_counter_ns() - start_ns,
-            )
-
-        except asyncio.CancelledError:
-            self.profiler.record_event(
-                EventType.TOOL_CANCELLED,
-                details={"tool": tool_name, "call_id": call_id},
-            )
-            res = ToolResult(
-                call_id=call_id,
-                name=tool_name,
-                tool_name=tool_name,
-                error="Tool execution cancelled.",
-                is_error=True,
-                cancelled=True,
                 started_at=start_wall,
                 finished_at=time.perf_counter(),
                 execution_time_ns=time.perf_counter_ns() - start_ns,
             )
             if idempotency_store_key:
                 self.idempotency_store.publish_result(idempotency_store_key, res)
+            return res
+
+        except asyncio.CancelledError:
+            self.profiler.record_event(EventType.TOOL_CANCELLED, details={"tool": tool_name, "call_id": call_id})
             raise
 
         except Exception as ex:
@@ -499,23 +425,12 @@ class ToolExecutor:
                 call_id=call_id,
                 name=tool_name,
                 tool_name=tool_name,
-                error=f"Tool execution error: {str(ex)}",
+                error=f"Tool execution unhandled error: {ex}",
                 is_error=True,
                 started_at=start_wall,
                 finished_at=time.perf_counter(),
                 execution_time_ns=time.perf_counter_ns() - start_ns,
             )
-
-        finally:
-            self._active_calls.discard(call_id)
-            self.profiler.end_span(
-                span_name,
-                EventType.TOOL_END,
-                details={"tool": tool_name, "call_id": call_id, "is_speculative": is_speculative},
-            )
-
-        # Publish result into atomic idempotency store
-        if idempotency_store_key:
-            self.idempotency_store.publish_result(idempotency_store_key, res)
-
-        return res
+            if idempotency_store_key:
+                self.idempotency_store.publish_result(idempotency_store_key, res)
+            return res

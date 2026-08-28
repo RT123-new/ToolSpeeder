@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Any
+
 import numpy as np
 
 from toolspeed.adapters.base import BaseToolAdapter
@@ -20,7 +21,7 @@ from toolspeed.workloads.base import BaseWorkload
 
 class W5LargePayloadsWorkload(BaseWorkload):
     """Workload Family 5: Large Tool Arguments & Heavy Results.
-    
+
     Stresses JSON decode throughput, serialization overhead, and evaluates
     compact action bytecode acceleration.
     """
@@ -136,7 +137,9 @@ class W5LargePayloadsWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: ExecutionTrace | None) -> tuple[bool, str, dict[str, Any]]:
+        def _validate(
+            task: TaskInstance, output: Any, trace: ExecutionTrace | None
+        ) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 

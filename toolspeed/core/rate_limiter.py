@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-import threading
-import time
 from typing import Any
+
+from typing_extensions import Self
 
 
 class RateLimitError(Exception):
     """Raised when rate limit is exceeded (HTTP 429 simulation)."""
+
     def __init__(self, message: str = "Rate limit exceeded (HTTP 429)", retry_after_s: float = 1.0):
         super().__init__(message)
         self.retry_after_s = retry_after_s
@@ -62,7 +65,9 @@ class AsyncTokenBucket:
             raise ValueError(f"Requested tokens ({tokens}) exceeds maximum bucket capacity ({self.capacity})")
 
         start_ns = time.perf_counter_ns()
-        eff_deadline = deadline if deadline is not None else ((time.perf_counter() + timeout) if timeout is not None else None)
+        eff_deadline = (
+            deadline if deadline is not None else ((time.perf_counter() + timeout) if timeout is not None else None)
+        )
 
         async with self._async_lock:
             with self._sync_lock:
@@ -106,8 +111,7 @@ class AsyncTokenBucket:
         async with self._async_lock:
             with self._sync_lock:
                 self.total_queue_delay_ns += delay_ns
-                if delay_ns > self.max_queue_delay_ns:
-                    self.max_queue_delay_ns = delay_ns
+                self.max_queue_delay_ns = max(self.max_queue_delay_ns, delay_ns)
         return delay_ns / 1_000_000.0
 
     def refund(self, tokens: int = 1) -> None:
@@ -203,11 +207,9 @@ class AsyncConcurrencyLimiter:
             with self._sync_lock:
                 self._active_count += 1
                 self.total_acquisitions += 1
-                if self._active_count > self._peak_concurrency:
-                    self._peak_concurrency = self._active_count
+                self._peak_concurrency = max(self._peak_concurrency, self._active_count)
                 self.total_queue_delay_ns += delay_ns
-                if delay_ns > self.max_queue_delay_ns:
-                    self.max_queue_delay_ns = delay_ns
+                self.max_queue_delay_ns = max(self.max_queue_delay_ns, delay_ns)
 
         return delay_ns / 1_000_000.0
 
@@ -222,11 +224,16 @@ class AsyncConcurrencyLimiter:
         except ValueError:
             pass
 
-    async def __aenter__(self) -> AsyncConcurrencyLimiter:
+    async def __aenter__(self) -> Self:
         await self.acquire()
         return self
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
         self.release()
 
     def reset_metrics(self) -> None:
@@ -240,6 +247,7 @@ class AsyncConcurrencyLimiter:
 @dataclass
 class RateLimitLease:
     """Exclusive cancellation-safe lease holding rate limit tokens and concurrency slots."""
+
     tokens_acquired: int
     concurrency_acquired: bool
     limiter: RateLimiter
@@ -254,10 +262,15 @@ class RateLimitLease:
         if self.concurrency_acquired:
             self.limiter.concurrency_limiter.release()
 
-    async def __aenter__(self) -> RateLimitLease:
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
         self.release()
 
 
@@ -291,7 +304,9 @@ class RateLimiter:
     ) -> AsyncIterator[RateLimitLease]:
         """Cancellation-safe context manager acquiring rate tokens first, then concurrency slot."""
         start_ns = time.perf_counter_ns()
-        eff_deadline = deadline if deadline is not None else ((time.perf_counter() + timeout) if timeout is not None else None)
+        eff_deadline = (
+            deadline if deadline is not None else ((time.perf_counter() + timeout) if timeout is not None else None)
+        )
 
         # 1. Acquire rate limit tokens first (WITHOUT holding concurrency slot!)
         await self.token_bucket.acquire(tokens=tokens, deadline=eff_deadline)
@@ -342,11 +357,16 @@ class RateLimiter:
         """Release concurrency slot."""
         self.concurrency_limiter.release()
 
-    async def __aenter__(self) -> RateLimiter:
+    async def __aenter__(self) -> Self:
         await self.acquire(tokens=1)
         return self
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
         self.release()
 
     def get_metrics(self) -> dict[str, Any]:

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from dataclasses import dataclass, field
 import inspect
 import json
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
+
 import numpy as np
 
 from toolspeed.adapters.base import BaseToolAdapter, ToolSchema
@@ -18,6 +19,7 @@ from toolspeed.core.types import ToolCall, ToolResult, ToolSpec
 @dataclass
 class MockToolConfig:
     """Configuration for a mock tool's simulation characteristics."""
+
     name: str
     description: str = "Mock simulated tool"
     parameters: dict[str, Any] = field(default_factory=dict)
@@ -66,13 +68,16 @@ class MockToolAdapter(BaseToolAdapter):
                 requires_approval=req_appr,
                 handler=handler,
             )
-        super().__init__(spec or ToolSpec(
-            name=config.name,
-            description=config.description,
-            parameters=config.parameters,
-            is_read_only=not config.is_side_effect,
-            side_effects=config.is_side_effect,
-        ))
+        super().__init__(
+            spec
+            or ToolSpec(
+                name=config.name,
+                description=config.description,
+                parameters=config.parameters,
+                is_read_only=not config.is_side_effect,
+                side_effects=config.is_side_effect,
+            )
+        )
         self.config = config
         self._rng = np.random.default_rng(seed)
         self._is_warm: bool = config.cold_start_ms <= 0
@@ -377,7 +382,11 @@ def create_standard_mock_registry() -> dict[str, MockToolAdapter]:
                 is_read_only=True,
                 estimated_latency_ms=10.0,
             ),
-            handler=lambda args: {"user_id": args.get("user_id"), "name": f"User_{args.get('user_id')}", "tier": "gold"},
+            handler=lambda args: {
+                "user_id": args.get("user_id"),
+                "name": f"User_{args.get('user_id')}",
+                "tier": "gold",
+            },
         ),
         MockToolAdapter(
             spec=ToolSpec(
@@ -395,7 +404,11 @@ def create_standard_mock_registry() -> dict[str, MockToolAdapter]:
             spec=ToolSpec(
                 name="execute_payment",
                 description="Execute payment transaction (side-effecting)",
-                parameters={"type": "object", "properties": {"order_id": {"type": "string"}, "amount": {"type": "number"}}, "required": ["order_id", "amount"]},
+                parameters={
+                    "type": "object",
+                    "properties": {"order_id": {"type": "string"}, "amount": {"type": "number"}},
+                    "required": ["order_id", "amount"],
+                },
                 required_args=["order_id", "amount"],
                 commit_horizon_args=["order_id", "amount"],
                 is_read_only=False,

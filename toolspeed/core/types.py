@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field
-from enum import Enum
 import hashlib
 import json
 import math
 import platform
 import time
-from typing import Any, Callable, Mapping, Sequence
 import uuid
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field
+from enum import Enum
+from typing import Any
 
 
 class EvidenceLevel(str, Enum):
     """Scientific evidence classification hierarchy."""
+
     SYNTHETIC = "synthetic"
     REPLAY_INTEGRATION = "replay_integration"
     LOCAL_WALL_CLOCK = "local_wall_clock"
@@ -27,6 +29,7 @@ class EvidenceLevel(str, Enum):
 
 class VerdictState(str, Enum):
     """Scientific hypothesis verdict status."""
+
     PASSED = "passed"
     FALSIFIED = "falsified"
     INCONCLUSIVE = "inconclusive"
@@ -37,6 +40,7 @@ class VerdictState(str, Enum):
 
 class EventType(str, Enum):
     """Execution event types recorded in high-precision timeline."""
+
     TASK_START = "task_start"
     TASK_END = "task_end"
     MODEL_START = "model_start"
@@ -51,8 +55,12 @@ class EventType(str, Enum):
     TOOL_END = "tool_end"
     TOOL_CANCELLED = "tool_cancelled"
     SPECULATION_START = "speculation_start"
+    SPECULATIVE_LAUNCH = "speculation_start"
+    SPECULATIVE_DISPATCH = "speculation_start"
     SPECULATION_HIT = "speculation_hit"
+    SPECULATIVE_HIT = "speculation_hit"
     SPECULATION_MISS = "speculation_miss"
+    SPECULATIVE_MISS = "speculation_miss"
     SPECULATION_CANCELLED = "speculation_cancelled"
     SPECULATIVE_CANCEL = "speculation_cancelled"
     CACHE_HIT = "cache_hit"
@@ -62,7 +70,10 @@ class EventType(str, Enum):
     DAG_NODE_DISPATCH = "dag_node_dispatch"
     JIT_FUSION_START = "jit_fusion_start"
     JIT_FUSION_SUCCESS = "jit_fusion_success"
+    FUSION_HIT = "jit_fusion_success"
     JIT_FUSION_DEOPT = "jit_fusion_deopt"
+    FUSION_DEOPT = "jit_fusion_deopt"
+    DEOPTIMIZATION = "jit_fusion_deopt"
     BYTECODE_ENCODE = "bytecode_encode"
     BYTECODE_DECODE = "bytecode_decode"
     GUARDRAIL_VIOLATION = "guardrail_violation"
@@ -74,6 +85,7 @@ class EventType(str, Enum):
     SANDBOX_INIT_START = "sandbox_init_start"
     SANDBOX_INIT_END = "sandbox_init_end"
     COMMIT_HORIZON_REACHED = "commit_horizon_reached"
+    EARLY_DISPATCH = "commit_horizon_reached"
     CUSTOM = "custom"
 
     def __str__(self) -> str:
@@ -92,7 +104,7 @@ def sanitize_for_json(obj: Any) -> Any:
         return [sanitize_for_json(item) for item in obj]
     elif isinstance(obj, Enum):
         return obj.value
-    elif hasattr(obj, "to_dict") and callable(getattr(obj, "to_dict")):
+    elif hasattr(obj, "to_dict") and callable(obj.to_dict):
         return sanitize_for_json(obj.to_dict())
     return obj
 
@@ -106,6 +118,7 @@ def strict_json_dumps(obj: Any, indent: int | None = 2) -> str:
 @dataclass(frozen=True)
 class AgentTask:
     """Task input presented strictly to the agent/model (NO oracle or expected outputs)."""
+
     task_id: str
     prompt: str
     workload_family: str = "default"
@@ -138,12 +151,14 @@ class AgentTask:
 @dataclass(frozen=True)
 class StateSnapshot:
     """Immutable state snapshot for environment initialization and validation."""
+
     state_id: str
     namespace: str = "default"
     data: Mapping[str, Any] = field(default_factory=dict)
 
     def clone(self) -> StateSnapshot:
         import copy
+
         return StateSnapshot(
             state_id=str(uuid.uuid4()),
             namespace=self.namespace,
@@ -161,6 +176,7 @@ class StateSnapshot:
 @dataclass(frozen=True)
 class ExpectedOutcome:
     """Oracle ground-truth specifications for task validation (NEVER given to the model)."""
+
     expected_final_value: Any = None
     expected_tool_sequence: Sequence[str] = field(default_factory=tuple)
     expected_tool_arguments: Mapping[str, Any] = field(default_factory=dict)
@@ -168,6 +184,7 @@ class ExpectedOutcome:
     required_tools: Sequence[str] = field(default_factory=tuple)
     disallowed_tools: Sequence[str] = field(default_factory=tuple)
     max_allowed_calls: int = 100
+    oracle_canary: str = "ORACLE_CANARY_SECRET_789XYZ"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -178,12 +195,14 @@ class ExpectedOutcome:
             "required_tools": list(self.required_tools),
             "disallowed_tools": list(self.disallowed_tools),
             "max_allowed_calls": self.max_allowed_calls,
+            "oracle_canary": self.oracle_canary,
         }
 
 
 @dataclass(frozen=True)
 class ApprovalGrant:
     """Trusted, scheduler-independent authorization grant for side-effect execution."""
+
     approval_id: str
     subject: str
     tool_name: str
@@ -202,7 +221,7 @@ class ApprovalGrant:
         subject: str = "default_subject",
         single_use: bool = True,
     ) -> ApprovalGrant:
-        fp_payload = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}".encode("utf-8")
+        fp_payload = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}".encode()
         fp = hashlib.sha256(fp_payload).hexdigest()[:16]
         return cls(
             approval_id=str(uuid.uuid4()),
@@ -219,7 +238,7 @@ class ApprovalGrant:
             return False
         if time.perf_counter() > self.expires_at:
             return False
-        fp_payload = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}".encode("utf-8")
+        fp_payload = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}".encode()
         fp = hashlib.sha256(fp_payload).hexdigest()[:16]
         return self.argument_fingerprint == fp
 
@@ -227,8 +246,9 @@ class ApprovalGrant:
 @dataclass(frozen=True)
 class CommittedCall:
     """Immutable representation of a tool call that has safely crossed the commit horizon."""
+
     tool_name: str
-    arguments: tuple[tuple[str, Any], ...]
+    arguments: Mapping[str, Any]
     call_id: str
     schema_hash: str
     semantic_fingerprint: str
@@ -243,13 +263,15 @@ class CommittedCall:
         token_index: int = 0,
         byte_offset: int = 0,
     ) -> CommittedCall:
-        sorted_args = tuple(sorted((k, json.dumps(v, sort_keys=True)) for k, v in call.arguments.items()))
+        import copy
+
         t_name = call.name or call.tool_name
-        fp_payload = f"{t_name}:{sorted_args}:{schema_hash}".encode("utf-8")
+        args_copy = copy.deepcopy(call.arguments)
+        fp_payload = f"{t_name}:{json.dumps(args_copy, sort_keys=True)}:{schema_hash}".encode()
         fingerprint = hashlib.sha256(fp_payload).hexdigest()
         return cls(
             tool_name=t_name,
-            arguments=sorted_args,
+            arguments=args_copy,
             call_id=call.call_id,
             schema_hash=schema_hash,
             semantic_fingerprint=fingerprint,
@@ -258,9 +280,24 @@ class CommittedCall:
         )
 
 
+def compute_file_sha256(file_path: Any) -> str:
+    """Compute SHA-256 over exact file bytes."""
+    from pathlib import Path
+
+    p = Path(file_path)
+    if not p.exists() or not p.is_file():
+        raise FileNotFoundError(f"Cannot compute hash for missing file: {p}")
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 @dataclass
 class ArtifactManifest:
     """Provenance and execution environment metadata for benchmark artifact bundles."""
+
     git_sha: str = "unknown"
     git_dirty: bool = False
     command: str = ""
@@ -274,13 +311,14 @@ class ArtifactManifest:
     benchmark_config_hash: str = ""
     workload_fixture_hash: str = ""
     raw_trace_hash: str = ""
+    file_hashes: dict[str, str] = field(default_factory=dict)
     report_generator_version: str = "2.0.0"
     is_simulated: bool = False
     is_verdict_eligible: bool = True
     trial_count: int = 0
     warmup_count: int = 0
     resource_topology: dict[str, Any] = field(default_factory=dict)
-    required_metric_policy_version: str = "1.0.0"
+    required_metric_policy_version: str = "2.0.0"
 
     @property
     def commit_sha(self) -> str:
@@ -296,7 +334,9 @@ class ArtifactManifest:
             "code_git_sha": self.git_sha,
             "git_dirty": self.git_dirty,
             "command": self.command,
-            "evidence_level": self.evidence_level.value if isinstance(self.evidence_level, EvidenceLevel) else str(self.evidence_level),
+            "evidence_level": self.evidence_level.value
+            if isinstance(self.evidence_level, EvidenceLevel)
+            else str(self.evidence_level),
             "timestamp_utc": self.timestamp_utc,
             "seed": self.seed,
             "python_version": self.python_version,
@@ -306,6 +346,7 @@ class ArtifactManifest:
             "benchmark_config_hash": self.benchmark_config_hash,
             "workload_fixture_hash": self.workload_fixture_hash,
             "raw_trace_hash": self.raw_trace_hash,
+            "file_hashes": self.file_hashes,
             "report_generator_version": self.report_generator_version,
             "is_simulated": self.is_simulated,
             "is_verdict_eligible": self.is_verdict_eligible,
@@ -329,15 +370,21 @@ class ArtifactManifest:
         fixture_data: Any = None,
         trace_data: Any = None,
         resource_topology: dict[str, Any] | None = None,
+        file_hashes: dict[str, str] | None = None,
     ) -> ArtifactManifest:
         sha = "unknown"
         dirty = False
         try:
             import subprocess
-            res_sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=2)
+
+            res_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=2, check=False
+            )
             if res_sha.returncode == 0:
                 sha = res_sha.stdout.strip()
-            res_status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, timeout=2)
+            res_status = subprocess.run(
+                ["git", "status", "--porcelain"], capture_output=True, text=True, timeout=2, check=False
+            )
             if res_status.returncode == 0:
                 dirty = len(res_status.stdout.strip()) > 0
         except Exception:
@@ -346,13 +393,26 @@ class ArtifactManifest:
         deps: dict[str, str] = {}
         try:
             import numpy
+
             deps["numpy"] = numpy.__version__
         except Exception:
             pass
 
-        config_hash = hashlib.sha256(json.dumps(sanitize_for_json(config_data), sort_keys=True).encode("utf-8")).hexdigest() if config_data else hashlib.sha256(f"config:{command}:{seed}".encode("utf-8")).hexdigest()
-        fixture_hash = hashlib.sha256(json.dumps(sanitize_for_json(fixture_data), sort_keys=True).encode("utf-8")).hexdigest() if fixture_data else hashlib.sha256(f"fixture:{command}:{evidence_level}".encode("utf-8")).hexdigest()
-        trace_hash = hashlib.sha256(json.dumps(sanitize_for_json(trace_data), sort_keys=True).encode("utf-8")).hexdigest() if trace_data else hashlib.sha256(f"trace:{command}:{seed}:{trial_count}".encode("utf-8")).hexdigest()
+        config_hash = (
+            hashlib.sha256(json.dumps(sanitize_for_json(config_data), sort_keys=True).encode("utf-8")).hexdigest()
+            if config_data
+            else hashlib.sha256(f"config:{command}:{seed}".encode()).hexdigest()
+        )
+        fixture_hash = (
+            hashlib.sha256(json.dumps(sanitize_for_json(fixture_data), sort_keys=True).encode("utf-8")).hexdigest()
+            if fixture_data
+            else hashlib.sha256(f"fixture:{command}:{evidence_level}".encode()).hexdigest()
+        )
+        trace_hash = (
+            hashlib.sha256(json.dumps(sanitize_for_json(trace_data), sort_keys=True).encode("utf-8")).hexdigest()
+            if trace_data
+            else hashlib.sha256(f"trace:{command}:{seed}:{trial_count}".encode()).hexdigest()
+        )
 
         return cls(
             git_sha=sha,
@@ -364,6 +424,7 @@ class ArtifactManifest:
             benchmark_config_hash=config_hash,
             workload_fixture_hash=fixture_hash,
             raw_trace_hash=trace_hash,
+            file_hashes=file_hashes or {},
             is_simulated=is_simulated,
             is_verdict_eligible=is_verdict_eligible,
             trial_count=trial_count,
@@ -375,6 +436,7 @@ class ArtifactManifest:
 @dataclass
 class TokenUsage:
     """Token consumption and monetary cost tracker."""
+
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
@@ -403,6 +465,7 @@ class TokenUsage:
 @dataclass(frozen=True)
 class ToolSpec:
     """Tool specification metadata."""
+
     name: str
     description: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
@@ -425,6 +488,7 @@ class ToolSpec:
 @dataclass
 class ToolCall:
     """Representation of an agent's request to execute a tool."""
+
     tool_name: str = ""
     name: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
@@ -492,6 +556,7 @@ class ToolCall:
 @dataclass
 class ToolResult:
     """Output and performance metadata of a tool execution."""
+
     call_id: str
     tool_name: str = ""
     name: str = ""
@@ -580,6 +645,7 @@ class ToolResult:
 @dataclass
 class ExecutionEvent:
     """A discrete timestamped event on the execution timeline."""
+
     event_type: EventType | str
     timestamp: float = field(default_factory=time.perf_counter)
     timestamp_ns: int = field(default_factory=time.perf_counter_ns)
@@ -633,6 +699,7 @@ class ExecutionEvent:
 @dataclass
 class LatencyProfile:
     """Synthetic or empirical latency profile parameters (milliseconds)."""
+
     model_decision_ms: float = 450.0
     model_final_ms: float = 300.0
     tool_ms: float = 600.0
@@ -657,6 +724,7 @@ class LatencyProfile:
 @dataclass
 class TaskInstance:
     """An individual workload task item for evaluation."""
+
     task_id: str
     workload_family: str = "default"
     workload_id: str = ""
@@ -715,11 +783,13 @@ class TaskInstance:
 @dataclass
 class Task:
     """Task definition with mandatory correctness validation."""
+
     task_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     prompt: str = ""
     expected_output: Any = None
     validator: Callable[..., bool] | None = None
     context: dict[str, Any] = field(default_factory=dict)
+    parameters: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_agent_task(self) -> AgentTask:
@@ -736,6 +806,11 @@ class Task:
         """Strict validation: task cannot automatically pass if neither validator nor expected_output is provided."""
         if self.validator is not None:
             try:
+                if hasattr(self.validator, "validate"):
+                    res = self.validator.validate(self, actual_output, trace=trace)
+                    if isinstance(res, tuple):
+                        return bool(res[0])
+                    return bool(res)
                 try:
                     return bool(self.validator(actual_output, trace=trace))
                 except TypeError:
@@ -761,6 +836,7 @@ class Task:
 @dataclass
 class ExecutionTrace:
     """Complete chronological audit trace of an agent task execution."""
+
     task_id: str
     workload_family: str = "default"
     scheduler_name: str = "default"
@@ -807,7 +883,8 @@ class ExecutionTrace:
     def get_events_by_type(self, event_type: EventType | str) -> list[ExecutionEvent]:
         target = event_type.value if isinstance(event_type, EventType) else str(event_type)
         return [
-            e for e in self.events
+            e
+            for e in self.events
             if (e.event_type.value if isinstance(e.event_type, EventType) else str(e.event_type)) == target
         ]
 
@@ -868,6 +945,17 @@ class TaskValidator(ABC):
         """Validate output and execution trace."""
         ...
 
+    def __call__(self, *args: Any, **kwargs: Any) -> bool:
+        if len(args) == 2 and isinstance(args[0], Task):
+            res = self.validate(args[0], args[1], kwargs.get("trace"))
+        elif len(args) == 1:
+            res = self.validate(None, args[0], kwargs.get("trace"))
+        else:
+            res = self.validate(*args, **kwargs)  # type: ignore[misc]
+        if isinstance(res, tuple):
+            return bool(res[0])
+        return bool(res)
+
 
 class FunctionValidator(TaskValidator):
     """Adapter wrapping a validation callable."""
@@ -890,6 +978,7 @@ class FunctionValidator(TaskValidator):
 @dataclass(frozen=True)
 class BenchmarkCase:
     """Rigorous benchmark test case structure separating input, state, traces, and oracle."""
+
     case_id: str
     agent_task: AgentTask
     initial_state: StateSnapshot
@@ -908,6 +997,7 @@ class BenchmarkCase:
 @dataclass
 class GuardrailMetrics:
     """Comprehensive guardrail statistics measured across evaluation runs."""
+
     total_tasks: int = 0
     successful_tasks: int = 0
     exact_success: float = 0.0
@@ -967,6 +1057,7 @@ class GuardrailMetrics:
 @dataclass
 class DependencyNode:
     """DAG dependency node structure."""
+
     call_id: str
     tool_name: str
     arguments: dict[str, Any] = field(default_factory=dict)
@@ -978,6 +1069,7 @@ class DependencyNode:
 @dataclass
 class WorkloadSpec:
     """Specification of a workload experiment."""
+
     name: str
     family: str
     description: str = ""

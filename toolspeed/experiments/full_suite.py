@@ -2,44 +2,40 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
-import json
 import time
-from typing import Any, Dict, List, Optional, Union
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 from toolspeed.core.types import (
     ArtifactManifest,
     EvidenceLevel,
-    VerdictState,
-    sanitize_for_json,
     strict_json_dumps,
-)
-from toolspeed.experiments.runner import (
-    ExperimentResult,
-    FalsificationVerdict,
-    LatencyProfile,
-    MetricSummary,
-    WorkloadFamily,
-    compute_summary,
-    samples,
 )
 from toolspeed.experiments.e1_dag_runner import E1DAGExperiment
 from toolspeed.experiments.e2_fusion_runner import E2FusionExperiment
 from toolspeed.experiments.e3_spec_runner import E3SpeculationExperiment
 from toolspeed.experiments.e4_commit_runner import E4CommitHorizonExperiment
 from toolspeed.experiments.e5_bytecode_runner import E5BytecodeExperiment
+from toolspeed.experiments.runner import (
+    ExperimentResult,
+    LatencyProfile,
+    WorkloadFamily,
+    compute_summary,
+    samples,
+)
 
 
 @dataclass
 class WorkloadBenchmarkResult:
     """Benchmark outcome for an individual canonical workload."""
+
     workload_id: str
     name: str
     description: str
-    primary_mechanisms: List[str]
+    primary_mechanisms: list[str]
     baseline_p50_ms: float
     candidate_p50_ms: float
     p50_speedup: float
@@ -52,7 +48,7 @@ class WorkloadBenchmarkResult:
     central_hypothesis_passed: bool
     evidence_level: EvidenceLevel = EvidenceLevel.SYNTHETIC
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "workload_id": self.workload_id,
             "name": self.name,
@@ -68,27 +64,32 @@ class WorkloadBenchmarkResult:
             "success_rate": self.success_rate,
             "cost_multiplier": self.cost_multiplier,
             "central_hypothesis_passed": self.central_hypothesis_passed,
-            "evidence_level": self.evidence_level.value if isinstance(self.evidence_level, EvidenceLevel) else str(self.evidence_level),
+            "evidence_level": self.evidence_level.value
+            if isinstance(self.evidence_level, EvidenceLevel)
+            else str(self.evidence_level),
         }
 
 
 @dataclass
 class SuiteResult:
     """Unified container for full experiment suite and workload benchmarks."""
-    experiments: Dict[str, ExperimentResult]
-    workloads: Dict[str, WorkloadBenchmarkResult]
+
+    experiments: dict[str, ExperimentResult]
+    workloads: dict[str, WorkloadBenchmarkResult]
     profile: LatencyProfile
     trials: int
     seed: int
     total_runtime_sec: float
     central_hypothesis_passed: bool
-    evidence_log: List[Dict[str, str]]
+    evidence_log: list[dict[str, str]]
     evidence_level: EvidenceLevel = EvidenceLevel.SYNTHETIC
-    manifest: Optional[ArtifactManifest] = None
+    manifest: ArtifactManifest | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "evidence_level": self.evidence_level.value if isinstance(self.evidence_level, EvidenceLevel) else str(self.evidence_level),
+            "evidence_level": self.evidence_level.value
+            if isinstance(self.evidence_level, EvidenceLevel)
+            else str(self.evidence_level),
             "manifest": self.manifest.to_dict() if self.manifest else None,
             "experiments": {k: v.to_dict() for k, v in self.experiments.items()},
             "workloads": {k: v.to_dict() for k, v in self.workloads.items()},
@@ -100,12 +101,12 @@ class SuiteResult:
             "evidence_log": self.evidence_log,
         }
 
-    def save_json(self, path: Union[str, Path]) -> None:
+    def save_json(self, path: str | Path) -> None:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(strict_json_dumps(self.to_dict(), indent=2), encoding="utf-8")
 
-    def save_csvs(self, directory: Union[str, Path]) -> List[Path]:
+    def save_csvs(self, directory: str | Path) -> list[Path]:
         out_dir = Path(directory)
         out_dir.mkdir(parents=True, exist_ok=True)
         saved = []
@@ -162,7 +163,9 @@ class SuiteResult:
                         red95,
                         succ,
                         str(w.central_hypothesis_passed),
-                        w.evidence_level.value if isinstance(w.evidence_level, EvidenceLevel) else str(w.evidence_level),
+                        w.evidence_level.value
+                        if isinstance(w.evidence_level, EvidenceLevel)
+                        else str(w.evidence_level),
                     ]
                 )
             )
@@ -176,7 +179,7 @@ class SuiteRunner:
 
     def __init__(
         self,
-        profile: Optional[LatencyProfile] = None,
+        profile: LatencyProfile | None = None,
         trials: int = 10_000,
         seed: int = 20260825,
         evidence_level: EvidenceLevel = EvidenceLevel.SYNTHETIC,
@@ -186,9 +189,9 @@ class SuiteRunner:
         self.seed = seed
         self.evidence_level = evidence_level
 
-    def run_workload_benchmarks(self) -> Dict[str, WorkloadBenchmarkResult]:
+    def run_workload_benchmarks(self) -> dict[str, WorkloadBenchmarkResult]:
         """Execute analytical statistical simulation for each workload family W1-W7."""
-        results: Dict[str, WorkloadBenchmarkResult] = {}
+        results: dict[str, WorkloadBenchmarkResult] = {}
         n = self.trials
 
         # W1: Independent fan-out reads (4 parallel reads + DAG scheduler)
@@ -445,7 +448,7 @@ class SuiteRunner:
 
 
 def run_full_suite(
-    profile: Optional[LatencyProfile] = None,
+    profile: LatencyProfile | None = None,
     trials: int = 10_000,
     seed: int = 20260825,
 ) -> SuiteResult:

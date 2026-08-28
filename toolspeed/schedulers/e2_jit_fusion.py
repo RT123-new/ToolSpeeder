@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import hashlib
 import json
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
@@ -12,9 +12,9 @@ from toolspeed.core.types import EventType, ToolCall, ToolResult
 from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig
 
 
-@dataclass
+@dataclass(frozen=True)
 class WorkflowNode:
-    """Declarative node in a compiled workflow pipeline."""
+    """Declarative node in a compiled workflow pipeline (immutable)."""
     step_id: str
     tool_name: str
     args_template: dict[str, Any]
@@ -26,20 +26,18 @@ class WorkflowNode:
         return asdict(self)
 
 
-@dataclass
+@dataclass(frozen=True)
 class WorkflowInvariant:
-    """Bounded, serializable invariant condition evaluated on ledger state."""
+    """Bounded, serializable invariant condition evaluated on ledger state (immutable)."""
     field_path: str
     operator: str  # "exists", "not_exists", "equals", "not_equals", "less_than", "greater_than", "contains"
     expected_value: Any = None
     description: str = ""
 
     def evaluate(self, ledger: dict[str, Any], context: dict[str, Any]) -> bool:
-        # Extract target field
         parts = self.field_path.split(".")
         root_key = parts[0]
         if root_key != "context" and root_key not in ledger:
-            # Step produces this key in a future node; do not prematurely fail
             return True
 
         val: Any = context.get(root_key) if root_key == "context" else ledger.get(root_key)
@@ -54,9 +52,7 @@ class WorkflowInvariant:
         if op == "exists":
             if val is None:
                 return False
-            if isinstance(val, dict) and val.get("error"):
-                return False
-            return True
+            return not (isinstance(val, dict) and val.get("error"))
         elif op == "not_exists":
             return val is None
         elif op == "equals":
@@ -82,13 +78,13 @@ class WorkflowInvariant:
         return asdict(self)
 
 
-@dataclass
+@dataclass(frozen=True)
 class DeclarativeWorkflow:
-    """Bounded declarative workflow representation containing data only (no callables)."""
+    """Bounded declarative workflow representation containing data only (no callables, immutable)."""
     workflow_id: str
     version: str = "1.0.0"
-    nodes: list[WorkflowNode] = field(default_factory=list)
-    invariants: list[WorkflowInvariant] = field(default_factory=list)
+    nodes: tuple[WorkflowNode, ...] = field(default_factory=tuple)
+    invariants: tuple[WorkflowInvariant, ...] = field(default_factory=tuple)
     output_mapping: dict[str, Any] = field(default_factory=dict)
     description: str = ""
 
@@ -115,7 +111,7 @@ class DeclarativeWorkflow:
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class FusedKernel:
     """Registered declarative kernel for workflow fusion."""
     name: str
@@ -126,35 +122,39 @@ class FusedKernel:
         return self.workflow.workflow_id
 
 
-class JITFusionScheduler(BaseScheduler):
-    """Experiment E2: Programmatic / JIT Workflow Fusion Scheduler.
-    
-    Detects known declarative workflow structures, executes compiled tool sequences locally
-    via ToolExecutor, maintains an execution ledger, and safely deoptimizes on invariant failure
-    without re-executing completed side-effects.
-    """
+class WorkflowRegistry:
+    """Trusted immutable registry for registered declarative workflows."""
 
-    def __init__(self, config: SchedulerConfig | None = None, fusion_enabled: bool = True) -> None:
-        cfg = config or SchedulerConfig()
-        cfg.fusion_enabled = fusion_enabled
-        super().__init__(cfg)
-        self._compiled_kernels: dict[str, DeclarativeWorkflow] = {}
-        self._register_default_kernels()
+    _instance: WorkflowRegistry | None = None
 
-    def register_kernel(self, kernel: FusedKernel | DeclarativeWorkflow) -> None:
-        if isinstance(kernel, FusedKernel):
-            self._compiled_kernels[kernel.name] = kernel.workflow
-        elif isinstance(kernel, DeclarativeWorkflow):
-            self._compiled_kernels[kernel.workflow_id] = kernel
-        else:
-            raise TypeError(f"Expected DeclarativeWorkflow or FusedKernel, got {type(kernel).__name__}")
+    def __init__(self) -> None:
+        self._workflows: dict[str, DeclarativeWorkflow] = {}
+        self._register_defaults()
 
-    def _register_default_kernels(self) -> None:
-        """Standard compiled declarative workflow for user orders pipeline."""
+    @classmethod
+    def get_instance(cls) -> WorkflowRegistry:
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def register(self, workflow: DeclarativeWorkflow) -> None:
+        if not isinstance(workflow, DeclarativeWorkflow):
+            raise TypeError(f"Expected DeclarativeWorkflow, got {type(workflow).__name__}")
+        key = f"{workflow.workflow_id}:{workflow.version}"
+        self._workflows[key] = workflow
+        self._workflows[workflow.workflow_id] = workflow
+
+    def get(self, workflow_id: str, version: str | None = None) -> DeclarativeWorkflow | None:
+        if version is not None:
+            key = f"{workflow_id}:{version}"
+            return self._workflows.get(key)
+        return self._workflows.get(workflow_id)
+
+    def _register_defaults(self) -> None:
         user_orders_wf = DeclarativeWorkflow(
             workflow_id="user_orders",
             version="1.0.0",
-            nodes=[
+            nodes=(
                 WorkflowNode(
                     step_id="fetch_user_step",
                     tool_name="fetch_user",
@@ -167,8 +167,8 @@ class JITFusionScheduler(BaseScheduler):
                     args_template={"user_id": "$user.user_id"},
                     output_key="orders",
                 ),
-            ],
-            invariants=[
+            ),
+            invariants=(
                 WorkflowInvariant(
                     field_path="user",
                     operator="exists",
@@ -179,7 +179,7 @@ class JITFusionScheduler(BaseScheduler):
                     operator="exists",
                     description="Orders fetched successfully",
                 ),
-            ],
+            ),
             output_mapping={
                 "user": "$user",
                 "orders": "$orders",
@@ -187,8 +187,42 @@ class JITFusionScheduler(BaseScheduler):
             },
             description="Fused fetch_user -> fetch_orders declarative workflow",
         )
-        self._compiled_kernels["user_orders"] = user_orders_wf
-        self._compiled_kernels["user_orders_fusion"] = user_orders_wf
+        self.register(user_orders_wf)
+
+
+GLOBAL_WORKFLOW_REGISTRY = WorkflowRegistry.get_instance()
+
+
+class JITFusionScheduler(BaseScheduler):
+    """Experiment E2: Programmatic / JIT Workflow Fusion Scheduler.
+
+    Detects registered declarative workflow identifiers, executes compiled tool sequences locally
+    via ToolExecutor, maintains an execution ledger, and safely deoptimizes on invariant failure
+    without re-executing completed side-effects.
+    """
+
+    def __init__(
+        self,
+        config: SchedulerConfig | None = None,
+        fusion_enabled: bool | None = None,
+        registry: WorkflowRegistry | None = None,
+    ) -> None:
+        cfg = config or SchedulerConfig(fusion_enabled=True, jit_fusion_enabled=True)
+        if fusion_enabled is not None:
+            cfg.fusion_enabled = fusion_enabled
+            cfg.jit_fusion_enabled = fusion_enabled
+        elif config is None:
+            cfg.fusion_enabled = True
+            cfg.jit_fusion_enabled = True
+        super().__init__(cfg)
+        self.registry = registry or GLOBAL_WORKFLOW_REGISTRY
+
+    def register_kernel(self, kernel_or_wf: Any) -> None:
+        """Registers a declarative workflow or kernel with the scheduler registry."""
+        if isinstance(kernel_or_wf, DeclarativeWorkflow):
+            self.registry.register(kernel_or_wf)
+        elif hasattr(kernel_or_wf, "to_declarative_workflow"):
+            self.registry.register(kernel_or_wf.to_declarative_workflow())
 
     def _match_workflow(self, ctx: ExecutionContext) -> DeclarativeWorkflow | None:
         if not self.config.fusion_enabled:
@@ -199,14 +233,15 @@ class JITFusionScheduler(BaseScheduler):
         if isinstance(custom_wf, DeclarativeWorkflow):
             return custom_wf
 
-        # 2. Explicit workflow identifier matching
-        wf_id = ctx.task.metadata.get("workflow") or ctx.task.metadata.get("workflow_id")
-        if wf_id and wf_id in self._compiled_kernels:
-            return self._compiled_kernels[wf_id]
+        # 2. Resolve strictly from trusted registry via workflow_id
+        wf_id = ctx.task.metadata.get("workflow_id") or ctx.task.metadata.get("workflow")
+        if wf_id and isinstance(wf_id, str):
+            wf_ver = ctx.task.metadata.get("workflow_version")
+            return self.registry.get(wf_id, wf_ver)
 
-        # 3. Task pattern match for compiled user_orders pipeline
+        # 3. Default user_orders pipeline pattern match
         if "user_id" in ctx.task.context and ("orders" in ctx.task.prompt.lower() or "user" in ctx.task.prompt.lower()):
-            return self._compiled_kernels.get("user_orders")
+            return self.registry.get("user_orders")
 
         return None
 
@@ -249,17 +284,24 @@ class JITFusionScheduler(BaseScheduler):
         for k, v in mapping.items():
             if isinstance(v, str) and v.startswith("$"):
                 ref = v[1:]
-                parts = ref.split(".", 1)
-                source_key = parts[0]
-                attr = parts[1] if len(parts) > 1 else None
-                source = context if source_key == "context" else ledger.get(source_key)
-                if attr and isinstance(source, dict):
-                    result[k] = source.get(attr)
-                else:
-                    result[k] = source
+                source = context if ref == "context" else ledger.get(ref)
+                result[k] = source
             else:
                 result[k] = v
         return result
+
+    def _validate_workflow_static(self, workflow: DeclarativeWorkflow, tools: ToolRegistry) -> tuple[bool, str]:
+        """Static verification: tools exist and side-effect flags match reality."""
+        for node in workflow.nodes:
+            adapter = tools.get(node.tool_name)
+            if adapter is None:
+                return False, f"Tool '{node.tool_name}' not found in registry"
+            spec = adapter.spec
+            if spec.side_effects != node.is_side_effect:
+                return False, f"Workflow node '{node.step_id}' side_effect mismatch with tool spec"
+            if spec.requires_approval != node.requires_approval:
+                return False, f"Workflow node '{node.step_id}' approval mismatch with tool spec"
+        return True, ""
 
     async def _execute_internal(
         self,
@@ -268,100 +310,108 @@ class JITFusionScheduler(BaseScheduler):
         tools: ToolRegistry,
     ) -> Any:
         workflow = self._match_workflow(ctx)
-        ledger: dict[str, Any] = {}
-        completed_side_effects: dict[str, ToolResult] = {}
-        deopt_triggered = False
-        deopt_reason = ""
 
-        if workflow:
-            ctx.profiler.record_event(
-                EventType.JIT_FUSION_START,
-                details={"workflow": workflow.workflow_id, "hash": workflow.workflow_hash},
-            )
-
-            # Static tool and schema validation
-            all_tools_present = True
-            for node in workflow.nodes:
-                adapter = tools.get(node.tool_name)
-                if adapter is None:
-                    all_tools_present = False
-                    deopt_reason = f"Missing tool '{node.tool_name}' in registry"
-                    break
-                # Cross-check declared side-effects against actual ToolSpec
-                if adapter.spec.side_effects or not adapter.spec.is_read_only:
-                    node.is_side_effect = True
-                if adapter.spec.requires_approval:
-                    node.requires_approval = True
-
-            if not all_tools_present:
-                deopt_triggered = True
-            else:
-                # Execute declarative workflow steps sequentially
-                for node in workflow.nodes:
-                    resolved_args, err = self._resolve_template(node.args_template, ledger, ctx.task.context)
-                    if err:
-                        deopt_triggered = True
-                        deopt_reason = err
-                        break
-
-                    call = ToolCall(
-                        name=node.tool_name,
-                        tool_name=node.tool_name,
-                        arguments=resolved_args or {},
-                        requires_approval=node.requires_approval,
-                        is_approved=ctx.task.metadata.get("is_approved", False),
-                    )
-                    ctx.tool_calls.append(call)
-
-                    res = await ctx.executor.execute(call)
-                    ctx.record_tool_result(res)
-
-                    if not res.is_success:
-                        deopt_triggered = True
-                        deopt_reason = f"Step '{node.step_id}' failed: {res.error}"
-                        break
-
-                    if node.is_side_effect:
-                        completed_side_effects[call.key()] = res
-
-                    out = res.output if res.output is not None else res.result
-                    ledger[node.output_key] = out
-
-                    # Check invariants after each step
-                    for inv in workflow.invariants:
-                        if not inv.evaluate(ledger, ctx.task.context):
-                            deopt_triggered = True
-                            deopt_reason = f"Invariant violated: {inv.description}"
-                            break
-
-                    if deopt_triggered:
-                        break
-
-                if not deopt_triggered:
-                    final_out = self._construct_output(workflow.output_mapping, ledger, ctx.task.context) if workflow.output_mapping else ledger
-
-                    temp_trace = ctx.profiler.events
-                    if ctx.task.validate(final_out):
-                        ctx.profiler.record_event(
-                            EventType.JIT_FUSION_SUCCESS,
-                            details={"workflow": workflow.workflow_id},
-                        )
-                        return final_out
-                    else:
-                        deopt_triggered = True
-                        deopt_reason = "Compiled output failed task validation"
-
-            if deopt_triggered:
+        if workflow is not None:
+            is_valid, err_msg = self._validate_workflow_static(workflow, tools)
+            if not is_valid:
+                ctx.guardrails.record_deoptimization(
+                    workflow_id=workflow.workflow_id,
+                    reason=f"Static validation failed: {err_msg}",
+                    step_index=0,
+                )
                 ctx.profiler.record_event(
                     EventType.JIT_FUSION_DEOPT,
-                    details={"workflow": workflow.workflow_id, "reason": deopt_reason},
+                    details={"reason": f"Static validation failed: {err_msg}"},
                 )
-                ctx.guardrails.record_deopt()
+                workflow = None
 
-        # Fallback / Deoptimized path: Model reasoning starting from accumulated ledger state
+        if workflow is not None:
+            ctx.profiler.record_event(
+                EventType.JIT_FUSION_START,
+                details={
+                    "workflow_id": workflow.workflow_id,
+                    "version": workflow.version,
+                    "nodes_count": len(workflow.nodes),
+                },
+            )
+
+            ledger: dict[str, Any] = {}
+            fused_success = True
+            deopt_reason = ""
+
+            for node in workflow.nodes:
+                # 1. Resolve arguments from template
+                resolved_args, err = self._resolve_template(node.args_template, ledger, ctx.task.context)
+                if err or resolved_args is None:
+                    fused_success = False
+                    deopt_reason = f"Template resolution failure on step '{node.step_id}': {err}"
+                    break
+
+                # 2. Construct tool call
+                call = ToolCall(
+                    tool_name=node.tool_name,
+                    name=node.tool_name,
+                    arguments=resolved_args,
+                    requires_approval=node.requires_approval,
+                )
+                ctx.tool_calls.append(call)
+
+                # 3. Execute via ToolExecutor
+                res: ToolResult = await ctx.executor.execute(call)
+                ctx.record_tool_result(res)
+
+                if res.is_error:
+                    fused_success = False
+                    deopt_reason = f"Execution error in step '{node.step_id}': {res.error}"
+                    break
+
+                node_out = res.output if res.output is not None else res.result
+                ledger[node.output_key] = node_out
+
+                # 4. Evaluate invariants
+                for inv in workflow.invariants:
+                    if not inv.evaluate(ledger, ctx.task.context):
+                        fused_success = False
+                        deopt_reason = f"Invariant violation '{inv.description or inv.field_path}'"
+                        break
+
+                if not fused_success:
+                    break
+
+            if fused_success:
+                final_out = self._construct_output(workflow.output_mapping, ledger, ctx.task.context) if workflow.output_mapping else ledger
+                if not ctx.task.validate(final_out):
+                    fused_success = False
+                    deopt_reason = "Fused kernel output failed task validation contract"
+                else:
+                    ctx.profiler.record_event(
+                        EventType.JIT_FUSION_SUCCESS,
+                        details={
+                            "workflow_id": workflow.workflow_id,
+                            "steps": len(workflow.nodes),
+                        },
+                    )
+                    return final_out
+
+            if not fused_success:
+                # Ledger-based deoptimization: Record deopt and hand off remaining reasoning to model
+                ctx.guardrails.record_deoptimization(
+                    workflow_id=workflow.workflow_id,
+                    reason=deopt_reason,
+                    step_index=len(ctx.tool_results),
+                )
+                ctx.profiler.record_event(
+                    EventType.JIT_FUSION_DEOPT,
+                    details={
+                        "workflow_id": workflow.workflow_id,
+                        "reason": deopt_reason,
+                        "completed_steps": list(ledger.keys()),
+                    },
+                )
+
+        # Fallback to model-driven turn execution (handles deoptimized state transparently)
         for turn in range(ctx.config.max_turns):
             ctx.step_count = turn + 1
-
             ctx.profiler.start_span(f"model_turn_{turn}")
             decision = await model.decide(
                 ctx.task,
@@ -380,15 +430,7 @@ class JITFusionScheduler(BaseScheduler):
 
             for call in decision.tool_calls:
                 ctx.tool_calls.append(call)
-                call_key = call.key()
-
-                # Intercept already completed non-repeatable side effects from the ledger
-                if call_key in completed_side_effects:
-                    cached_res = completed_side_effects[call_key]
-                    cached_res.call_id = call.call_id
-                    ctx.record_tool_result(cached_res)
-                else:
-                    res = await ctx.executor.execute(call)
-                    ctx.record_tool_result(res)
+                res = await ctx.executor.execute(call)
+                ctx.record_tool_result(res)
 
         return "Max turns reached without final answer."

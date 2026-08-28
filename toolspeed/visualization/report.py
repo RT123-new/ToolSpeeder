@@ -2,25 +2,30 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import json
 import time
-from typing import Any, Dict, List, Optional, Union
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from toolspeed.core.types import EvidenceLevel, strict_json_dumps
+from toolspeed.core.types import EvidenceLevel, compute_file_sha256, strict_json_dumps
 from toolspeed.experiments.full_suite import SuiteResult
-from toolspeed.experiments.runner import ExperimentResult
 from toolspeed.visualization.charts import (
-    generate_cdf_chart,
     generate_speedup_line_chart,
     generate_workload_bar_chart,
 )
 
+if TYPE_CHECKING:
+    from toolspeed.benchmarks.harness import BenchmarkRunResult
+
 
 def generate_markdown_evidence_log(suite_result: SuiteResult) -> str:
     """Generate comprehensive Markdown Evidence Log matching research plan template."""
-    ev_level = suite_result.evidence_level.value if isinstance(suite_result.evidence_level, EvidenceLevel) else str(suite_result.evidence_level)
-    lines: List[str] = [
+    ev_level = (
+        suite_result.evidence_level.value
+        if isinstance(suite_result.evidence_level, EvidenceLevel)
+        else str(suite_result.evidence_level)
+    )
+    lines: list[str] = [
         "# ToolSpeed — Evidence Log & Experiment Report",
         "",
         f"**Generated:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  ",
@@ -32,28 +37,32 @@ def generate_markdown_evidence_log(suite_result: SuiteResult) -> str:
 
     if suite_result.manifest:
         m = suite_result.manifest
-        lines.extend([
-            f"**Git Commit:** `{m.commit_sha}` ({'dirty' if m.dirty else 'clean'})  ",
-            f"**Hardware / OS:** `{m.os_platform}` | Python `{m.python_version}`  ",
-        ])
+        lines.extend(
+            [
+                f"**Git Commit:** `{m.commit_sha}` ({'dirty' if m.dirty else 'clean'})  ",
+                f"**Hardware / OS:** `{m.os_platform}` | Python `{m.python_version}`  ",
+            ]
+        )
 
-    lines.extend([
-        "",
-        "## Executive Summary",
-        "",
-        f"- **Central Falsification Hypothesis:** {'**CONFIRMED / PASSED (Under Declared Evidence Level)**' if suite_result.central_hypothesis_passed else '**FALSIFIED**'}",
-        f"- **Evidence Level:** `{ev_level}`",
-        f"- **Tested Mechanisms:** DAG Parallelism (E1), JIT Fusion (E2), Speculative Reads (E3), Commit Horizon (E4), Action Bytecode (E5).",
-        "- **Primary Metric:** Correct Completion Latency (CCL) at P50, P90, P95, and P99.",
-        "",
-        "> [!NOTE]",
-        f"> Evidence level `{ev_level}` results represent rigorous validation within this test environment. Synthetic simulations must not be conflated with empirical live network validation.",
-        "",
-        "## Canonical Evidence Log",
-        "",
-        "| Experiment | Tested | Succeeded | Failed | Still unproven | Next action |",
-        "|---|---|---|---|---|---|",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Executive Summary",
+            "",
+            f"- **Central Falsification Hypothesis:** {'**CONFIRMED / PASSED (Under Declared Evidence Level)**' if suite_result.central_hypothesis_passed else '**FALSIFIED**'}",
+            f"- **Evidence Level:** `{ev_level}`",
+            "- **Tested Mechanisms:** DAG Parallelism (E1), JIT Fusion (E2), Speculative Reads (E3), Commit Horizon (E4), Action Bytecode (E5).",
+            "- **Primary Metric:** Correct Completion Latency (CCL) at P50, P90, P95, and P99.",
+            "",
+            "> [!NOTE]",
+            f"> Evidence level `{ev_level}` results represent rigorous validation within this test environment. Synthetic simulations must not be conflated with empirical live network validation.",
+            "",
+            "## Canonical Evidence Log",
+            "",
+            "| Experiment | Tested | Succeeded | Failed | Still unproven | Next action |",
+            "|---|---|---|---|---|---|",
+        ]
+    )
 
     for row in suite_result.evidence_log:
         exp = row.get("experiment", "")
@@ -64,50 +73,58 @@ def generate_markdown_evidence_log(suite_result: SuiteResult) -> str:
         action = row.get("next_action", "")
         lines.append(f"| {exp} | {tested} | {succ} | {fail} | {unproven} | {action} |")
 
-    lines.extend([
-        "",
-        "## Workload Performance Matrix (W1 – W7)",
-        "",
-        "| Workload | Name | Baseline P95 | Candidate P95 | P95 Speedup | CCL Reduction | Status | Level |",
-        "|---|---|---|---|---|---|---|---|",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Workload Performance Matrix (W1 – W7)",
+            "",
+            "| Workload | Name | Baseline P95 | Candidate P95 | P95 Speedup | CCL Reduction | Status | Level |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+    )
 
-    for w_id, w in suite_result.workloads.items():
+    for w in suite_result.workloads.values():
         status_badge = "✅ PASS" if w.central_hypothesis_passed else "❌ FAIL"
         w_level = w.evidence_level.value if isinstance(w.evidence_level, EvidenceLevel) else str(w.evidence_level)
         lines.append(
             f"| {w.workload_id} | {w.name} | {w.baseline_p95_ms:.1f}ms | {w.candidate_p95_ms:.1f}ms | {w.p95_speedup:.2f}x | {w.p95_reduction_pct:.1f}% | {status_badge} | `{w_level}` |"
         )
 
-    lines.extend([
-        "",
-        "## Detailed Experiment Results & Hypothesis Checks",
-        "",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Detailed Experiment Results & Hypothesis Checks",
+            "",
+        ]
+    )
 
-    for exp_id, exp_res in suite_result.experiments.items():
+    for exp_res in suite_result.experiments.values():
         verdict_badge = "PASSED" if exp_res.verdict.passed else "FALSIFIED"
-        lines.extend([
-            f"### {exp_res.title} [{verdict_badge}]",
-            "",
-            f"**Hypothesis:** {exp_res.verdict.hypothesis}  ",
-            f"**Summary:** {exp_res.verdict.summary}  ",
-            "",
-            "#### Hypothesis Evaluation Checks:",
-            "",
-            "| Check Name | Target | Measured | Status | Detail |",
-            "|---|---|---|---|---|",
-        ])
+        lines.extend(
+            [
+                f"### {exp_res.title} [{verdict_badge}]",
+                "",
+                f"**Hypothesis:** {exp_res.verdict.hypothesis}  ",
+                f"**Summary:** {exp_res.verdict.summary}  ",
+                "",
+                "#### Hypothesis Evaluation Checks:",
+                "",
+                "| Check Name | Target | Measured | Status | Detail |",
+                "|---|---|---|---|---|",
+            ]
+        )
 
         for c in exp_res.verdict.checks:
             c_badge = "✅ PASS" if c.passed else "❌ FAIL"
             lines.append(f"| `{c.name}` | {c.target} | {c.measured} | {c_badge} | {c.detail} |")
 
-        lines.extend([
-            "",
-            "#### Parameter Sweep Summary:",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "#### Parameter Sweep Summary:",
+                "",
+            ]
+        )
 
         if exp_res.rows:
             sample_keys = [
@@ -147,7 +164,11 @@ def generate_markdown_evidence_log(suite_result: SuiteResult) -> str:
 
 def generate_html_dashboard(suite_result: SuiteResult) -> str:
     """Generate standalone interactive HTML dashboard with embedded SVGs, styling, and provenance."""
-    ev_level = suite_result.evidence_level.value if isinstance(suite_result.evidence_level, EvidenceLevel) else str(suite_result.evidence_level)
+    ev_level = (
+        suite_result.evidence_level.value
+        if isinstance(suite_result.evidence_level, EvidenceLevel)
+        else str(suite_result.evidence_level)
+    )
 
     workload_items = [w.to_dict() for w in suite_result.workloads.values()]
     workload_svg = generate_workload_bar_chart(workload_items, width=800, height=360)
@@ -155,8 +176,16 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
     e1 = suite_result.experiments.get("E1")
     if e1 and e1.rows:
         e1_series = {
-            "P50 Speedup": [(r["independent_calls"], r["p50_speedup"]) for r in e1.rows if isinstance(r["independent_calls"], (int, float))],
-            "P95 Speedup": [(r["independent_calls"], r["p95_speedup"]) for r in e1.rows if isinstance(r["independent_calls"], (int, float))],
+            "P50 Speedup": [
+                (r["independent_calls"], r["p50_speedup"])
+                for r in e1.rows
+                if isinstance(r["independent_calls"], (int, float))
+            ],
+            "P95 Speedup": [
+                (r["independent_calls"], r["p95_speedup"])
+                for r in e1.rows
+                if isinstance(r["independent_calls"], (int, float))
+            ],
         }
         e1_svg = generate_speedup_line_chart(
             "E1: DAG Parallel Fan-out Speedup vs Call Count",
@@ -172,8 +201,16 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
     e2 = suite_result.experiments.get("E2")
     if e2 and e2.rows:
         e2_series = {
-            "P50 Speedup": [(r["dependent_steps"], r["p50_speedup"]) for r in e2.rows if isinstance(r["dependent_steps"], (int, float))],
-            "P95 Speedup": [(r["dependent_steps"], r["p95_speedup"]) for r in e2.rows if isinstance(r["dependent_steps"], (int, float))],
+            "P50 Speedup": [
+                (r["dependent_steps"], r["p50_speedup"])
+                for r in e2.rows
+                if isinstance(r["dependent_steps"], (int, float))
+            ],
+            "P95 Speedup": [
+                (r["dependent_steps"], r["p95_speedup"])
+                for r in e2.rows
+                if isinstance(r["dependent_steps"], (int, float))
+            ],
         }
         e2_svg = generate_speedup_line_chart(
             "E2: Workflow Fusion Speedup vs Dependent Steps",
@@ -354,8 +391,8 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
         </p>
       </div>
       <div>
-        <span class="badge {'badge-success' if suite_result.central_hypothesis_passed else 'badge-danger'}">
-          {'CENTRAL HYPOTHESIS: PASS' if suite_result.central_hypothesis_passed else 'CENTRAL HYPOTHESIS: FALSIFIED'}
+        <span class="badge {"badge-success" if suite_result.central_hypothesis_passed else "badge-danger"}">
+          {"CENTRAL HYPOTHESIS: PASS" if suite_result.central_hypothesis_passed else "CENTRAL HYPOTHESIS: FALSIFIED"}
         </span>
       </div>
     </header>
@@ -400,7 +437,9 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
           </tr>
         </thead>
         <tbody>
-          {"".join(f'''
+          {
+        "".join(
+            f'''
           <tr>
             <td><strong>{w.workload_id}</strong></td>
             <td>{w.name}</td>
@@ -411,7 +450,10 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
             <td style="color: var(--success);">{w.p95_reduction_pct:.1f}%</td>
             <td><span class="badge {'badge-success' if w.central_hypothesis_passed else 'badge-danger'}">{'PASS' if w.central_hypothesis_passed else 'FAIL'}</span></td>
           </tr>
-          ''' for w in suite_result.workloads.values())}
+          '''
+            for w in suite_result.workloads.values()
+        )
+    }
         </tbody>
       </table>
     </div>
@@ -449,7 +491,9 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
           </tr>
         </thead>
         <tbody>
-          {"".join(f'''
+          {
+        "".join(
+            f'''
           <tr>
             <td><strong>{r.get("experiment", "")}</strong></td>
             <td><span class="badge badge-primary">{r.get("tested", "Yes")}</span></td>
@@ -458,13 +502,17 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
             <td style="color: var(--text-muted);">{r.get("still_unproven", "")}</td>
             <td>{r.get("next_action", "")}</td>
           </tr>
-          ''' for r in suite_result.evidence_log)}
+          '''
+            for r in suite_result.evidence_log
+        )
+    }
         </tbody>
       </table>
     </div>
 
     <footer>
-      <p>ToolSpeed — Benchmark & Optimization Framework | Evidence Level: {ev_level} | Runtime: {suite_result.total_runtime_sec:.2f}s</p>
+      <p>ToolSpeed — Benchmark & Optimization Framework | Evidence Level: {ev_level} | Runtime: {
+        suite_result.total_runtime_sec:.2f}s</p>
     </footer>
   </div>
 </body>
@@ -473,12 +521,12 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
     return html
 
 
-def generate_json_summary(suite_result: SuiteResult) -> Dict[str, Any]:
+def generate_json_summary(suite_result: SuiteResult) -> dict[str, Any]:
     """Generate structured JSON representation of suite results."""
     return suite_result.to_dict()
 
 
-def generate_benchmark_markdown_report(result: Union[Dict[str, Any], Any]) -> str:
+def generate_benchmark_markdown_report(result: dict[str, Any] | Any) -> str:
     """Generate Markdown report for paired benchmark run results."""
     data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
     title = data.get("title", "ToolSpeed Paired Benchmark Suite")
@@ -497,18 +545,22 @@ def generate_benchmark_markdown_report(result: Union[Dict[str, Any], Any]) -> st
     ]
 
     if manifest:
-        lines.extend([
-            f"**Git Commit:** `{manifest.get('git_sha', 'unknown')}` ({'dirty' if manifest.get('git_dirty') else 'clean'})  ",
-            f"**Platform:** `{manifest.get('os_platform', '')}` | Python `{manifest.get('python_version', '')}`  ",
-        ])
+        lines.extend(
+            [
+                f"**Git Commit:** `{manifest.get('git_sha', 'unknown')}` ({'dirty' if manifest.get('git_dirty') else 'clean'})  ",
+                f"**Platform:** `{manifest.get('os_platform', '')}` | Python `{manifest.get('python_version', '')}`  ",
+            ]
+        )
 
-    lines.extend([
-        "",
-        "## Paired Workload Evaluations (W1 – W7, E5a)",
-        "",
-        "| Workload | Comparison | Baseline P95 | Candidate P95 | P95 Speedup | Candidate Success | Status | 95% Bootstrap CI |",
-        "|---|---|---|---|---|---|---|---|",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Paired Workload Evaluations (W1 – W7, E5a)",
+            "",
+            "| Workload | Comparison | Baseline P95 | Candidate P95 | P95 Speedup | Candidate Success | Status | 95% Bootstrap CI |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+    )
 
     for e in data.get("evaluations", []):
         wl = e.get("workload_id", "")
@@ -516,23 +568,29 @@ def generate_benchmark_markdown_report(result: Union[Dict[str, Any], Any]) -> st
         summ = e.get("summary", {})
         verd = e.get("verdict", {})
         status = "✅ PASS" if verd.get("passed") else "❌ FAIL"
-        b95 = f"{summ.get('baseline_p95_ms', 0.0):.1f}ms" if summ.get('baseline_p95_ms') is not None else "null"
-        c95 = f"{summ.get('candidate_p95_ms', 0.0):.1f}ms" if summ.get('candidate_p95_ms') is not None else "null"
-        speedup = f"{summ.get('p95_speedup', 1.0):.2f}x" if summ.get('p95_speedup') is not None else "null"
-        succ = f"{summ.get('candidate_success_rate', 1.0):.1%}" if summ.get('candidate_success_rate') is not None else "null"
+        b95 = f"{summ.get('baseline_p95_ms', 0.0):.1f}ms" if summ.get("baseline_p95_ms") is not None else "null"
+        c95 = f"{summ.get('candidate_p95_ms', 0.0):.1f}ms" if summ.get("candidate_p95_ms") is not None else "null"
+        speedup = f"{summ.get('p95_speedup', 1.0):.2f}x" if summ.get("p95_speedup") is not None else "null"
+        succ = (
+            f"{summ.get('candidate_success_rate', 1.0):.1%}"
+            if summ.get("candidate_success_rate") is not None
+            else "null"
+        )
         ci = summ.get("p95_reduction_ci")
         ci_str = f"[{ci[0]:.1f}%, {ci[1]:.1f}%]" if ci and ci[0] is not None else "null"
         lines.append(f"| {wl} | {comp} | {b95} | {c95} | {speedup} | {succ} | {status} | {ci_str} |")
 
     neg = data.get("negative_controls", [])
     if neg:
-        lines.extend([
-            "",
-            "## Negative Control Verification",
-            "",
-            "| Control | Measured Speedup | Null Check (~1.0x) | Detail |",
-            "|---|---|---|---|",
-        ])
+        lines.extend(
+            [
+                "",
+                "## Negative Control Verification",
+                "",
+                "| Control | Measured Speedup | Null Check (~1.0x) | Detail |",
+                "|---|---|---|---|",
+            ]
+        )
         for nc in neg:
             c_name = nc.get("control", "")
             sp = f"{nc.get('p95_speedup', 1.0):.2f}x"
@@ -543,7 +601,7 @@ def generate_benchmark_markdown_report(result: Union[Dict[str, Any], Any]) -> st
     return "\n".join(lines)
 
 
-def generate_benchmark_html_dashboard(result: Union[Dict[str, Any], Any]) -> str:
+def generate_benchmark_html_dashboard(result: dict[str, Any] | Any) -> str:
     """Generate HTML dashboard for paired benchmark run results."""
     data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
     title = data.get("title", "ToolSpeed Paired Benchmark Suite")
@@ -557,19 +615,23 @@ def generate_benchmark_html_dashboard(result: Union[Dict[str, Any], Any]) -> str
         summ = e.get("summary", {})
         verd = e.get("verdict", {})
         is_pass = verd.get("passed", False)
-        b95 = f"{summ.get('baseline_p95_ms', 0.0):.1f} ms" if summ.get('baseline_p95_ms') is not None else "null"
-        c95 = f"{summ.get('candidate_p95_ms', 0.0):.1f} ms" if summ.get('candidate_p95_ms') is not None else "null"
-        sp = f"{summ.get('p95_speedup', 1.0):.2f}x" if summ.get('p95_speedup') is not None else "null"
-        succ = f"{summ.get('candidate_success_rate', 1.0):.1%}" if summ.get('candidate_success_rate') is not None else "null"
+        b95 = f"{summ.get('baseline_p95_ms', 0.0):.1f} ms" if summ.get("baseline_p95_ms") is not None else "null"
+        c95 = f"{summ.get('candidate_p95_ms', 0.0):.1f} ms" if summ.get("candidate_p95_ms") is not None else "null"
+        sp = f"{summ.get('p95_speedup', 1.0):.2f}x" if summ.get("p95_speedup") is not None else "null"
+        succ = (
+            f"{summ.get('candidate_success_rate', 1.0):.1%}"
+            if summ.get("candidate_success_rate") is not None
+            else "null"
+        )
         rows_html += f"""
         <tr>
-          <td><strong>{e.get('workload_id', '')}</strong></td>
-          <td>{e.get('candidate_name', '')} vs {e.get('baseline_name', '')}</td>
+          <td><strong>{e.get("workload_id", "")}</strong></td>
+          <td>{e.get("candidate_name", "")} vs {e.get("baseline_name", "")}</td>
           <td>{b95}</td>
           <td>{c95}</td>
           <td><strong>{sp}</strong></td>
           <td>{succ}</td>
-          <td><span class="badge {'badge-success' if is_pass else 'badge-danger'}">{'PASS' if is_pass else 'FAIL'}</span></td>
+          <td><span class="badge {"badge-success" if is_pass else "badge-danger"}">{"PASS" if is_pass else "FAIL"}</span></td>
         </tr>
         """
 
@@ -618,14 +680,15 @@ def generate_benchmark_html_dashboard(result: Union[Dict[str, Any], Any]) -> str
     return html
 
 
-def save_benchmark_reports(result: Any, out_dir: Union[str, Path]) -> Dict[str, Path]:
-    """Save benchmark result bundle reports without calling SuiteRunner."""
+def save_benchmark_reports(
+    result: BenchmarkRunResult | dict[str, Any] | Any,
+    out_dir: str | Path,
+) -> dict[str, Path]:
+    """Save benchmark result bundle reports, compute file byte SHA-256 hashes, and write manifest."""
     p_out = Path(out_dir)
     p_out.mkdir(parents=True, exist_ok=True)
 
-    json_path = p_out / "benchmark_result.json"
     data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
-    json_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
 
     md_path = p_out / "report.md"
     md_content = generate_benchmark_markdown_report(result)
@@ -635,17 +698,72 @@ def save_benchmark_reports(result: Any, out_dir: Union[str, Path]) -> Dict[str, 
     html_content = generate_benchmark_html_dashboard(result)
     html_path.write_text(html_content, encoding="utf-8")
 
+    # Compute raw traces JSONL
+    traces_path = p_out / "raw-traces.jsonl"
+    with open(traces_path, "w", encoding="utf-8") as f:
+        if hasattr(result, "evaluations"):
+            for ev in result.evaluations:
+                for r in ev.candidate_results:
+                    f.write(json.dumps(r.to_dict()) + "\n")
+        else:
+            f.write(json.dumps({"info": "traces"}) + "\n")
+
+    # Summary JSON
+    summary_path = p_out / "summary.json"
+    summary_data = {
+        "title": data.get("title"),
+        "evidence_level": data.get("evidence_level"),
+        "overall_verdict": data.get("overall_verdict"),
+        "total_runtime_s": data.get("total_runtime_s"),
+        "evaluations": [
+            {
+                "workload_id": e.get("workload_id"),
+                "comparison": f"{e.get('candidate_name')} vs {e.get('baseline_name')}",
+                "summary": e.get("summary"),
+                "verdict": e.get("verdict"),
+            }
+            for e in data.get("evaluations", [])
+        ],
+    }
+    summary_path.write_text(strict_json_dumps(summary_data, indent=2), encoding="utf-8")
+
+    # Compute SHA-256 over exact file bytes
+    file_hashes: dict[str, str] = {
+        "report.md": compute_file_sha256(md_path),
+        "report.html": compute_file_sha256(html_path),
+        "raw-traces.jsonl": compute_file_sha256(traces_path),
+        "summary.json": compute_file_sha256(summary_path),
+    }
+
+    # Update manifest with exact file hashes
+    manifest = data.get("manifest") or {}
+    manifest["file_hashes"] = file_hashes
+    data["manifest"] = manifest
+
+    json_path = p_out / "benchmark_result.json"
+    json_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
+
+    file_hashes["benchmark_result.json"] = compute_file_sha256(json_path)
+    manifest["file_hashes"] = file_hashes
+
+    # Write standalone manifest.json
+    manifest_path = p_out / "manifest.json"
+    manifest_path.write_text(strict_json_dumps(manifest, indent=2), encoding="utf-8")
+
     return {
         "json": json_path,
         "markdown": md_path,
         "html": html_path,
+        "traces": traces_path,
+        "summary": summary_path,
+        "manifest": manifest_path,
     }
 
 
 def save_all_reports(
     suite_result: SuiteResult,
-    out_dir: Union[str, Path],
-) -> Dict[str, Path]:
+    out_dir: str | Path,
+) -> dict[str, Path]:
     """Generate and save all simulation report artifacts (MD, HTML, JSON, CSVs, SVGs)."""
     p_out = Path(out_dir)
     p_out.mkdir(parents=True, exist_ok=True)

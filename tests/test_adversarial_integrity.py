@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from pathlib import Path
 import tempfile
 import time
-from typing import Any
 import unittest
-import numpy as np
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
 
+from toolspeed import cli
 from toolspeed.adapters.base import (
     BaseLLMAdapter,
     BaseToolAdapter,
@@ -20,44 +20,33 @@ from toolspeed.adapters.base import (
     ToolSchema,
 )
 from toolspeed.adapters.live_tools import (
-    AsyncLocalFileIOTool,
     AsyncSQLiteTool,
-    MockHTTPServer,
     SafeSubprocessSandbox,
 )
 from toolspeed.benchmarks.harness import (
     BenchmarkConfig,
     BenchmarkHarness,
 )
-import toolspeed.cli as cli
 from toolspeed.core.guardrails import GuardrailTracker
-from toolspeed.core.rate_limiter import AsyncConcurrencyLimiter, AsyncTokenBucket, RateLimiter
+from toolspeed.core.rate_limiter import AsyncConcurrencyLimiter, RateLimiter
 from toolspeed.core.types import (
     ApprovalGrant,
-    ArtifactManifest,
     EventType,
-    EvidenceLevel,
     ExecutionTrace,
     Task,
     TaskInstance,
     ToolCall,
     ToolResult,
     ToolSpec,
-    VerdictState,
     strict_json_dumps,
-)
-from toolspeed.experiments.runner import (
-    compute_summary,
-    paired_bootstrap_p95_ci,
 )
 from toolspeed.schedulers.b1_sync_react import SyncReActScheduler
 from toolspeed.schedulers.b2_native_parallel import NativeParallelScheduler
-from toolspeed.schedulers.base import ExecutionContext, SchedulerConfig
+from toolspeed.schedulers.base import SchedulerConfig
 from toolspeed.schedulers.composite import CompositeScheduler
 from toolspeed.schedulers.e1_dag_scheduler import DAGScheduler, ToolDAG
 from toolspeed.schedulers.e2_jit_fusion import (
     DeclarativeWorkflow,
-    FusedKernel,
     JITFusionScheduler,
     WorkflowNode,
 )
@@ -65,7 +54,7 @@ from toolspeed.schedulers.e3_speculation import SpeculativeReadScheduler
 from toolspeed.schedulers.e4_commit_horizon import CommitHorizonScheduler, IncrementalCommitParser
 from toolspeed.schedulers.e5_action_bytecode import ActionBytecodeCodec, ActionBytecodeScheduler
 from toolspeed.schedulers.executor import SharedIdempotencyStore, ToolExecutor
-from toolspeed.schedulers.phase2_cache import CacheEntry, CacheScheduler, ToolResultCache
+from toolspeed.schedulers.phase2_cache import CacheEntry, ToolResultCache
 
 
 class SimpleMockTool(BaseToolAdapter):
@@ -92,7 +81,14 @@ class SimpleMockTool(BaseToolAdapter):
         return ToolSchema(
             name=self._name,
             description=f"Mock {self._name}",
-            parameters={"type": "object", "properties": {"query": {"type": "string"}, "amount": {"type": "number"}, "user_id": {"type": "string"}}},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "amount": {"type": "number"},
+                    "user_id": {"type": "string"},
+                },
+            },
             is_read_only=self._is_read_only,
             is_side_effect=self._side_effects,
             requires_approval=self._requires_approval,
@@ -104,8 +100,17 @@ class SimpleMockTool(BaseToolAdapter):
         if self.latency_s > 0:
             await asyncio.sleep(self.latency_s)
         if self.raise_error:
-            return ToolResult(call_id=call.call_id, name=self._name, tool_name=self._name, error=self.raise_error, is_error=True)
-        return ToolResult(call_id=call.call_id, name=self._name, tool_name=self._name, result=self.output, output=self.output, is_error=False)
+            return ToolResult(
+                call_id=call.call_id, name=self._name, tool_name=self._name, error=self.raise_error, is_error=True
+            )
+        return ToolResult(
+            call_id=call.call_id,
+            name=self._name,
+            tool_name=self._name,
+            result=self.output,
+            output=self.output,
+            is_error=False,
+        )
 
 
 class MockLLM(BaseLLMAdapter):
@@ -129,12 +134,16 @@ class MockLLM(BaseLLMAdapter):
             return d
         return LLMDecision(reasoning="Done", tool_calls=[], final_answer=task.expected_output or "done")
 
-    async def predict_draft(self, task: Task, history: list[dict[str, Any]], available_tools: list[ToolSpec]) -> ToolCall | None:
+    async def predict_draft(
+        self, task: Task, history: list[dict[str, Any]], available_tools: list[ToolSpec]
+    ) -> ToolCall | None:
         if self.predict_draft_raises:
             raise RuntimeError("Draft predictor failed")
         return self.draft_prediction
 
-    async def stream_decision(self, task: Task, history: list[dict[str, Any]], available_tools: list[ToolSpec]) -> AsyncIterator[StreamingChunk]:
+    async def stream_decision(
+        self, task: Task, history: list[dict[str, Any]], available_tools: list[ToolSpec]
+    ) -> AsyncIterator[StreamingChunk]:
         if self.chunks and self._turn == 0:
             self._turn += 1
             for c in self.chunks:
@@ -185,10 +194,14 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
     async def test_02_nested_reference_resolution(self) -> None:
         dag = ToolDAG()
         c1 = ToolCall(call_id="c1", name="parent_tool", arguments={})
-        c2 = ToolCall(call_id="c2", name="child_tool", arguments={"nested": {"items": ["$c1.user_id", {"key": "$c1.org"}]}})
+        c2 = ToolCall(
+            call_id="c2", name="child_tool", arguments={"nested": {"items": ["$c1.user_id", {"key": "$c1.org"}]}}
+        )
         dag.register_calls([c1, c2])
 
-        dag.nodes["c1"].result = ToolResult(call_id="c1", name="parent_tool", output={"user_id": "u123", "org": "corp_a"})
+        dag.nodes["c1"].result = ToolResult(
+            call_id="c1", name="parent_tool", output={"user_id": "u123", "org": "corp_a"}
+        )
         dag.nodes["c1"].status = "completed"
 
         resolved, err = dag.resolve_arguments(dag.nodes["c2"])
@@ -236,7 +249,7 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
         dag.nodes["c1"].result = ToolResult(call_id="c1", name="parent", output={"other_key": 42})
         dag.nodes["c1"].status = "completed"
 
-        resolved, err = dag.resolve_arguments(dag.nodes["c2"])
+        _resolved, err = dag.resolve_arguments(dag.nodes["c2"])
         self.assertIsNotNone(err)
         self.assertIn("Missing output field 'non_existent_key'", err or "")
 
@@ -277,8 +290,19 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
         wf = DeclarativeWorkflow(
             workflow_id="order_charge",
             nodes=[
-                WorkflowNode(step_id="s1", tool_name="charge_card", args_template={"amount": 100}, output_key="charge", is_side_effect=True),
-                WorkflowNode(step_id="s2", tool_name="send_receipt", args_template={"receipt": "$charge.charged"}, output_key="receipt"),
+                WorkflowNode(
+                    step_id="s1",
+                    tool_name="charge_card",
+                    args_template={"amount": 100},
+                    output_key="charge",
+                    is_side_effect=True,
+                ),
+                WorkflowNode(
+                    step_id="s2",
+                    tool_name="send_receipt",
+                    args_template={"receipt": "$charge.charged"},
+                    output_key="receipt",
+                ),
             ],
         )
         task = Task(
@@ -288,14 +312,20 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
             validator=lambda out, trace=None: out == {"status": "handled_in_fallback"},
             metadata={"declarative_workflow": wf},
         )
-        model = MockLLM(decisions=[LLMDecision(reasoning="Fallback handle", tool_calls=[], final_answer={"status": "handled_in_fallback"})])
+        model = MockLLM(
+            decisions=[
+                LLMDecision(reasoning="Fallback handle", tool_calls=[], final_answer={"status": "handled_in_fallback"})
+            ]
+        )
         res = await sched.execute(task, model, tools)
         self.assertTrue(res.success)
         self.assertEqual(len(t_write.executions), 1)
 
     # 10. Speculation: Concurrent draft prediction alongside model reasoning
     async def test_10_speculation_concurrent_model_reasoning(self) -> None:
-        sched = SpeculativeReadScheduler(SchedulerConfig(speculation_enabled=True, speculation_confidence_threshold=0.5))
+        sched = SpeculativeReadScheduler(
+            SchedulerConfig(speculation_enabled=True, speculation_confidence_threshold=0.5)
+        )
         tools = ToolRegistry()
         tools.register(SimpleMockTool("search", output={"val": 123}, latency_s=0.005))
 
@@ -310,12 +340,18 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
         task = Task(task_id="t_spec", prompt="Search", expected_output={"val": 123})
         res = await sched.execute(task, model, tools)
         self.assertTrue(res.success)
-        events = [e for e in res.events if e.event_type in (EventType.SPECULATION_HIT, "speculation_hit", EventType.SPECULATION_HIT.value)]
+        events = [
+            e
+            for e in res.events
+            if e.event_type in (EventType.SPECULATION_HIT, "speculation_hit", EventType.SPECULATION_HIT.value)
+        ]
         self.assertGreaterEqual(len(events), 1)
 
     # 11. Speculation: Multi-call decision matching
     async def test_11_speculation_multi_call_matching(self) -> None:
-        sched = SpeculativeReadScheduler(SchedulerConfig(speculation_enabled=True, speculation_confidence_threshold=0.5))
+        sched = SpeculativeReadScheduler(
+            SchedulerConfig(speculation_enabled=True, speculation_confidence_threshold=0.5)
+        )
         tools = ToolRegistry()
         tools.register(SimpleMockTool("read_a", output={"a": 1}))
         tools.register(SimpleMockTool("read_b", output={"b": 2}))
@@ -358,7 +394,9 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
 
     # 13. Speculation: Cancelled cleanup on miss
     async def test_13_speculation_cancelled_cleanup(self) -> None:
-        sched = SpeculativeReadScheduler(SchedulerConfig(speculation_enabled=True, speculation_contention_mode="shared_cancellable"))
+        sched = SpeculativeReadScheduler(
+            SchedulerConfig(speculation_enabled=True, speculation_contention_mode="shared_cancellable")
+        )
         tools = ToolRegistry()
         t_slow = SimpleMockTool("slow_read", latency_s=0.2)
         tools.register(t_slow)
@@ -375,7 +413,12 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
         task = Task(task_id="t_miss", prompt="Miss test", expected_output="good")
         res = await sched.execute(task, model, tools)
         self.assertTrue(res.success)
-        cancels = [e for e in res.events if e.event_type in (EventType.SPECULATION_CANCELLED, "speculative_cancel", EventType.SPECULATION_CANCELLED.value)]
+        cancels = [
+            e
+            for e in res.events
+            if e.event_type
+            in (EventType.SPECULATION_CANCELLED, "speculative_cancel", EventType.SPECULATION_CANCELLED.value)
+        ]
         self.assertGreaterEqual(len(cancels), 1)
 
     # 14. Speculation: Mutative tools strictly prohibited from speculation
@@ -412,7 +455,12 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
         final_call = ToolCall(call_id="c_early", name="search", arguments={"query": "authoritative_final"})
 
         chunks = [
-            StreamingChunk(token_index=0, delta_text="call search", commit_horizon_ready=[early_call], raw_json_fragment='{"query": "preliminary"}'),
+            StreamingChunk(
+                token_index=0,
+                delta_text="call search",
+                commit_horizon_ready=[early_call],
+                raw_json_fragment='{"query": "preliminary"}',
+            ),
             StreamingChunk(token_index=1, delta_text="finished", is_final=True, parsed_tool_calls=[final_call]),
         ]
         model = MockLLM(
@@ -433,12 +481,14 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
 
         call_pay = ToolCall(call_id="c_pay", name="pay", arguments={"amount": 100})
         chunks = [
-            StreamingChunk(token_index=0, delta_text="pay", commit_horizon_ready=[call_pay], raw_json_fragment='{"amount": 100}'),
+            StreamingChunk(
+                token_index=0, delta_text="pay", commit_horizon_ready=[call_pay], raw_json_fragment='{"amount": 100}'
+            ),
             StreamingChunk(token_index=1, delta_text="end", is_final=True, parsed_tool_calls=[]),
         ]
         model = MockLLM(chunks=chunks)
         task = Task(task_id="t_ch_side", prompt="Pay", expected_output="done")
-        res = await sched.execute(task, model, tools)
+        await sched.execute(task, model, tools)
         self.assertEqual(len(t_pay.executions), 0)
 
     # 18. Action Bytecode: 16-bit opcode with no collision at 256
@@ -530,7 +580,9 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
                 LLMDecision(reasoning="Done", tool_calls=[], final_answer="val"),
             ],
             draft_prediction=ToolCall(name="t_ok", arguments={}, speculation_confidence=0.9),
-            chunks=[StreamingChunk(token_index=0, is_final=True, parsed_tool_calls=[ToolCall(name="t_ok", arguments={})])],
+            chunks=[
+                StreamingChunk(token_index=0, is_final=True, parsed_tool_calls=[ToolCall(name="t_ok", arguments={})])
+            ],
         )
 
         for sched in schedulers:
@@ -620,11 +672,11 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
     async def test_30_cache_invalidation_on_mutation(self) -> None:
         cache = ToolResultCache()
         cache.put("get_user", {"user_id": "u1"}, {"name": "Alice"})
-        cached, hit, _ = cache.get("get_user", {"user_id": "u1"})
+        _cached, hit, _ = cache.get("get_user", {"user_id": "u1"})
         self.assertTrue(hit)
 
         cache.invalidate_on_mutation("update_user")
-        cached2, hit2, _ = cache.get("get_user", {"user_id": "u1"})
+        _cached2, hit2, _ = cache.get("get_user", {"user_id": "u1"})
         self.assertFalse(hit2)
 
     # 31. Cache: Strict freshness contract rejects expired TTL
@@ -709,7 +761,10 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
     def test_40_cli_falsify_exit_code_2_smoke_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             p = Path(tmpdir) / "benchmark_result.json"
-            p.write_text('{"evidence_level": "replay_integration", "manifest": {"is_verdict_eligible": false, "trial_count": 50}, "evaluations": [{"workload_id": "W1", "verdict": {"passed": true}}]}', encoding="utf-8")
+            p.write_text(
+                '{"evidence_level": "replay_integration", "manifest": {"is_verdict_eligible": false, "trial_count": 50}, "evaluations": [{"workload_id": "W1", "verdict": {"passed": true}}]}',
+                encoding="utf-8",
+            )
             code = cli.main(["falsify", "--input", str(p)])
             self.assertEqual(code, 2)
 
@@ -717,7 +772,9 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
     def test_41_cli_report_preserves_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             p = Path(tmpdir) / "benchmark_result.json"
-            p.write_text('{"evidence_level": "replay_integration", "title": "Test Bundle", "evaluations": []}', encoding="utf-8")
+            p.write_text(
+                '{"evidence_level": "replay_integration", "title": "Test Bundle", "evaluations": []}', encoding="utf-8"
+            )
             code = cli.main(["report", "--input", str(p), "--out", tmpdir])
             self.assertEqual(code, 0)
             md = (Path(tmpdir) / "report.md").read_text(encoding="utf-8")
@@ -763,7 +820,9 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
     async def test_43_local_sqlite_threadpool_execution(self) -> None:
         sqlite_tool = AsyncSQLiteTool(db_path=":memory:", name="sqlite_test")
         sqlite_tool._sync_execute("CREATE TABLE test_table (id INT, val TEXT)", [])
-        call = ToolCall(name="sqlite_test", arguments={"query": "INSERT INTO test_table VALUES (?, ?)", "params": [1, "alpha"]})
+        call = ToolCall(
+            name="sqlite_test", arguments={"query": "INSERT INTO test_table VALUES (?, ?)", "params": [1, "alpha"]}
+        )
         res = await sqlite_tool.execute(call)
         self.assertFalse(res.is_error)
         sqlite_tool.close()

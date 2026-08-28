@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
-from pathlib import Path
 import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
-from typing import Any
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any
 
 from toolspeed.adapters.base import BaseToolAdapter, ToolSchema
 from toolspeed.core.types import ToolCall, ToolResult
@@ -297,6 +297,7 @@ class AsyncLocalFileIOTool(BaseToolAdapter):
                     target.unlink()
                 elif target.is_dir():
                     import shutil
+
                     shutil.rmtree(target)
                 return {"status": "deleted"}
             return {"status": "not_found"}
@@ -393,7 +394,9 @@ class MockHTTPServer:
     def __init__(self, host: str = "127.0.0.1", port: int = 0):
         self.host = host
         self.port = port
-        self.routes: dict[tuple[str, str], tuple[int, Any, float]] = {}  # (method, path) -> (status, response_body, delay_s)
+        self.routes: dict[
+            tuple[str, str], tuple[int, Any, float]
+        ] = {}  # (method, path) -> (status, response_body, delay_s)
         self._server: HTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -447,7 +450,9 @@ class AsyncHTTPClientTool(BaseToolAdapter):
             cost_usd=0.0002,
         )
 
-    def _sync_request(self, url: str, method: str, body: dict[str, Any] | None, headers: dict[str, str]) -> dict[str, Any]:
+    def _sync_request(
+        self, url: str, method: str, body: dict[str, Any] | None, headers: dict[str, str]
+    ) -> dict[str, Any]:
         target_url = url if url.startswith("http") else f"{self._base_url}/{url.lstrip('/')}"
         data_bytes = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(target_url, data=data_bytes, method=method)

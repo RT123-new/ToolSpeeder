@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
 import json
 import struct
 import time
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any
+
 import numpy as np
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, StreamingChunk, ToolSchema
@@ -17,10 +18,11 @@ from toolspeed.core.types import LatencyProfile, Task, TokenUsage, ToolCall, Too
 
 class ActionBytecodeCodec:
     """Compact action bytecode encoder/decoder for tool calls (Experiment E5).
-    
+
     Replaces verbose JSON formatting with compact typed binary action tokens,
     accelerating tool-call decode bandwidth.
     """
+
     OP_TOOL_CALL = 0x01
     OP_FINAL_RETURN = 0x02
 
@@ -52,20 +54,22 @@ class ActionBytecodeCodec:
         try:
             tool_name = data[offset : offset + name_len].decode("utf-8")
         except UnicodeDecodeError as e:
-            raise ValueError(f"Malformed UTF-8 in tool name: {e}")
+            raise ValueError(f"Malformed UTF-8 in tool name: {e}") from e
         offset += name_len
 
         args_len = struct.unpack("!I", data[offset : offset + 4])[0]
         offset += 4
 
         if len(data) < offset + args_len:
-            raise ValueError(f"Bytecode packet truncated: expected {args_len} bytes for arguments, got {len(data) - offset}.")
+            raise ValueError(
+                f"Bytecode packet truncated: expected {args_len} bytes for arguments, got {len(data) - offset}."
+            )
 
         args_json_bytes = data[offset : offset + args_len]
         try:
             arguments = json.loads(args_json_bytes.decode("utf-8")) if args_json_bytes else {}
         except Exception as e:
-            raise ValueError(f"Malformed JSON argument payload in bytecode: {e}")
+            raise ValueError(f"Malformed JSON argument payload in bytecode: {e}") from e
 
         if not isinstance(arguments, dict):
             arguments = {"value": arguments}
@@ -87,13 +91,13 @@ class ActionBytecodeCodec:
 @dataclass
 class ModelCostConfig:
     """Pricing configuration for simulated token consumption ($ per 1,000,000 tokens)."""
+
     prompt_cost_per_million: float = 2.50
     completion_cost_per_million: float = 10.00
 
     def calculate_cost(self, prompt_tokens: int, completion_tokens: int) -> float:
-        return (
-            (prompt_tokens * self.prompt_cost_per_million / 1_000_000.0)
-            + (completion_tokens * self.completion_cost_per_million / 1_000_000.0)
+        return (prompt_tokens * self.prompt_cost_per_million / 1_000_000.0) + (
+            completion_tokens * self.completion_cost_per_million / 1_000_000.0
         )
 
 
@@ -132,7 +136,11 @@ class DraftPredictorModel:
             args = dict(ground_truth_args or {})
         else:
             other_tools = [t for t in candidate_tools if t != ground_truth_tool]
-            tool_name = self._rng.choice(other_tools) if other_tools else (candidate_tools[0] if candidate_tools else "default_tool")
+            tool_name = (
+                self._rng.choice(other_tools)
+                if other_tools
+                else (candidate_tools[0] if candidate_tools else "default_tool")
+            )
             args = {"predicted_arg": "fallback_speculation"}
 
         call = ToolCall(
@@ -199,10 +207,7 @@ class SimulatedLLM(BaseLLMAdapter):
             completion_tokens = max(5, len(final_answer.split()) * 2)
         else:
             calls_repr = json.dumps([c.to_dict() for c in calls])
-            if self.use_bytecode:
-                completion_tokens = max(5, len(calls) * 12)
-            else:
-                completion_tokens = max(10, len(calls_repr.split()) * 2)
+            completion_tokens = max(5, len(calls) * 12) if self.use_bytecode else max(10, len(calls_repr.split()) * 2)
 
         cost = self.cost_config.calculate_cost(prompt_tokens, completion_tokens)
         token_usage = TokenUsage(
@@ -213,6 +218,36 @@ class SimulatedLLM(BaseLLMAdapter):
         )
 
         return final_answer if is_final else "", calls, token_usage
+
+    async def decide(
+        self,
+        task: Task,
+        history: list[dict[str, Any]],
+        tools: list[ToolSpec],
+    ) -> LLMDecision:
+        is_final = len(history) >= 2 or not tools
+        reasoning_ms = self._sample_reasoning_ms(is_final=is_final)
+        await asyncio.sleep(max(0.0001, reasoning_ms / 1000.0))
+
+        if is_final:
+            return LLMDecision(
+                reasoning="Task completed.",
+                final_answer=task.expected_output or "Completed.",
+                duration_ms=reasoning_ms,
+                input_tokens=100,
+                output_tokens=20,
+            )
+        else:
+            tool_calls = []
+            if tools:
+                tool_calls.append(ToolCall(name=tools[0].name, arguments={}))
+            return LLMDecision(
+                reasoning="Executing tool.",
+                tool_calls=tool_calls,
+                duration_ms=reasoning_ms,
+                input_tokens=150,
+                output_tokens=30,
+            )
 
     async def stream_generate(
         self,
@@ -324,7 +359,7 @@ class MockScriptedLLM(BaseLLMAdapter):
         tools: list[ToolSpec],
     ) -> LLMDecision:
         start = time.perf_counter()
-        
+
         if self.simulated_decision_ms > 0:
             await asyncio.sleep(self.simulated_decision_ms / 1000.0)
 
@@ -379,13 +414,15 @@ class MockScriptedLLM(BaseLLMAdapter):
             )
 
         total_chunks = max(2, self.token_chunk_count)
-        per_chunk_sleep = (self.simulated_decision_ms / total_chunks) / 1000.0 if self.simulated_decision_ms > 0 else 0.0
+        per_chunk_sleep = (
+            (self.simulated_decision_ms / total_chunks) / 1000.0 if self.simulated_decision_ms > 0 else 0.0
+        )
         commit_chunk_index = int(total_chunks * self.commit_horizon_fraction)
 
         # Determine streaming text
         full_text = target.reasoning or (str(target.final_answer) if target.final_answer is not None else "")
         words = full_text.split() if full_text else [f"token_{i}" for i in range(total_chunks)]
-        
+
         commit_emitted = False
         for chunk_idx in range(total_chunks):
             if per_chunk_sleep > 0:

@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 from typing import Any
-import time
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
-from toolspeed.core.types import EventType, ToolResult
+from toolspeed.core.types import EventType
 from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
 
 
 class SyncReActScheduler(BaseScheduler):
     """Baseline 1: Standard synchronous serial ReAct loop.
-    
+
     Model decisions and tool calls are executed strictly sequentially on the critical path.
     """
 

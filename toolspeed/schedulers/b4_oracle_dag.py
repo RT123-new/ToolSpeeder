@@ -6,13 +6,13 @@ import asyncio
 from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
-from toolspeed.core.types import EventType, ToolCall, ToolResult
+from toolspeed.core.types import EventType, ToolCall
 from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
 
 
 class OracleDAGScheduler(BaseScheduler):
     """Baseline 4: Oracle DAG lower bound scheduler.
-    
+
     Computes theoretical maximum parallelism / minimal critical path by executing the optimal
     dependency DAG in concurrent topological waves with zero intermediate model reasoning.
     """
@@ -61,9 +61,7 @@ class OracleDAGScheduler(BaseScheduler):
                     resolved_calls.append(call)
                     ctx.tool_calls.append(call)
 
-                results = await asyncio.gather(
-                    *[ctx.executor.execute(call) for call in resolved_calls]
-                )
+                results = await asyncio.gather(*[ctx.executor.execute(call) for call in resolved_calls])
 
                 for res in results:
                     ctx.record_tool_result(res)
@@ -88,9 +86,7 @@ class OracleDAGScheduler(BaseScheduler):
         for call in decision.tool_calls:
             ctx.tool_calls.append(call)
 
-        results = await asyncio.gather(
-            *[ctx.executor.execute(call) for call in decision.tool_calls]
-        )
+        results = await asyncio.gather(*[ctx.executor.execute(call) for call in decision.tool_calls])
         for res in results:
             ctx.record_tool_result(res)
 

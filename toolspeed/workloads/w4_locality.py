@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 import numpy as np
 
 from toolspeed.adapters.base import BaseToolAdapter
@@ -19,7 +20,7 @@ from toolspeed.workloads.base import BaseWorkload
 
 class W4LocalityWorkload(BaseWorkload):
     """Workload Family 4: Repeated Workflows with High Plan Locality.
-    
+
     Evaluates speedups from exact/semantic tool result caching and plan template reuse
     across workloads with Zipfian/skewed key locality.
     """
@@ -92,7 +93,9 @@ class W4LocalityWorkload(BaseWorkload):
                 sigma=0.2,
                 cost_usd=0.0002,
                 handler=lambda args: {
-                    "final_price": round(args.get("base_amount", 100.0) * (1.0 - args.get("discount_pct", 0) / 100.0), 2),
+                    "final_price": round(
+                        args.get("base_amount", 100.0) * (1.0 - args.get("discount_pct", 0) / 100.0), 2
+                    ),
                     "currency": "USD",
                 },
             )
@@ -133,7 +136,9 @@ class W4LocalityWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: ExecutionTrace | None) -> tuple[bool, str, dict[str, Any]]:
+        def _validate(
+            task: TaskInstance, output: Any, trace: ExecutionTrace | None
+        ) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 

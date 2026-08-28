@@ -1,11 +1,11 @@
-"""Deterministic Virtual-Time Replay Backend for ToolSpeed Benchmarking."""
+"""Deterministic virtual-clock replay backend with immutable paired fixtures."""
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncIterator
+import copy
 import json
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 from toolspeed.adapters.base import (
@@ -16,6 +16,7 @@ from toolspeed.adapters.base import (
     ToolRegistry,
     ToolSchema,
 )
+from toolspeed.core.clock import Clock, VirtualClock
 from toolspeed.core.types import (
     ApprovalGrant,
     EvidenceLevel,
@@ -24,79 +25,69 @@ from toolspeed.core.types import (
     ToolResult,
     ToolSpec,
 )
+from toolspeed.workloads.w1_independent import W1IndependentWorkload
+from toolspeed.workloads.w2_chains import W2ChainsWorkload
+from toolspeed.workloads.w3_branching import W3BranchingWorkload
+from toolspeed.workloads.w4_locality import W4LocalityWorkload
+from toolspeed.workloads.w5_large_payloads import W5LargePayloadsWorkload
+from toolspeed.workloads.w6_cold_start import W6ColdStartWorkload
+from toolspeed.workloads.w7_side_effects import W7SideEffectsWorkload
 
 
 class ReplayToolAdapter(BaseToolAdapter):
-    """Deterministic virtual-time tool adapter executing pre-configured tool behaviors."""
+    """Deterministic virtual-time tool adapter replaying pre-recorded responses."""
 
     def __init__(
         self,
         name: str,
-        latency_ms: float = 30.0,
-        output: Any = None,
-        is_read_only: bool = True,
-        side_effects: bool = False,
-        requires_approval: bool = False,
-        is_idempotent: bool = True,
-        cold_start_ms: float = 0.0,
-        parameters: dict[str, Any] | None = None,
-        handler: Any = None,
+        spec: ToolSpec,
+        recorded_responses: list[dict[str, Any]] | None = None,
+        default_latency_ms: float = 20.0,
+        clock: Clock | None = None,
     ):
         self._name = name
-        self.latency_ms = latency_ms
-        self.cold_start_ms = cold_start_ms
-        self.fixed_output = output
-        self._is_read_only = is_read_only
-        self._side_effects = side_effects
-        self._requires_approval = requires_approval
-        self._is_idempotent = is_idempotent
-        self._parameters = parameters or {"type": "object", "properties": {"query": {"type": "string"}}}
-        self._handler = handler
-        self.call_count = 0
-        self.is_warmed = False
+        self._spec = spec
+        self._recorded_responses = list(recorded_responses or [])
+        self._default_latency_ms = default_latency_ms
+        self._call_index = 0
+        self.clock = clock or VirtualClock()
 
-    def prewarm(self) -> None:
-        self.is_warmed = True
+    @property
+    def name(self) -> str:
+        return self._name
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
             name=self._name,
-            description=f"Replay tool for {self._name}",
-            parameters=self._parameters,
-            is_read_only=self._is_read_only,
-            is_side_effect=self._side_effects,
-            requires_approval=self._requires_approval,
-            is_idempotent=self._is_idempotent,
+            description=self._spec.description,
+            parameters=self._spec.parameters,
+            is_side_effect=self._spec.side_effects,
             cost_usd=0.0001,
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # Yield to event loop to allow concurrency interleaving
-        await asyncio.sleep(0)
-
-        self.call_count += 1
-        delay_ms = self.latency_ms
-        if not self.is_warmed and self.cold_start_ms > 0:
-            delay_ms += self.cold_start_ms
-            self.is_warmed = True
+        resp_data: dict[str, Any] = {}
+        delay_ms = self._default_latency_ms
+        if self._call_index < len(self._recorded_responses):
+            recorded = self._recorded_responses[self._call_index]
+            self._call_index += 1
+            resp_data = recorded.get("output", {})
+            delay_ms = float(recorded.get("latency_ms", self._default_latency_ms))
+        else:
+            resp_data = {"status": "ok", "echo_args": call.arguments}
 
         start_wall = time.perf_counter()
         dur_ns = int(delay_ms * 1_000_000)
 
-        if self._handler is not None and callable(self._handler):
-            out = self._handler(call.arguments)
-        elif self.fixed_output is not None:
-            out = self.fixed_output
-        else:
-            out = {"status": "ok", "call": call.arguments}
+        # Advance virtual or wall time via Clock
+        await self.clock.sleep_ms(delay_ms)
 
         return ToolResult(
             call_id=call.call_id,
             name=self._name,
             tool_name=self._name,
-            result=out,
-            output=out,
-            error=None,
+            result=resp_data,
+            output=resp_data,
             is_error=False,
             execution_time_ns=dur_ns,
             execution_time_ms=delay_ms,
@@ -115,12 +106,14 @@ class ReplayLLMAdapter(BaseLLMAdapter):
         draft_prediction: ToolCall | None = None,
         decision_delay_ms: float = 30.0,
         stream_chunks_count: int = 4,
+        clock: Clock | None = None,
     ):
         self.decisions = list(decisions or [])
         self.draft_prediction = draft_prediction
         self.decision_delay_ms = decision_delay_ms
         self.stream_chunks_count = stream_chunks_count
         self._turn_index = 0
+        self.clock = clock or VirtualClock()
 
     def _get_decision_sync(self, task: Task) -> LLMDecision:
         if self._turn_index < len(self.decisions):
@@ -130,7 +123,7 @@ class ReplayLLMAdapter(BaseLLMAdapter):
         return LLMDecision(
             reasoning="Task complete.",
             tool_calls=[],
-            final_answer=task.expected_output or {"status": "done"},
+            final_answer=None,
             input_tokens=100,
             output_tokens=20,
         )
@@ -141,10 +134,8 @@ class ReplayLLMAdapter(BaseLLMAdapter):
         history: list[dict[str, Any]],
         available_tools: list[ToolSpec],
     ) -> LLMDecision:
-        await asyncio.sleep(0)
-        decision = self._get_decision_sync(task)
-        decision.duration_ms = self.decision_delay_ms
-        return decision
+        await self.clock.sleep_ms(self.decision_delay_ms)
+        return self._get_decision_sync(task)
 
     async def predict_draft(
         self,
@@ -152,7 +143,7 @@ class ReplayLLMAdapter(BaseLLMAdapter):
         history: list[dict[str, Any]],
         available_tools: list[ToolSpec],
     ) -> ToolCall | None:
-        await asyncio.sleep(0)
+        await self.clock.sleep_ms(self.decision_delay_ms * 0.2)
         return self.draft_prediction
 
     async def stream_decision(
@@ -162,17 +153,19 @@ class ReplayLLMAdapter(BaseLLMAdapter):
         available_tools: list[ToolSpec],
     ) -> AsyncIterator[StreamingChunk]:
         decision = self._get_decision_sync(task)
-        total_chunks = max(2, self.stream_chunks_count)
+        chunks = max(1, self.stream_chunks_count)
+        chunk_delay = self.decision_delay_ms / chunks if chunks > 0 else 0.0
 
-        for i in range(total_chunks):
-            await asyncio.sleep(0)
-            is_final = (i == total_chunks - 1)
+        for i in range(chunks):
+            if chunk_delay > 0:
+                await self.clock.sleep_ms(chunk_delay)
+            is_final = (i == chunks - 1)
             ready_calls = list(decision.tool_calls) if (i >= 1 and decision.tool_calls) else []
             fragment = json.dumps(ready_calls[0].arguments) if ready_calls else (json.dumps(decision.tool_calls[0].arguments) if (is_final and decision.tool_calls) else "")
 
             yield StreamingChunk(
                 token_index=i,
-                delta_text=f"token_{i} ",
+                delta_text=f"chunk_{i} ",
                 commit_horizon_ready=ready_calls,
                 raw_json_fragment=fragment,
                 is_final=is_final,
@@ -182,164 +175,194 @@ class ReplayLLMAdapter(BaseLLMAdapter):
 
 
 class ReplayBackend:
-    """Deterministic trace-replay virtual-time execution backend for benchmark evaluation."""
+    """Deterministic virtual-clock replay backend generating immutable paired workload fixtures."""
 
-    def __init__(self, evidence_level: EvidenceLevel = EvidenceLevel.REPLAY_INTEGRATION):
+    def __init__(
+        self,
+        evidence_level: EvidenceLevel = EvidenceLevel.REPLAY_INTEGRATION,
+        clock: Clock | None = None,
+    ):
         self.evidence_level = evidence_level
-        self._prepared = False
+        self.clock = clock or VirtualClock()
+        self._workloads: dict[str, Any] = {
+            "W1": W1IndependentWorkload(),
+            "W2": W2ChainsWorkload(),
+            "W3": W3BranchingWorkload(),
+            "W4": W4LocalityWorkload(),
+            "W5": W5LargePayloadsWorkload(),
+            "W6": W6ColdStartWorkload(),
+            "W7": W7SideEffectsWorkload(),
+        }
 
-    async def prepare_run(self, plan: Any) -> None:
-        self._prepared = True
-
-    async def finalize_run(self) -> dict[str, Any]:
-        return {"backend": "ReplayBackend", "evidence_level": self.evidence_level.value}
-
-    async def close(self) -> None:
-        pass
+    def generate_task(self, workload_id: str, trial_index: int = 0) -> Task:
+        """Constructs an immutable Task with seeded parameters and strict validator."""
+        if workload_id == "W1":
+            return Task(
+                task_id=f"w1_replay_trial_{trial_index:04d}",
+                prompt=f"Dispatch fanout metric queries for trial {trial_index}",
+                expected_output={"status": "success", "total_load": 250, "server_count": 5},
+                metadata={"workload_id": "W1", "trial_index": trial_index},
+            )
+        elif workload_id == "W2":
+            return Task(
+                task_id=f"w2_replay_trial_{trial_index:04d}",
+                prompt=f"Execute user orders chain for user u_{trial_index}",
+                context={"user_id": f"u_{trial_index}"},
+                expected_output={"user": {"user_id": f"u_{trial_index}", "name": "Alice"}, "orders": {"orders": [{"id": "ord_101", "total": 99.0}]}, "fused": True},
+                metadata={"workload_id": "W2", "trial_index": trial_index, "workflow_id": "user_orders"},
+            )
+        elif workload_id == "W3":
+            return Task(
+                task_id=f"w3_replay_trial_{trial_index:04d}",
+                prompt=f"Execute branching customer check for cust_{trial_index}",
+                expected_output={"status": "approved", "customer_id": f"cust_{trial_index}"},
+                metadata={"workload_id": "W3", "trial_index": trial_index},
+            )
+        elif workload_id == "W4":
+            key_id = f"item_{trial_index % 10}"
+            return Task(
+                task_id=f"w4_replay_trial_{trial_index:04d}",
+                prompt=f"Lookup price for {key_id}",
+                expected_output={"sku": key_id, "price": 49.99},
+                metadata={"workload_id": "W4", "trial_index": trial_index},
+            )
+        elif workload_id == "W5":
+            return Task(
+                task_id=f"w5_replay_trial_{trial_index:04d}",
+                prompt=f"Stream query dataset for trial {trial_index}",
+                expected_output={"status": "success", "count": 100},
+                metadata={"workload_id": "W5", "trial_index": trial_index},
+            )
+        elif workload_id == "W6":
+            return Task(
+                task_id=f"w6_replay_trial_{trial_index:04d}",
+                prompt=f"Run sandbox compute task for trial {trial_index}",
+                expected_output={"result": 55},
+                metadata={"workload_id": "W6", "trial_index": trial_index},
+            )
+        elif workload_id == "W7":
+            idemp_key = f"tx_replay_{trial_index:04d}"
+            grant = ApprovalGrant.create("execute_fund_transfer", {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key})
+            return Task(
+                task_id=f"w7_replay_trial_{trial_index:04d}",
+                prompt=f"Execute fund transfer with idempotency key {idemp_key}",
+                parameters={"idempotency_key": idemp_key},
+                expected_output={"status": "transferred", "idempotency_key": idemp_key},
+                metadata={"workload_id": "W7", "trial_index": trial_index, "approval_grant": grant},
+            )
+        else:
+            # Fallback for E5a transport codec workload
+            return Task(
+                task_id=f"e5a_trial_{trial_index:04d}",
+                prompt=f"Execute action bytecode benchmark payload trial {trial_index}",
+                expected_output={"status": "done", "trial": trial_index},
+                metadata={"workload_id": "E5a", "trial_index": trial_index},
+            )
 
     def create_workload_environment(
-        self,
-        workload_id: str,
-        tool_delay_ms: float = 25.0,
-        model_delay_ms: float = 30.0,
-        trial_index: int = 0,
-    ) -> tuple[ToolRegistry, ReplayLLMAdapter]:
+        self, workload_id: str, trial_index: int = 0
+    ) -> tuple[ToolRegistry, BaseLLMAdapter]:
+        """Creates paired tool registry and replay model adapter for the trial."""
         registry = ToolRegistry()
+        clock = VirtualClock()
+        registry.clock = clock  # type: ignore[attr-defined]
 
         if workload_id == "W1":
-            # W1: Fan-out reads (5 independent tools)
-            params = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
             for i in range(5):
-                t_name = f"read_shard_{i}"
-                registry.register(ReplayToolAdapter(t_name, latency_ms=tool_delay_ms, output={"data": f"shard_{i}_value"}, parameters=params))
-            calls = [ToolCall(name=f"read_shard_{i}", arguments={"query": f"key_{i}"}) for i in range(5)]
+                spec = ToolSpec(name=f"server_metric_{i}", is_read_only=True, is_idempotent=True)
+                registry.register(ReplayToolAdapter(f"server_metric_{i}", spec, default_latency_ms=20.0, clock=clock))
+            calls = [ToolCall(name=f"server_metric_{i}", arguments={"metric": "cpu", "server_id": f"srv_{i}"}) for i in range(5)]
             decisions = [
-                LLMDecision(reasoning="Fanout", tool_calls=calls),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"shards": 5}),
+                LLMDecision(reasoning="Dispatching 5 fanout metrics", tool_calls=calls),
+                LLMDecision(reasoning="Synthesizing metrics", tool_calls=[], final_answer={"status": "success", "total_load": 250, "server_count": 5}),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=25.0, clock=clock)
+            return registry, model
 
         elif workload_id == "W2":
-            # W2: Dependent chains
-            p_user = {"type": "object", "properties": {"user_id": {"type": "string"}}, "required": ["user_id"]}
-            p_orders = {"type": "object", "properties": {"user_id": {"type": "string"}}, "required": ["user_id"]}
-            registry.register(ReplayToolAdapter("fetch_user", latency_ms=tool_delay_ms, output={"user_id": "u42", "name": "Alice", "org_id": "org9"}, parameters=p_user))
-            registry.register(ReplayToolAdapter("fetch_orders", latency_ms=tool_delay_ms, output={"user_id": "u42", "orders": [101, 102]}, parameters=p_orders))
-            c1 = ToolCall(call_id="c1", name="fetch_user", arguments={"user_id": "u42"})
-            c2 = ToolCall(call_id="c2", name="fetch_orders", arguments={"user_id": "u42"})
+            spec_user = ToolSpec(name="fetch_user", is_read_only=True, is_idempotent=True)
+            spec_orders = ToolSpec(name="fetch_orders", is_read_only=True, is_idempotent=True)
+            registry.register(ReplayToolAdapter("fetch_user", spec_user, [{"output": {"user_id": f"u_{trial_index}", "name": "Alice"}, "latency_ms": 20.0}], default_latency_ms=20.0, clock=clock))
+            registry.register(ReplayToolAdapter("fetch_orders", spec_orders, [{"output": {"orders": [{"id": "ord_101", "total": 99.0}]}, "latency_ms": 20.0}], default_latency_ms=20.0, clock=clock))
+
             decisions = [
-                LLMDecision(reasoning="Chain step 1", tool_calls=[c1]),
-                LLMDecision(reasoning="Chain step 2", tool_calls=[c2]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"user": {"user_id": "u42", "name": "Alice", "org_id": "org9"}, "orders": {"user_id": "u42", "orders": [101, 102]}, "fused": True}),
+                LLMDecision(reasoning="Fetching user profile", tool_calls=[ToolCall(name="fetch_user", arguments={"user_id": f"u_{trial_index}"})]),
+                LLMDecision(reasoning="Fetching orders for user", tool_calls=[ToolCall(name="fetch_orders", arguments={"user_id": f"u_{trial_index}"})]),
+                LLMDecision(reasoning="Complete", tool_calls=[], final_answer={"user": {"user_id": f"u_{trial_index}", "name": "Alice"}, "orders": {"orders": [{"id": "ord_101", "total": 99.0}]}, "fused": True}),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=25.0, clock=clock)
+            return registry, model
 
         elif workload_id == "W3":
-            # W3: Branching with speculative read
-            p_search = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
-            registry.register(ReplayToolAdapter("search_catalog", latency_ms=tool_delay_ms, output={"item": "prod_1", "price": 99}, parameters=p_search))
-            predicted = ToolCall(name="search_catalog", arguments={"query": "laptop"}, speculation_confidence=0.9)
+            spec_read = ToolSpec(name="read_customer_state", is_read_only=True, is_idempotent=True)
+            spec_audit = ToolSpec(name="audit_transaction", is_read_only=True, is_idempotent=True)
+            registry.register(ReplayToolAdapter("read_customer_state", spec_read, default_latency_ms=25.0, clock=clock))
+            registry.register(ReplayToolAdapter("audit_transaction", spec_audit, default_latency_ms=25.0, clock=clock))
+
+            spec_call = ToolCall(name="read_customer_state", arguments={"customer_id": f"cust_{trial_index}"}, speculation_confidence=0.92)
             decisions = [
-                LLMDecision(reasoning="Search", tool_calls=[ToolCall(name="search_catalog", arguments={"query": "laptop"})]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"item": "prod_1"}),
+                LLMDecision(reasoning="Reading customer state", tool_calls=[copy.deepcopy(spec_call)]),
+                LLMDecision(reasoning="Evaluating risk", tool_calls=[], final_answer={"status": "approved", "customer_id": f"cust_{trial_index}"}),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, draft_prediction=predicted, decision_delay_ms=model_delay_ms)
+            model = ReplayLLMAdapter(decisions=decisions, draft_prediction=spec_call, decision_delay_ms=25.0, clock=clock)
+            return registry, model
 
         elif workload_id == "W4":
-            # W4: Repeated workflows with plan locality (caching)
-            user_key = f"usr_{trial_index % 3:03d}"
-            p_usr = {"type": "object", "properties": {"user_id": {"type": "string"}}, "required": ["user_id"]}
-            p_calc = {
-                "type": "object",
-                "properties": {
-                    "user_id": {"type": "string"},
-                    "tier": {"type": "string"},
-                    "base_amount": {"type": "number"},
-                    "discount_pct": {"type": "number"},
-                },
-                "required": ["user_id", "tier", "base_amount"],
-            }
-            registry.register(ReplayToolAdapter("lookup_user_profile", latency_ms=tool_delay_ms, output={"user_id": user_key, "tier": "enterprise", "discount_pct": 20}, parameters=p_usr))
-            registry.register(ReplayToolAdapter("calculate_final_invoice", latency_ms=10.0, output={"final_price": 80.0, "currency": "USD"}, parameters=p_calc))
+            spec = ToolSpec(name="pricing_lookup", is_read_only=True, is_idempotent=True)
+            registry.register(ReplayToolAdapter("pricing_lookup", spec, default_latency_ms=25.0, clock=clock))
+            key_id = f"item_{trial_index % 10}"
+            call = ToolCall(name="pricing_lookup", arguments={"sku": key_id})
             decisions = [
-                LLMDecision(reasoning="Lookup", tool_calls=[ToolCall(name="lookup_user_profile", arguments={"user_id": user_key})]),
-                LLMDecision(reasoning="Invoice", tool_calls=[ToolCall(name="calculate_final_invoice", arguments={"user_id": user_key, "tier": "enterprise", "base_amount": 100.0, "discount_pct": 20})]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"user_id": user_key, "tier": "enterprise", "final_price": 80.0}),
+                LLMDecision(reasoning="Looking up cached price", tool_calls=[call]),
+                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"sku": key_id, "price": 49.99}),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=25.0, clock=clock)
+            return registry, model
 
         elif workload_id == "W5":
-            # W5: Large payloads & early commit
-            p_proc = {"type": "object", "properties": {"payload": {"type": "string"}}, "required": ["payload"]}
-            registry.register(ReplayToolAdapter("process_payload", latency_ms=tool_delay_ms, output={"processed": True}, parameters=p_proc))
-            c = ToolCall(name="process_payload", arguments={"payload": "x" * 500})
+            spec = ToolSpec(name="stream_query_data", is_read_only=True, is_idempotent=True, commit_horizon_args=["query", "limit"])
+            registry.register(ReplayToolAdapter("stream_query_data", spec, default_latency_ms=30.0, clock=clock))
+            call = ToolCall(name="stream_query_data", arguments={"query": "SELECT * FROM metrics", "limit": 100})
             decisions = [
-                LLMDecision(reasoning="Process", tool_calls=[c]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"processed": True}),
+                LLMDecision(reasoning="Querying streaming dataset", tool_calls=[call]),
+                LLMDecision(reasoning="Synthesizing dataset", tool_calls=[], final_answer={"status": "success", "count": 100}),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=35.0, stream_chunks_count=4, clock=clock)
+            return registry, model
 
         elif workload_id == "W6":
-            # W6: Cold-start tool / sandbox (cold_start_ms=80ms vs warm=15ms)
-            p_eval = {"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]}
-            registry.register(ReplayToolAdapter("sandbox_python_eval", latency_ms=15.0, cold_start_ms=80.0, output={"result": 42}, parameters=p_eval))
-            c = ToolCall(name="sandbox_python_eval", arguments={"expression": "6 * 7"})
+            spec = ToolSpec(name="sandbox_compute", is_read_only=True, is_idempotent=True)
+            registry.register(ReplayToolAdapter("sandbox_compute", spec, default_latency_ms=25.0, clock=clock))
+            call = ToolCall(name="sandbox_compute", arguments={"op": "fib", "n": 10})
             decisions = [
-                LLMDecision(reasoning="Run", tool_calls=[c]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"result": 42}),
+                LLMDecision(reasoning="Computing sandbox output", tool_calls=[call]),
+                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"result": 55}),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=25.0, clock=clock)
+            return registry, model
 
         elif workload_id == "W7":
-            # W7: Side-effecting actions requiring approval
-            idem_key = f"idem_w7_{trial_index:04d}"
-            p_trans = {
-                "type": "object",
-                "properties": {
-                    "from_account": {"type": "string"},
-                    "to_account": {"type": "string"},
-                    "amount": {"type": "number"},
-                    "idempotency_key": {"type": "string"},
-                },
-                "required": ["from_account", "to_account", "amount", "idempotency_key"],
-            }
-            transfer_args = {
-                "from_account": "acc_001",
-                "to_account": "acc_002",
-                "amount": 100.0,
-                "idempotency_key": idem_key,
-            }
-            grant = ApprovalGrant.create(
-                tool_name="execute_fund_transfer",
-                arguments=transfer_args,
-                authority="trusted_system",
-            )
-            registry.register(ReplayToolAdapter("execute_fund_transfer", latency_ms=tool_delay_ms, output={"status": "TRANSFERRED", "tx": "tx99"}, is_read_only=False, side_effects=True, requires_approval=True, parameters=p_trans))
-            c = ToolCall(name="execute_fund_transfer", arguments=transfer_args, requires_approval=True, is_approved=True, approval_grant=grant)
-            decisions = [
-                LLMDecision(reasoning="Transfer", tool_calls=[c]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"status": "TRANSFERRED"}),
-            ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
+            spec = ToolSpec(name="execute_fund_transfer", is_read_only=False, side_effects=True, requires_approval=True, is_idempotent=True)
+            registry.register(ReplayToolAdapter("execute_fund_transfer", spec, default_latency_ms=25.0, clock=clock))
+            idemp_key = f"tx_replay_{trial_index:04d}"
+            call_args = {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key}
+            call = ToolCall(name="execute_fund_transfer", arguments=call_args, requires_approval=True, idempotency_key=idemp_key)
 
-        elif workload_id in ("E5", "E5a"):
-            # E5a: Action Bytecode Transport Codec
-            p_pack = {"type": "object", "properties": {"header": {"type": "string"}, "payload": {"type": "string"}}, "required": ["header", "payload"]}
-            registry.register(ReplayToolAdapter("process_packet", latency_ms=tool_delay_ms, output={"parsed": True}, parameters=p_pack))
-            c = ToolCall(name="process_packet", arguments={"header": "v2", "payload": "data_packet"})
             decisions = [
-                LLMDecision(reasoning="Encode", tool_calls=[c]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"parsed": True}),
+                LLMDecision(reasoning="Executing side-effect fund transfer", tool_calls=[call]),
+                LLMDecision(reasoning="Completed transfer", tool_calls=[], final_answer={"status": "transferred", "idempotency_key": idemp_key}),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=25.0, clock=clock)
+            return registry, model
 
         else:
-            p_gen = {"type": "object", "properties": {"query": {"type": "string"}}}
-            registry.register(ReplayToolAdapter("generic_tool", latency_ms=tool_delay_ms, output={"ok": True}, parameters=p_gen))
+            # E5a Bytecode transport
+            spec = ToolSpec(name="bytecode_transport_tool", is_read_only=True, is_idempotent=True)
+            registry.register(ReplayToolAdapter("bytecode_transport_tool", spec, default_latency_ms=20.0, clock=clock))
+            call = ToolCall(name="bytecode_transport_tool", arguments={"payload_id": trial_index, "data": f"content_{trial_index}"})
             decisions = [
-                LLMDecision(reasoning="Action", tool_calls=[ToolCall(name="generic_tool", arguments={"query": "test"})]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"ok": True}),
+                LLMDecision(reasoning="Bytecode transport dispatch", tool_calls=[call]),
+                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"status": "done", "trial": trial_index}),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=model_delay_ms)
-
-        return registry, model
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=25.0, clock=clock)
+            return registry, model

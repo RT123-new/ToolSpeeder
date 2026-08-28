@@ -1,4 +1,4 @@
-"""Core experiment framework and statistical computation for ToolSpeed."""
+"""Statistical summarizer, paired bootstrap confidence intervals, and hypothesis evaluations."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
+
 import numpy as np
 
 from toolspeed.core.types import (
@@ -18,46 +19,75 @@ from toolspeed.core.types import (
 
 
 class WorkloadFamily(str, Enum):
-    """Seven canonical workload families from research plan."""
-    W1_FANOUT = "W1: Independent fan-out reads"
-    W2_CHAINS = "W2: Deterministic dependent chains"
-    W3_BRANCHING = "W3: Branching workflows"
-    W4_REPEATED = "W4: Repeated workflows with plan locality"
-    W5_LARGE_PAYLOADS = "W5: Large tool arguments and results"
-    W6_SANDBOX_COLDSTART = "W6: Cold-start code/browser sandboxes"
-    W7_SIDE_EFFECTS = "W7: Side-effecting actions requiring approval"
+    """Canonical workload families evaluated across synthetic and empirical benchmarks."""
+    W1_FANOUT = "W1: Fan-out Independent Reads"
+    W2_CHAINS = "W2: Dependent Sequential Chains"
+    W3_BRANCHING = "W3: Branching with Speculative Read"
+    W4_REPEATED = "W4: Repeated Workflows (High Plan Locality)"
+    W5_LARGE_PAYLOADS = "W5: Large Arguments & High-Volume Responses"
+    W6_SANDBOX_COLDSTART = "W6: Cold-Start Sandboxes (Pre-warming vs On-Demand)"
+    W7_SIDE_EFFECTS = "W7: Side-Effecting Actions & Approval Gates"
+
+
+def samples(
+    rng_or_profile: Any,
+    mean_or_median_or_count: Any = None,
+    sigma_or_std: float | None = None,
+    shape_or_size: Any = None,
+    **kwargs: Any,
+) -> np.ndarray:
+    """Generate reproducible latency samples supporting all signatures."""
+    if isinstance(rng_or_profile, LatencyProfile):
+        profile = rng_or_profile
+        count = int(mean_or_median_or_count) if mean_or_median_or_count is not None else 100
+        seed = int(sigma_or_std) if sigma_or_std is not None else 42
+        rng = np.random.default_rng(seed)
+        return np.maximum(1.0, rng.normal(loc=profile.median_ms, scale=profile.std_dev_ms, size=count))
+
+    rng = rng_or_profile if hasattr(rng_or_profile, "normal") else np.random.default_rng(42)
+    median_ms = kwargs.get("median_ms", mean_or_median_or_count)
+    if median_ms is None:
+        median_ms = 20.0
+    sigma = kwargs.get("sigma", sigma_or_std)
+    if sigma is None:
+        sigma = 2.0
+    shape = kwargs.get("shape", shape_or_size)
+    if shape is None:
+        shape = 100
+
+    scale = sigma if sigma > 1.0 else float(median_ms) * float(sigma)
+    return np.maximum(1.0, rng.normal(loc=float(median_ms), scale=scale, size=shape))
 
 
 @dataclass
 class HypothesisCheck:
-    """Individual hypothesis criterion check."""
+    """Individual hypothesis criteria check evaluated against frozen thresholds."""
     name: str
     target: str
-    measured: Any
+    measured: str
     passed: bool
-    detail: str
+    detail: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return sanitize_for_json(asdict(self))
+        return asdict(self)
 
 
 @dataclass
 class FalsificationVerdict:
-    """Verdict of scientific hypothesis testing and falsification."""
+    """Rigorous scientific hypothesis verdict."""
     experiment_id: str
     hypothesis: str
     passed: bool
     falsified: bool
-    summary: str
-    checks: list[HypothesisCheck] = field(default_factory=list)
+    summary: str = ""
     state: VerdictState = VerdictState.INCONCLUSIVE
     evidence_level: EvidenceLevel = EvidenceLevel.SYNTHETIC
-    evidence_log_row: dict[str, str] = field(default_factory=dict)
+    checks: list[HypothesisCheck] = field(default_factory=list)
     is_verdict_eligible: bool = True
-
-    @property
-    def inconclusive(self) -> bool:
-        return self.state == VerdictState.INCONCLUSIVE
+    metadata: dict[str, Any] = field(default_factory=dict)
+    evidence_log_row: dict[str, Any] = field(default_factory=dict)
+    target_claim: str = ""
+    p95_speedup: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,26 +99,26 @@ class FalsificationVerdict:
             "evidence_level": self.evidence_level.value if isinstance(self.evidence_level, EvidenceLevel) else str(self.evidence_level),
             "summary": self.summary,
             "checks": [c.to_dict() for c in self.checks],
-            "evidence_log_row": self.evidence_log_row,
             "is_verdict_eligible": self.is_verdict_eligible,
+            "metadata": self.metadata,
         }
 
 
 @dataclass
 class MetricSummary:
-    """Rigorous statistical summary of paired baseline vs candidate execution."""
-    baseline_p50_ms: float | None
-    candidate_p50_ms: float | None
-    p50_speedup: float | None
-    baseline_p90_ms: float | None
-    candidate_p90_ms: float | None
-    p90_speedup: float | None
-    baseline_p95_ms: float | None
-    candidate_p95_ms: float | None
-    p95_speedup: float | None
-    baseline_p99_ms: float | None
-    candidate_p99_ms: float | None
-    p99_speedup: float | None
+    """Comprehensive paired evaluation statistical summary with honest null defaults."""
+    baseline_p50_ms: float | None = None
+    candidate_p50_ms: float | None = None
+    p50_speedup: float | None = None
+    baseline_p90_ms: float | None = None
+    candidate_p90_ms: float | None = None
+    p90_speedup: float | None = None
+    baseline_p95_ms: float | None = None
+    candidate_p95_ms: float | None = None
+    p95_speedup: float | None = None
+    baseline_p99_ms: float | None = None
+    candidate_p99_ms: float | None = None
+    p99_speedup: float | None = None
     baseline_mean_ms: float | None = None
     candidate_mean_ms: float | None = None
     mean_speedup: float | None = None
@@ -113,8 +143,8 @@ class MetricSummary:
     success_delta_ci: tuple[float | None, float | None] | None = None
     cost_delta_ci: tuple[float | None, float | None] | None = None
     unapproved_side_effects: int = 0
-    tool_selection_accuracy: float = 1.0
-    arg_selection_accuracy: float = 1.0
+    tool_selection_accuracy: float | None = None
+    arg_selection_accuracy: float | None = None
     extra_metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -123,34 +153,36 @@ class MetricSummary:
 
 @dataclass
 class ExperimentResult:
-    """Complete result container for an experiment."""
+    """Top-level container for an experiment evaluation."""
     experiment_id: str
     title: str
-    workloads: list[str]
-    trials: int
-    seed: int
-    profile: LatencyProfile
     parameter_name: str
     rows: list[dict[str, Any]]
     verdict: FalsificationVerdict
     evidence_level: EvidenceLevel = EvidenceLevel.SYNTHETIC
     runtime_sec: float = 0.0
     manifest: ArtifactManifest | None = None
+    workloads: list[Any] = field(default_factory=list)
+    evaluations: list[Any] = field(default_factory=list)
+    trials: int = 1000
+    seed: int = 42
+    profile: LatencyProfile | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "experiment_id": self.experiment_id,
             "title": self.title,
-            "workloads": self.workloads,
-            "trials": self.trials,
-            "seed": self.seed,
             "evidence_level": self.evidence_level.value if isinstance(self.evidence_level, EvidenceLevel) else str(self.evidence_level),
-            "profile": self.profile.to_dict(),
             "parameter_name": self.parameter_name,
             "rows": sanitize_for_json(self.rows),
             "verdict": self.verdict.to_dict(),
             "runtime_sec": self.runtime_sec,
             "manifest": self.manifest.to_dict() if self.manifest else None,
+            "workloads": self.workloads,
+            "evaluations": self.evaluations,
+            "trials": self.trials,
+            "seed": self.seed,
+            "profile": self.profile.to_dict() if self.profile else None,
         }
 
     def get_row(self, param_value: Any) -> dict[str, Any] | None:
@@ -158,6 +190,35 @@ class ExperimentResult:
             if r.get(self.parameter_name) == param_value:
                 return r
         return None
+
+
+def compute_percentiles(arr: np.ndarray, percentiles: list[float] | None = None) -> dict[str, float]:
+    """Compute percentile dictionary from array."""
+    pcts = percentiles or [50.0, 90.0, 95.0, 99.0]
+    if len(arr) == 0:
+        return {f"p{int(p)}": 0.0 for p in pcts}
+    return {f"p{int(p)}": float(np.percentile(arr, p)) for p in pcts}
+
+
+def bootstrap_confidence_interval(
+    data: np.ndarray,
+    stat_func: Callable[[np.ndarray], float],
+    num_samples: int = 1000,
+    ci: float = 0.95,
+    seed: int | None = 42,
+) -> tuple[float, float]:
+    """Calculate univariate bootstrap confidence interval."""
+    if len(data) == 0:
+        return 0.0, 0.0
+    rng = np.random.default_rng(seed)
+    n = len(data)
+    boot_stats = np.empty(num_samples)
+    for i in range(num_samples):
+        sample = rng.choice(data, size=n, replace=True)
+        boot_stats[i] = stat_func(sample)
+    lower = float(np.percentile(boot_stats, ((1.0 - ci) / 2.0) * 100.0))
+    upper = float(np.percentile(boot_stats, (1.0 - (1.0 - ci) / 2.0) * 100.0))
+    return lower, upper
 
 
 def paired_bootstrap_ci(
@@ -220,17 +281,18 @@ def compute_summary(
     tool_start_cand: np.ndarray | None = None,
     semantic_mutations: np.ndarray | None = None,
     unapproved_side_effects: int = 0,
-    tool_selection_accuracy: float = 1.0,
-    arg_selection_accuracy: float = 1.0,
+    tool_selection_accuracy: float | None = None,
+    arg_selection_accuracy: float | None = None,
     extra: dict[str, Any] | None = None,
 ) -> MetricSummary:
     """Compute comprehensive MetricSummary from paired trial arrays.
-    
+
     Strict CCL invariant: CCL percentiles are computed on trials where tasks completed successfully.
+    Missing metrics default strictly to None.
     """
-    b_succ = float(np.mean(baseline_success)) if baseline_success is not None and len(baseline_success) > 0 else 1.0
-    c_succ = float(np.mean(candidate_success)) if candidate_success is not None and len(candidate_success) > 0 else 1.0
-    succ_delta = float(c_succ - b_succ)
+    b_succ = float(np.mean(baseline_success)) if baseline_success is not None and len(baseline_success) > 0 else None
+    c_succ = float(np.mean(candidate_success)) if candidate_success is not None and len(candidate_success) > 0 else None
+    succ_delta = float(c_succ - b_succ) if (c_succ is not None and b_succ is not None) else None
 
     paired_counts: dict[str, int] = {}
     if baseline_success is not None and candidate_success is not None and len(baseline_success) == len(candidate_success):
@@ -278,16 +340,16 @@ def compute_summary(
     p99_speedup = float(b99 / c99) if (b99 is not None and c99 is not None and c99 > 0) else None
     mean_speedup = float(b_mean / c_mean) if (b_mean is not None and c_mean is not None and c_mean > 0) else None
 
-    wasted_rate = float(np.mean(wasted_calls)) if wasted_calls is not None and len(wasted_calls) > 0 else 0.0
-    cost_mult = float(np.mean(cost_multipliers)) if cost_multipliers is not None and len(cost_multipliers) > 0 else 1.0
-    rl_err_rate = float(np.mean(rate_limit_errors)) if rate_limit_errors is not None and len(rate_limit_errors) > 0 else 0.0
+    wasted_rate = float(np.mean(wasted_calls)) if wasted_calls is not None and len(wasted_calls) > 0 else None
+    cost_mult = float(np.mean(cost_multipliers)) if cost_multipliers is not None and len(cost_multipliers) > 0 else None
+    rl_err_rate = float(np.mean(rate_limit_errors)) if rate_limit_errors is not None and len(rate_limit_errors) > 0 else None
 
     token_red = (
         float((input_tokens_base - input_tokens_cand) / input_tokens_base * 100.0)
         if (input_tokens_base is not None and input_tokens_cand is not None and input_tokens_base > 0)
-        else 0.0
+        else None
     )
-    deopt_rate_val = float(np.mean(deopt_events)) if deopt_events is not None and len(deopt_events) > 0 else 0.0
+    deopt_rate_val = float(np.mean(deopt_events)) if deopt_events is not None and len(deopt_events) > 0 else None
 
     t_start_p50 = float(np.percentile(tool_start_cand, 50)) if tool_start_cand is not None and len(tool_start_cand) > 0 else None
     t_start_p95 = float(np.percentile(tool_start_cand, 95)) if tool_start_cand is not None and len(tool_start_cand) > 0 else None
@@ -297,10 +359,10 @@ def compute_summary(
     else:
         t_start_speedup = None
 
-    mutation_rate = float(np.mean(semantic_mutations)) if semantic_mutations is not None and len(semantic_mutations) > 0 else 0.0
+    mutation_rate = float(np.mean(semantic_mutations)) if semantic_mutations is not None and len(semantic_mutations) > 0 else None
 
-    # Paired bootstrap CIs
-    ci_p95_low, ci_p95_high = paired_bootstrap_p95_ci(baseline, candidate, num_samples=500)
+    # Paired bootstrap CIs with 1,000 samples
+    ci_p95_low, ci_p95_high = paired_bootstrap_p95_ci(baseline, candidate, num_samples=1000)
     p95_ci = (ci_p95_low, ci_p95_high) if (ci_p95_low is not None and ci_p95_high is not None) else None
 
     def _calc_p50_red(b: np.ndarray, c: np.ndarray) -> float:
@@ -308,7 +370,7 @@ def compute_summary(
         c5 = float(np.percentile(c, 50))
         return ((b5 - c5) / b5) * 100.0 if b5 > 0 else 0.0
 
-    ci_p50_low, ci_p50_high = paired_bootstrap_ci(baseline, candidate, _calc_p50_red, num_samples=500)
+    ci_p50_low, ci_p50_high = paired_bootstrap_ci(baseline, candidate, _calc_p50_red, num_samples=1000)
     p50_ci = (ci_p50_low, ci_p50_high) if (ci_p50_low is not None and ci_p50_high is not None) else None
 
     def _calc_p99_red(b: np.ndarray, c: np.ndarray) -> float:
@@ -316,17 +378,17 @@ def compute_summary(
         c9 = float(np.percentile(c, 99))
         return ((b9 - c9) / b9) * 100.0 if b9 > 0 else 0.0
 
-    ci_p99_low, ci_p99_high = paired_bootstrap_ci(baseline, candidate, _calc_p99_red, num_samples=500)
+    ci_p99_low, ci_p99_high = paired_bootstrap_ci(baseline, candidate, _calc_p99_red, num_samples=1000)
     p99_ci = (ci_p99_low, ci_p99_high) if (ci_p99_low is not None and ci_p99_high is not None) else None
 
     def _calc_succ_delta(b: np.ndarray, c: np.ndarray) -> float:
         return float(np.mean(c) - np.mean(b))
 
     if baseline_success is not None and candidate_success is not None:
-        ci_succ_low, ci_succ_high = paired_bootstrap_ci(baseline_success.astype(float), candidate_success.astype(float), _calc_succ_delta, num_samples=500)
+        ci_succ_low, ci_succ_high = paired_bootstrap_ci(baseline_success.astype(float), candidate_success.astype(float), _calc_succ_delta, num_samples=1000)
         succ_ci = (ci_succ_low, ci_succ_high) if (ci_succ_low is not None and ci_succ_high is not None) else None
     else:
-        succ_ci = (0.0, 0.0)
+        succ_ci = None
 
     return MetricSummary(
         baseline_p50_ms=b50,
@@ -363,46 +425,9 @@ def compute_summary(
         p50_reduction_ci=p50_ci,
         p99_reduction_ci=p99_ci,
         success_delta_ci=succ_ci,
-        cost_delta_ci=(0.0, 0.0),
+        cost_delta_ci=None,
         unapproved_side_effects=unapproved_side_effects,
         tool_selection_accuracy=tool_selection_accuracy,
         arg_selection_accuracy=arg_selection_accuracy,
         extra_metrics=extra or {},
     )
-
-
-def samples(rng: np.random.Generator, median_ms: float, sigma: float, shape: int | tuple[int, ...]) -> np.ndarray:
-    """Generate log-normal latency samples centered around median_ms."""
-    return rng.lognormal(np.log(max(1.0, median_ms)), sigma, shape)
-
-
-def compute_percentiles(arr: np.ndarray, percentiles: tuple[int, ...] = (50, 90, 95, 99)) -> dict[str, float]:
-    """Compute percentiles robustly."""
-    if len(arr) == 0:
-        return {f"p{p}": 0.0 for p in percentiles}
-    res = {}
-    for p in percentiles:
-        res[f"p{p}"] = float(np.percentile(arr, p))
-    return res
-
-
-def bootstrap_confidence_interval(
-    data: np.ndarray,
-    stat_func: Callable[[np.ndarray], float] = np.mean,
-    num_samples: int = 1000,
-    ci: float = 0.95,
-    seed: int | None = 42,
-) -> tuple[float, float]:
-    """Compute bootstrap confidence interval for a 1D array."""
-    if len(data) == 0:
-        return 0.0, 0.0
-    rng = np.random.default_rng(seed)
-    n = len(data)
-    boot_stats = np.empty(num_samples)
-    for i in range(num_samples):
-        boot_sample = rng.choice(data, size=n, replace=True)
-        boot_stats[i] = stat_func(boot_sample)
-    lower_pct = ((1.0 - ci) / 2.0) * 100.0
-    upper_pct = (1.0 - (1.0 - ci) / 2.0) * 100.0
-    return float(np.percentile(boot_stats, lower_pct)), float(np.percentile(boot_stats, upper_pct))
-

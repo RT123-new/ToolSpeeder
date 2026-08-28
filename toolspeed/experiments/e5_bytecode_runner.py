@@ -11,7 +11,8 @@ Evaluates hypothesis:
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 import numpy as np
 
 from toolspeed.experiments.runner import (
@@ -19,7 +20,6 @@ from toolspeed.experiments.runner import (
     FalsificationVerdict,
     HypothesisCheck,
     LatencyProfile,
-    MetricSummary,
     WorkloadFamily,
     compute_summary,
     samples,
@@ -31,7 +31,7 @@ class E5BytecodeExperiment:
 
     def __init__(
         self,
-        profile: Optional[LatencyProfile] = None,
+        profile: LatencyProfile | None = None,
         trials: int = 10_000,
         seed: int = 20260825,
     ) -> None:
@@ -46,18 +46,16 @@ class E5BytecodeExperiment:
         expansion_overhead_ms: float = 3.0,
     ) -> ExperimentResult:
         start_time = time.perf_counter()
-        rows: List[Dict[str, Any]] = []
-        checks: List[HypothesisCheck] = []
+        rows: list[dict[str, Any]] = []
+        checks: list[HypothesisCheck] = []
 
-        decode_heavy_ccl_gains: List[float] = []
+        decode_heavy_ccl_gains: list[float] = []
 
         for share in decode_shares:
             share_val = float(share)
             for factor in acceleration_factors:
                 factor_val = float(factor)
-                rng = np.random.default_rng(
-                    self.seed + 4000 + int(share_val * 1000) + int(factor_val * 10)
-                )
+                rng = np.random.default_rng(self.seed + 4000 + int(share_val * 1000) + int(factor_val * 10))
                 n = self.trials
 
                 # Latency samples
@@ -184,7 +182,9 @@ class E5BytecodeExperiment:
             evidence_log_row={
                 "experiment": "E5 — Action bytecode",
                 "tested": "Yes",
-                "succeeded": f"Bytecode compression accelerates tool token generation up to {max_factor:.0f}x, yielding {best_decode_heavy_gain:.1f}% CCL gain on W5" if all_passed else "Failed",
+                "succeeded": f"Bytecode compression accelerates tool token generation up to {max_factor:.0f}x, yielding {best_decode_heavy_gain:.1f}% CCL gain on W5"
+                if all_passed
+                else "Failed",
                 "failed": "None" if all_passed else "Expansion overhead or insufficient end-to-end gain",
                 "still_unproven": "Custom tokenizer vocabulary extension vs post-hoc byte compression",
                 "next_action": "Evaluate token vocabulary patches on fine-tuned action models",
@@ -211,7 +211,7 @@ class E5BytecodeExperiment:
 
 
 def run_e5_experiment(
-    profile: Optional[LatencyProfile] = None,
+    profile: LatencyProfile | None = None,
     trials: int = 10_000,
     seed: int = 20260825,
 ) -> ExperimentResult:

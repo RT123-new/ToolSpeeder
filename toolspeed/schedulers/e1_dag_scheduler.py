@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import asyncio
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
@@ -61,7 +61,12 @@ class ToolDAG:
             node_id = call.call_id
             if node_id in self.nodes:
                 # Reject duplicate call IDs: fail closed instead of silently mutating
-                dup_node = DAGNode(node_id=f"dup_{node_id}", call=call, status="failed", error=f"Duplicate tool call ID '{node_id}' rejected")
+                dup_node = DAGNode(
+                    node_id=f"dup_{node_id}",
+                    call=call,
+                    status="failed",
+                    error=f"Duplicate tool call ID '{node_id}' rejected",
+                )
                 self.nodes[f"dup_{node_id}"] = dup_node
                 continue
 
@@ -189,10 +194,13 @@ class ToolDAG:
                 return None, f"Cannot traverse path '{part}' on object of type {type(current).__name__}"
         return current, None
 
-    def resolve_node_arguments(self, node: DAGNode, fail_closed: bool = True) -> tuple[dict[str, Any] | None, str | None]:
+    def resolve_node_arguments(
+        self, node: DAGNode, fail_closed: bool = True
+    ) -> tuple[dict[str, Any] | None, str | None]:
         """Binds intermediate results from parent nodes recursively.
         Returns (resolved_args, error_message).
         """
+
         def _resolve_val(val: Any) -> tuple[Any, str | None]:
             if isinstance(val, str) and "$" in val:
                 refs = re.findall(r"\$([a-zA-Z0-9_\-]+)(?:\.([a-zA-Z0-9_\.\-]+))?", val)
@@ -216,7 +224,11 @@ class ToolDAG:
                             return None, f"Unresolved dependency reference '${ref_id}'"
                         continue
 
-                    output = target_node.result.output if target_node.result.output is not None else target_node.result.result
+                    output = (
+                        target_node.result.output
+                        if target_node.result.output is not None
+                        else target_node.result.result
+                    )
                     val_to_insert = output
 
                     if attr:
@@ -289,15 +301,16 @@ class ToolDAG:
 
 class DAGScheduler(BaseScheduler):
     """Experiment E1: Dynamic DAG Parallelism Scheduler.
-    
+
     Constructs dependency DAGs with two-pass reference discovery, resolves parameters
     recursively, validates graph topology, and dispatches ready tool waves with optimal concurrency.
     When parallelism_enabled=False (ablation/control), parses and validates graph but executes serially.
     """
 
-    def __init__(self, config: SchedulerConfig | None = None, parallelism_enabled: bool = True) -> None:
+    def __init__(self, config: SchedulerConfig | None = None, parallelism_enabled: bool | None = None) -> None:
         cfg = config or SchedulerConfig()
-        cfg.parallelism_enabled = parallelism_enabled
+        if parallelism_enabled is not None:
+            cfg.parallelism_enabled = parallelism_enabled
         super().__init__(cfg)
 
     async def _execute_dag_node(
@@ -448,13 +461,11 @@ class DAGScheduler(BaseScheduler):
                                 EventType.DAG_NODE_READY,
                                 details={"node_id": node.node_id, "tool": node.call.name},
                             )
-                            t = asyncio.create_task(
-                                self._execute_dag_node(ctx, node, dag)
-                            )
+                            t = asyncio.create_task(self._execute_dag_node(ctx, node, dag))
                             active_tasks[t] = node
 
                         if active_tasks:
-                            done, pending = await asyncio.wait(
+                            done, _pending = await asyncio.wait(
                                 active_tasks.keys(), return_when=asyncio.FIRST_COMPLETED
                             )
 
@@ -467,7 +478,7 @@ class DAGScheduler(BaseScheduler):
                                             call_id=node.node_id,
                                             name=node.call.name,
                                             tool_name=node.call.name,
-                                            error=f"Task exception: {str(exc)}",
+                                            error=f"Task exception: {exc!s}",
                                             is_error=True,
                                         )
                                         node.result = res_exc

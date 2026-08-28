@@ -11,7 +11,8 @@ Evaluates hypothesis:
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 import numpy as np
 
 from toolspeed.experiments.runner import (
@@ -19,7 +20,6 @@ from toolspeed.experiments.runner import (
     FalsificationVerdict,
     HypothesisCheck,
     LatencyProfile,
-    MetricSummary,
     WorkloadFamily,
     compute_summary,
     samples,
@@ -31,7 +31,7 @@ class E2FusionExperiment:
 
     def __init__(
         self,
-        profile: Optional[LatencyProfile] = None,
+        profile: LatencyProfile | None = None,
         trials: int = 10_000,
         seed: int = 20260825,
     ) -> None:
@@ -48,12 +48,12 @@ class E2FusionExperiment:
         runtime_overhead_ms: float = 40.0,
     ) -> ExperimentResult:
         start_time = time.perf_counter()
-        rows: List[Dict[str, Any]] = []
-        checks: List[HypothesisCheck] = []
+        rows: list[dict[str, Any]] = []
+        checks: list[HypothesisCheck] = []
 
-        p95_reductions: List[float] = []
-        token_reductions: List[float] = []
-        measured_deopt_rates: List[float] = []
+        p95_reductions: list[float] = []
+        token_reductions: list[float] = []
+        measured_deopt_rates: list[float] = []
 
         # Part 1: Step scaling on deterministic compiled workflows
         nominal_deopt_prob = 0.02
@@ -157,7 +157,7 @@ class E2FusionExperiment:
             )
             d_p95_red = (d_summary.baseline_p95_ms - d_summary.candidate_p95_ms) / d_summary.baseline_p95_ms
             row_data = {
-                "dependent_steps": f"4 (deopt_sweep_{int(deopt_p*100)}%)",
+                "dependent_steps": f"4 (deopt_sweep_{int(deopt_p * 100)}%)",
                 "deopt_rate": float(d_summary.deopt_rate),
                 "p95_reduction_pct": float(d_p95_red * 100.0),
                 "input_token_reduction_pct": float(d_summary.token_reduction_pct),
@@ -239,7 +239,9 @@ class E2FusionExperiment:
             evidence_log_row={
                 "experiment": "E2 — Workflow fusion",
                 "tested": "Yes",
-                "succeeded": "Compiled control flow eliminates round-trip LLM hops, reducing CCL by >30% and tokens by >45%" if all_passed else "Failed",
+                "succeeded": "Compiled control flow eliminates round-trip LLM hops, reducing CCL by >30% and tokens by >45%"
+                if all_passed
+                else "Failed",
                 "failed": "None" if all_passed else "Excessive deopt rate or insufficient speedup",
                 "still_unproven": "General synthesis of multi-turn code for arbitrary branching loops",
                 "next_action": "Implement AST-based macro compiler for bounded subgraphs",
@@ -265,7 +267,7 @@ class E2FusionExperiment:
 
 
 def run_e2_experiment(
-    profile: Optional[LatencyProfile] = None,
+    profile: LatencyProfile | None = None,
     trials: int = 10_000,
     seed: int = 20260825,
 ) -> ExperimentResult:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Any
+
 import numpy as np
 
 from toolspeed.adapters.base import BaseToolAdapter
@@ -20,7 +21,7 @@ from toolspeed.workloads.base import BaseWorkload
 
 class W1IndependentWorkload(BaseWorkload):
     """Workload Family 1: Independent Fan-out Reads.
-    
+
     Tests speedup from parallel tool dispatch across N independent read queries.
     """
 
@@ -33,9 +34,7 @@ class W1IndependentWorkload(BaseWorkload):
         self.fan_out_widths = list(fan_out_widths)
         self.median_tool_ms = median_tool_ms
         self.sigma = sigma
-        self._server_data: dict[str, int] = {
-            f"srv-{i:03d}": 100 + (i * 17) % 500 for i in range(256)
-        }
+        self._server_data: dict[str, int] = {f"srv-{i:03d}": 100 + (i * 17) % 500 for i in range(256)}
 
     def get_spec(self) -> WorkloadSpec:
         return WorkloadSpec(
@@ -102,7 +101,9 @@ class W1IndependentWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: ExecutionTrace | None) -> tuple[bool, str, dict[str, Any]]:
+        def _validate(
+            task: TaskInstance, output: Any, trace: ExecutionTrace | None
+        ) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 
@@ -111,7 +112,11 @@ class W1IndependentWorkload(BaseWorkload):
                 return False, f"Expected total_load {expected.get('total_load')}, got {output.get('total_load')}", {}
 
             if output.get("server_count") != expected.get("server_count"):
-                return False, f"Expected server_count {expected.get('server_count')}, got {output.get('server_count')}", {}
+                return (
+                    False,
+                    f"Expected server_count {expected.get('server_count')}, got {output.get('server_count')}",
+                    {},
+                )
 
             # Trace verification if trace is provided
             if trace is not None:

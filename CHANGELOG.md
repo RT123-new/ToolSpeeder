@@ -2,8 +2,7 @@
  
  All notable changes to ToolSpeed are documented in this file.
  
--## [0.2.0] - 2026-08-27
-+## [0.2.0] - 2026-08-28
+## [0.2.0] - 2026-08-28
  
  ### Added
  - **Formal Evidence Taxonomy**: Introduced explicit `EvidenceLevel` tags (`SYNTHETIC`, `REPLAY_INTEGRATION`, `LOCAL_WALL_CLOCK`, `LIVE_PRODUCTION`) across all reports, CLI outputs, and JSON manifests.

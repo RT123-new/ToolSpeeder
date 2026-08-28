@@ -12,7 +12,8 @@ Evaluates hypothesis:
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 import numpy as np
 
 from toolspeed.experiments.runner import (
@@ -32,7 +33,7 @@ class E3SpeculationExperiment:
 
     def __init__(
         self,
-        profile: Optional[LatencyProfile] = None,
+        profile: LatencyProfile | None = None,
         trials: int = 10_000,
         seed: int = 20260825,
     ) -> None:
@@ -42,7 +43,7 @@ class E3SpeculationExperiment:
 
     def run(
         self,
-        accuracies: Optional[np.ndarray] = None,
+        accuracies: np.ndarray | None = None,
         contention_modes: tuple[str, ...] = ("no_contention", "cancellable", "single_slot"),
         operating_accuracy: float = 0.85,
         confidence_threshold: float = 0.80,
@@ -51,17 +52,15 @@ class E3SpeculationExperiment:
         if accuracies is None:
             accuracies = np.linspace(0.0, 1.0, 21)
 
-        rows: List[Dict[str, Any]] = []
-        checks: List[HypothesisCheck] = []
+        rows: list[dict[str, Any]] = []
+        checks: list[HypothesisCheck] = []
 
-        operating_summary: Optional[MetricSummary] = None
+        operating_summary: MetricSummary | None = None
 
         for mode_idx, mode in enumerate(contention_modes):
             for acc in accuracies:
                 acc_val = float(acc)
-                rng = np.random.default_rng(
-                    self.seed + 1000 + mode_idx * 100 + int(acc_val * 1000)
-                )
+                rng = np.random.default_rng(self.seed + 1000 + mode_idx * 100 + int(acc_val * 1000))
                 n = self.trials
 
                 # Latency samples
@@ -268,7 +267,9 @@ class E3SpeculationExperiment:
             evidence_log_row={
                 "experiment": "E3 — Speculative reads",
                 "tested": "Yes",
-                "succeeded": "Gated draft execution hides up to 350ms of tool latency with <3% cost overhead" if all_passed else "Failed",
+                "succeeded": "Gated draft execution hides up to 350ms of tool latency with <3% cost overhead"
+                if all_passed
+                else "Failed",
                 "failed": "None" if all_passed else "Tail latency regression under contention or excessive cost",
                 "still_unproven": "Accuracy calibration with live speculative draft models on cold sessions",
                 "next_action": "Train a 10M parameter speculative header on prefix embeddings",
@@ -295,7 +296,7 @@ class E3SpeculationExperiment:
 
 
 def run_e3_experiment(
-    profile: Optional[LatencyProfile] = None,
+    profile: LatencyProfile | None = None,
     trials: int = 10_000,
     seed: int = 20260825,
 ) -> ExperimentResult:

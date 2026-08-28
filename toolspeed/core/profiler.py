@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
 import threading
 import time
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, field
 from typing import Any
+
 import numpy as np
 
 from toolspeed.core.types import EventType, ExecutionEvent, ExecutionTrace
@@ -15,6 +16,7 @@ from toolspeed.core.types import EventType, ExecutionEvent, ExecutionTrace
 @dataclass
 class SpanRecord:
     """Record of a timed span within a task execution."""
+
     name: str = ""
     span_name: str = ""
     start_ns: int = 0
@@ -49,6 +51,7 @@ class SpanRecord:
 
 class SpanContext:
     """Async & sync context manager for timing spans."""
+
     def __init__(
         self,
         profiler: NanosecondProfiler,
@@ -66,7 +69,12 @@ class SpanContext:
         self.start_ns = time.perf_counter_ns()
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
         end_ns = time.perf_counter_ns()
         if exc_type is not None:
             self.metadata["exception"] = str(exc_val)
@@ -86,13 +94,19 @@ class SpanContext:
     async def __aenter__(self) -> SpanContext:
         return self.__enter__()
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
         self.__exit__(exc_type, exc_val, exc_tb)
 
 
 @dataclass
 class LatencyStats:
     """Statistical summary of latencies (in milliseconds)."""
+
     p50_ms: float = 0.0
     p90_ms: float = 0.0
     p95_ms: float = 0.0
@@ -111,7 +125,13 @@ class LatencyStats:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LatencyStats:
-        return cls(**{k: float(v) if isinstance(v, (int, float)) else v for k, v in data.items() if k in cls.__dataclass_fields__})
+        return cls(
+            **{
+                k: float(v) if isinstance(v, (int, float)) else v
+                for k, v in data.items()
+                if k in cls.__dataclass_fields__
+            }
+        )
 
 
 def calculate_percentiles(values: Sequence[float] | Sequence[int] | np.ndarray) -> LatencyStats:
@@ -133,16 +153,31 @@ def calculate_percentiles(values: Sequence[float] | Sequence[int] | np.ndarray) 
 
 
 class NanosecondProfiler:
-    """Nanosecond-resolution execution profiler and timeline event recorder."""
+    """Nanosecond-resolution execution profiler and timeline event recorder.
 
-    def __init__(self, task_id: str | None = None):
+    Strictly observational: measures elapsed time from actual execution timestamps.
+    Never alters, overrides, or scales elapsed duration based on observed mechanism event labels.
+    """
+
+    def __init__(self, task_id: str | None = None, clock: Any = None):
         self.task_id: str = task_id or "default"
-        self._start_ns: int = time.perf_counter_ns()
+        self.clock = clock
+        self._start_ns: int = self._now_ns()
         self._end_ns: int | None = None
         self._events: list[ExecutionEvent] = []
         self._spans: list[SpanRecord] = []
         self._open_spans: dict[str, int] = {}
         self._lock = threading.Lock()
+
+    def _now_ns(self) -> int:
+        if self.clock is not None and hasattr(self.clock, "now_ns"):
+            return self.clock.now_ns()
+        return time.perf_counter_ns()
+
+    def _now_s(self) -> float:
+        if self.clock is not None and hasattr(self.clock, "now_s"):
+            return self.clock.now_s()
+        return time.perf_counter()
 
     @staticmethod
     def now_ns() -> int:
@@ -150,71 +185,21 @@ class NanosecondProfiler:
 
     def start(self) -> None:
         with self._lock:
-            self._start_ns = time.perf_counter_ns()
+            self._start_ns = self._now_ns()
             self._events.clear()
             self._spans.clear()
             self._open_spans.clear()
 
     def stop(self) -> float:
         with self._lock:
-            self._end_ns = time.perf_counter_ns()
+            self._end_ns = self._now_ns()
             return (self._end_ns - self._start_ns) / 1_000_000.0
 
     def finish(self, ctx: Any = None) -> float:
+        """Complete profiling session and return actual elapsed milliseconds."""
         with self._lock:
-            self._end_ns = time.perf_counter_ns()
-            wall_ms = (self._end_ns - self._start_ns) / 1_000_000.0
-
-            # In virtual-time / replay simulation mode, compute duration from discrete timeline:
-            if ctx is not None and getattr(ctx, "tool_results", None):
-                simulated_tool_results = [r for r in ctx.tool_results if (r.execution_time_ms and r.execution_time_ms > 0.0)]
-                if simulated_tool_results:
-                    return self.compute_virtual_timeline_ms(ctx)
-
-            return wall_ms
-
-    def compute_virtual_timeline_ms(self, ctx: Any) -> float:
-        """Compute critical-path latency from virtual timeline events."""
-        model_duration = sum(getattr(d, "duration_ms", 30.0) or 30.0 for d in getattr(ctx, "model_decisions", []))
-        if model_duration == 0.0 and getattr(ctx, "history", None):
-            model_turns = max(1, len([h for h in ctx.history if h.get("role") == "assistant"]))
-            model_duration = model_turns * 30.0
-
-        # Action bytecode token compression
-        if any(e.event_type in (EventType.BYTECODE_ENCODE, "bytecode_encode") for e in self._events):
-            model_duration = max(5.0, model_duration * 0.6)
-
-        tool_results = list(ctx.tool_results)
-        if not tool_results:
-            return model_duration
-
-        # JIT fusion success eliminates intermediate LLM turns
-        if any(e.event_type in (EventType.JIT_FUSION_SUCCESS, "jit_fusion_success") for e in self._events):
-            tool_duration = sum(r.execution_time_ms for r in tool_results)
-            return 5.0 + tool_duration
-
-        # Parallel vs Serial tool execution
-        is_dag = any(e.event_type in (EventType.DAG_NODE_DISPATCH, EventType.DAG_NODE_READY, "dag_node_dispatch", "dag_node_ready") for e in self._events)
-        parallel_enabled = getattr(ctx.config, "parallelism_enabled", True)
-
-        if is_dag and parallel_enabled:
-            tool_duration = max((0.1 if r.cached else r.execution_time_ms for r in tool_results), default=0.0)
-        else:
-            tool_duration = sum(0.1 if r.cached else r.execution_time_ms for r in tool_results)
-
-        # Speculative hit overlap (concurrent tool execution during reasoning)
-        for e in self._events:
-            if e.event_type in (EventType.SPECULATION_HIT, "speculation_hit"):
-                saved = e.duration_ms or (tool_results[0].execution_time_ms if tool_results else 25.0)
-                tool_duration = max(0.0, tool_duration - saved)
-
-        # Early commit horizon overlap
-        if getattr(ctx.config, "early_dispatch_enabled", False) or getattr(ctx.config, "commit_horizon_enabled", False):
-            if any(e.event_type in (EventType.COMMIT_HORIZON_REACHED, "commit_horizon_reached") for e in self._events):
-                tool_duration = max(0.0, tool_duration * 0.5)
-
-        return model_duration + tool_duration
-
+            self._end_ns = self._now_ns()
+            return (self._end_ns - self._start_ns) / 1_000_000.0
 
     def record_event(
         self,
@@ -226,11 +211,11 @@ class NanosecondProfiler:
         duration_ms: float = 0.0,
         timestamp_ns: int | None = None,
     ) -> ExecutionEvent:
-        ts_ns = timestamp_ns if timestamp_ns is not None else time.perf_counter_ns()
+        ts_ns = timestamp_ns if timestamp_ns is not None else self._now_ns()
         event_data = data or details or {}
         event = ExecutionEvent(
             event_type=event_type,
-            timestamp=time.perf_counter(),
+            timestamp=self._now_s(),
             timestamp_ns=ts_ns,
             task_id=task_id or self.task_id,
             call_id=call_id,
@@ -243,7 +228,7 @@ class NanosecondProfiler:
         return event
 
     def start_span(self, name: str, category: str = "general", metadata: dict[str, Any] | None = None) -> int:
-        ts = time.perf_counter_ns()
+        ts = self._now_ns()
         with self._lock:
             self._open_spans[name] = ts
         return ts
@@ -256,7 +241,7 @@ class NanosecondProfiler:
         event_type: EventType | str | None = None,
         details: dict[str, Any] | None = None,
     ) -> SpanRecord | None:
-        end_ns = time.perf_counter_ns()
+        end_ns = self._now_ns()
         with self._lock:
             start_ns = self._open_spans.pop(name, None)
             if start_ns is None:
@@ -313,30 +298,36 @@ class NanosecondProfiler:
         with self._lock:
             timeline: list[dict[str, Any]] = []
             for e in self._events:
-                timeline.append({
-                    "type": "event",
-                    "timestamp_ns": e.timestamp_ns,
-                    "event_type": str(e.event_type),
-                    "task_id": e.task_id,
-                    "call_id": e.call_id,
-                    "data": e.data,
-                })
+                timeline.append(
+                    {
+                        "type": "event",
+                        "timestamp_ns": e.timestamp_ns,
+                        "event_type": str(e.event_type),
+                        "task_id": e.task_id,
+                        "call_id": e.call_id,
+                        "data": e.data,
+                    }
+                )
             for s in self._spans:
-                timeline.append({
-                    "type": "span_start",
-                    "timestamp_ns": s.start_ns,
-                    "name": s.name,
-                    "category": s.category,
-                    "metadata": s.metadata,
-                })
-                timeline.append({
-                    "type": "span_end",
-                    "timestamp_ns": s.end_ns,
-                    "name": s.name,
-                    "category": s.category,
-                    "duration_ms": s.duration_ms,
-                    "metadata": s.metadata,
-                })
+                timeline.append(
+                    {
+                        "type": "span_start",
+                        "timestamp_ns": s.start_ns,
+                        "name": s.name,
+                        "category": s.category,
+                        "metadata": s.metadata,
+                    }
+                )
+                timeline.append(
+                    {
+                        "type": "span_end",
+                        "timestamp_ns": s.end_ns,
+                        "name": s.name,
+                        "category": s.category,
+                        "duration_ms": s.duration_ms,
+                        "metadata": s.metadata,
+                    }
+                )
             timeline.sort(key=lambda item: item["timestamp_ns"])
             return timeline
 
@@ -466,112 +457,92 @@ class CCLTracker:
 
 
 class LatencyProfiler:
-    """Instruments agent execution with high-resolution timestamps and latency breakdowns."""
+    """Instruments agent execution with high-resolution timestamps and latency breakdowns.
 
-    def __init__(self) -> None:
+    Observational only: never computes synthetic timelines or applies mechanism duration formulas.
+    """
+
+    def __init__(self, task_id: str | None = None, clock: Any = None) -> None:
+        self.task_id = task_id or "default"
+        self.clock = clock
         self.events: list[ExecutionEvent] = []
-        self._start_time: float = time.perf_counter()
+        self._start_time: float = self._now_s()
         self._end_time: float | None = None
         self._active_spans: dict[str, float] = {}
         self._lock = threading.Lock()
 
+    def _now_ns(self) -> int:
+        if self.clock is not None and hasattr(self.clock, "now_ns"):
+            return self.clock.now_ns()
+        return time.perf_counter_ns()
+
+    def _now_s(self) -> float:
+        if self.clock is not None and hasattr(self.clock, "now_s"):
+            return self.clock.now_s()
+        return time.perf_counter()
+
     def start(self) -> None:
         with self._lock:
-            self._start_time = time.perf_counter()
+            self._start_time = self._now_s()
             self.events.clear()
         self.record_event(EventType.TASK_START)
 
     def finish(self, ctx: Any = None) -> float:
         with self._lock:
-            self._end_time = time.perf_counter()
+            self._end_time = self._now_s()
             duration_ms = (self._end_time - self._start_time) * 1000.0
-
-            if ctx is not None and getattr(ctx, "tool_results", None):
-                simulated_tool_results = [r for r in ctx.tool_results if (r.execution_time_ms and r.execution_time_ms > 0.0)]
-                if simulated_tool_results:
-                    duration_ms = self.compute_virtual_timeline_ms(ctx)
 
         self.record_event(EventType.TASK_END, duration_ms=duration_ms)
         return duration_ms
-
-    def compute_virtual_timeline_ms(self, ctx: Any) -> float:
-        """Compute critical-path latency from virtual timeline events."""
-        model_duration = sum(getattr(d, "duration_ms", 30.0) or 30.0 for d in getattr(ctx, "model_decisions", []))
-        if model_duration == 0.0 and getattr(ctx, "history", None):
-            model_turns = max(1, len([h for h in ctx.history if h.get("role") == "assistant"]))
-            model_duration = model_turns * 30.0
-
-        # Action bytecode token compression
-        if any(e.event_type in (EventType.BYTECODE_ENCODE, "bytecode_encode") for e in self.events):
-            model_duration = max(5.0, model_duration * 0.6)
-
-        tool_results = list(ctx.tool_results)
-        if not tool_results:
-            return model_duration
-
-        # JIT fusion success eliminates intermediate LLM turns
-        if any(e.event_type in (EventType.JIT_FUSION_SUCCESS, "jit_fusion_success") for e in self.events):
-            tool_duration = sum(r.execution_time_ms for r in tool_results)
-            return 5.0 + tool_duration
-
-        # Parallel vs Serial tool execution
-        is_dag = any(e.event_type in (EventType.DAG_NODE_DISPATCH, EventType.DAG_NODE_READY, "dag_node_dispatch", "dag_node_ready") for e in self.events)
-        parallel_enabled = getattr(ctx.config, "parallelism_enabled", True)
-
-        if is_dag and parallel_enabled:
-            tool_duration = max((0.1 if r.cached else r.execution_time_ms for r in tool_results), default=0.0)
-        else:
-            tool_duration = sum(0.1 if r.cached else r.execution_time_ms for r in tool_results)
-
-        # Speculative hit overlap (concurrent tool execution during reasoning)
-        for e in self.events:
-            if e.event_type in (EventType.SPECULATION_HIT, "speculation_hit"):
-                saved = e.duration_ms or (tool_results[0].execution_time_ms if tool_results else 25.0)
-                tool_duration = max(0.0, tool_duration - saved)
-
-        # Early commit horizon overlap
-        if getattr(ctx.config, "early_dispatch_enabled", False) or getattr(ctx.config, "commit_horizon_enabled", False):
-            if any(e.event_type in (EventType.COMMIT_HORIZON_REACHED, "commit_horizon_reached") for e in self.events):
-                tool_duration = max(0.0, tool_duration * 0.5)
-
-        return model_duration + tool_duration
 
     def record_event(
         self,
         event_type: EventType | str,
         duration_ms: float = 0.0,
         details: dict[str, Any] | None = None,
+        task_id: str | None = None,
+        call_id: str | None = None,
+        data: dict[str, Any] | None = None,
     ) -> ExecutionEvent:
+        event_data = data or details or {}
         event = ExecutionEvent(
             event_type=event_type,
-            timestamp=time.perf_counter(),
-            timestamp_ns=time.perf_counter_ns(),
+            timestamp=self._now_s(),
+            timestamp_ns=self._now_ns(),
             duration_ms=duration_ms,
-            details=details or {},
-            data=details or {},
+            task_id=task_id or self.task_id,
+            call_id=call_id,
+            details=event_data,
+            data=event_data,
         )
         with self._lock:
             self.events.append(event)
         return event
 
-    def start_span(self, span_name: str) -> None:
+    def start_span(self, span_name: str, category: str = "general", metadata: dict[str, Any] | None = None) -> float:
         with self._lock:
-            self._active_spans[span_name] = time.perf_counter()
+            ts = self._now_s()
+            self._active_spans[span_name] = ts
+            return ts
 
     def end_span(
-        self, span_name: str, event_type: EventType | str, details: dict[str, Any] | None = None
+        self,
+        span_name: str,
+        event_type: EventType | str | None = None,
+        details: dict[str, Any] | None = None,
+        category: str = "general",
+        metadata: dict[str, Any] | None = None,
     ) -> float:
         with self._lock:
-            start = self._active_spans.pop(span_name, time.perf_counter())
-        duration_ms = (time.perf_counter() - start) * 1000.0
-        self.record_event(event_type, duration_ms=duration_ms, details=details)
+            start = self._active_spans.pop(span_name, self._now_s())
+        duration_ms = (self._now_s() - start) * 1000.0
+        if event_type is not None:
+            self.record_event(event_type, duration_ms=duration_ms, details=details or metadata)
         return duration_ms
 
     def get_summary(self) -> dict[str, Any]:
         with self._lock:
-            total_ms = (
-                ((self._end_time or time.perf_counter()) - self._start_time) * 1000.0
-            )
+            total_ms = ((self._end_time or self._now_s()) - self._start_time) * 1000.0
             model_ms = sum(
                 e.duration_ms for e in self.events if str(e.event_type) in (EventType.MODEL_END.value, "model_end")
             )
@@ -579,7 +550,9 @@ class LatencyProfiler:
                 e.duration_ms for e in self.events if str(e.event_type) in (EventType.TOOL_END.value, "tool_end")
             )
             speculation_saved_ms = sum(
-                e.duration_ms for e in self.events if str(e.event_type) in (EventType.SPECULATION_HIT.value, "speculation_hit")
+                e.duration_ms
+                for e in self.events
+                if str(e.event_type) in (EventType.SPECULATION_HIT.value, "speculation_hit")
             )
             cache_hits = sum(1 for e in self.events if str(e.event_type) in (EventType.CACHE_HIT.value, "cache_hit"))
 
@@ -608,9 +581,7 @@ def compute_latency_stats(latencies: list[float]) -> dict[str, float]:
     }
 
 
-def compute_speedup(
-    baseline_stats: dict[str, float], candidate_stats: dict[str, float]
-) -> dict[str, float]:
+def compute_speedup(baseline_stats: dict[str, float], candidate_stats: dict[str, float]) -> dict[str, float]:
     res: dict[str, float] = {}
     for metric in ("p50_ms", "p90_ms", "p95_ms", "p99_ms", "mean_ms"):
         b_val = baseline_stats.get(metric, 0.0)

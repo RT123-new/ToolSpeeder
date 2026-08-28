@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 import numpy as np
 
 from toolspeed.adapters.base import BaseToolAdapter
@@ -19,7 +20,7 @@ from toolspeed.workloads.base import BaseWorkload
 
 class W6ColdStartWorkload(BaseWorkload):
     """Workload Family 6: Cold-Start Sandboxes.
-    
+
     Evaluates latency impact of cold-start container initialization vs predictive
     pre-warming and container pooling.
     """
@@ -98,7 +99,9 @@ class W6ColdStartWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: ExecutionTrace | None) -> tuple[bool, str, dict[str, Any]]:
+        def _validate(
+            task: TaskInstance, output: Any, trace: ExecutionTrace | None
+        ) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 

@@ -10,7 +10,8 @@ Evaluates hypothesis:
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 import numpy as np
 
 from toolspeed.experiments.runner import (
@@ -18,7 +19,6 @@ from toolspeed.experiments.runner import (
     FalsificationVerdict,
     HypothesisCheck,
     LatencyProfile,
-    MetricSummary,
     WorkloadFamily,
     compute_summary,
     samples,
@@ -30,7 +30,7 @@ class E4CommitHorizonExperiment:
 
     def __init__(
         self,
-        profile: Optional[LatencyProfile] = None,
+        profile: LatencyProfile | None = None,
         trials: int = 10_000,
         seed: int = 20260825,
     ) -> None:
@@ -44,10 +44,9 @@ class E4CommitHorizonExperiment:
         target_fraction: float = 0.4,
     ) -> ExperimentResult:
         start_time = time.perf_counter()
-        rows: List[Dict[str, Any]] = []
-        checks: List[HypothesisCheck] = []
+        rows: list[dict[str, Any]] = []
+        checks: list[HypothesisCheck] = []
 
-        target_summary: Optional[MetricSummary] = None
         all_mutation_counts: int = 0
         total_trials_simulated: int = 0
 
@@ -86,7 +85,6 @@ class E4CommitHorizonExperiment:
                 extra={"commit_fraction": f_val},
             )
 
-            start_p95_red = (summary.tool_start_p50_ms)  # stored in summary
             p95_red = (summary.baseline_p95_ms - summary.candidate_p95_ms) / summary.baseline_p95_ms
 
             t_base_p95 = float(np.percentile(baseline_tool_start, 95))
@@ -103,7 +101,7 @@ class E4CommitHorizonExperiment:
             rows.append(row_data)
 
             if abs(f_val - target_fraction) < 0.05:
-                target_summary = summary
+                pass
 
         # Falsification Checks
         # 1. Tool start time P95 improvement >= 10% (at commit_fraction <= 0.6)
@@ -167,7 +165,9 @@ class E4CommitHorizonExperiment:
             evidence_log_row={
                 "experiment": "E4 — Commit-horizon dispatch",
                 "tested": "Yes",
-                "succeeded": f"Starting tools at argument commit point saves ~{self.profile.model_decision_ms * (1-target_fraction):.0f}ms before full JSON termination" if all_passed else "Failed",
+                "succeeded": f"Starting tools at argument commit point saves ~{self.profile.model_decision_ms * (1 - target_fraction):.0f}ms before full JSON termination"
+                if all_passed
+                else "Failed",
                 "failed": "None" if all_passed else "Argument mutation or insufficient latency gain",
                 "still_unproven": "Streaming token parser integration with streaming server transports",
                 "next_action": "Build AST streaming parser hook for token generation loops",
@@ -194,7 +194,7 @@ class E4CommitHorizonExperiment:
 
 
 def run_e4_experiment(
-    profile: Optional[LatencyProfile] = None,
+    profile: LatencyProfile | None = None,
     trials: int = 10_000,
     seed: int = 20260825,
 ) -> ExperimentResult:

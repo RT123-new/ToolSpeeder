@@ -14,12 +14,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 from typing import Any
 
 from toolspeed.benchmarks.harness import BenchmarkConfig, BenchmarkHarness
-from toolspeed.core.types import EvidenceLevel, VerdictState, strict_json_dumps
+from toolspeed.core.types import EvidenceLevel, VerdictState
 from toolspeed.experiments.e1_dag_runner import E1DAGExperiment
 from toolspeed.experiments.e2_fusion_runner import E2FusionExperiment
 from toolspeed.experiments.e3_spec_runner import E3SpeculationExperiment
@@ -51,7 +51,7 @@ def _load_bundle_data(bundle_path_str: str) -> tuple[dict[str, Any], Path]:
     if not target.exists():
         raise FileNotFoundError(f"Bundle file not found: {target}")
 
-    with open(target, "r", encoding="utf-8") as f:
+    with open(target, encoding="utf-8") as f:
         data = json.load(f)
     return data, target.parent
 
@@ -63,7 +63,9 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     out_dir = Path(args.out or "artifacts/synthetic")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n⚡ ToolSpeed: Running synthetic simulation '{exp_name.upper()}' ({args.trials:,} trials, seed={args.seed})...\n")
+    print(
+        f"\n⚡ ToolSpeed: Running synthetic simulation '{exp_name.upper()}' ({args.trials:,} trials, seed={args.seed})...\n"
+    )
 
     if exp_name in ("e1", "e1_dag"):
         res = E1DAGExperiment(profile=profile, trials=args.trials, seed=args.seed).run()
@@ -76,7 +78,9 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     elif exp_name in ("e5", "e5_bytecode"):
         res = E5BytecodeExperiment(profile=profile, trials=args.trials, seed=args.seed).run()
     elif exp_name == "all":
-        suite = SuiteRunner(profile=profile, trials=args.trials, seed=args.seed, evidence_level=EvidenceLevel.SYNTHETIC).run()
+        suite = SuiteRunner(
+            profile=profile, trials=args.trials, seed=args.seed, evidence_level=EvidenceLevel.SYNTHETIC
+        ).run()
         artifacts = save_all_reports(suite, out_dir)
         print(f"✅ Synthetic simulation completed in {suite.total_runtime_sec:.2f}s.")
         print(f"Artifacts saved to: {out_dir}")
@@ -96,7 +100,11 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     for c in res.verdict.checks:
         status = "PASS" if c.passed else "FAIL"
         check_rows.append([c.name, c.target, str(c.measured), status])
-    print(ascii_table(["Hypothesis Check", "Target", "Measured", "Status"], check_rows, ["left", "left", "left", "center"]))
+    print(
+        ascii_table(
+            ["Hypothesis Check", "Target", "Measured", "Status"], check_rows, ["left", "left", "left", "center"]
+        )
+    )
     return 0
 
 
@@ -110,10 +118,12 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     default_trials = 200 if backend_mode == "local" else 1000
     trials = args.trials if args.trials is not None else default_trials
 
-    print(f"\n=======================================================")
+    print("\n=======================================================")
     print(f"🚀 ToolSpeed Paired Benchmark Suite ({backend_mode.upper()} Backend)")
-    print(f"=======================================================")
-    print(f"Evidence Level: {evidence_level.value} | Trials: {trials} per condition | Seed: {args.seed} | Out: {out_dir}\n")
+    print("=======================================================")
+    print(
+        f"Evidence Level: {evidence_level.value} | Trials: {trials} per condition | Seed: {args.seed} | Out: {out_dir}\n"
+    )
 
     config = BenchmarkConfig(
         trials_per_condition=trials,
@@ -131,7 +141,9 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
 
     print("\n📊 Paired Benchmark Evaluation Summary (P95 CCL Speedup):")
     bar_data = {
-        eval_item.workload_id + " (" + eval_item.candidate_name + " vs " + eval_item.baseline_name + ")": (eval_item.summary.p95_speedup or 1.0)
+        eval_item.workload_id + " (" + eval_item.candidate_name + " vs " + eval_item.baseline_name + ")": (
+            eval_item.summary.p95_speedup or 1.0
+        )
         for eval_item in result.evaluations
     }
     print(ascii_bar_chart(bar_data, max_bar_width=30, unit="x"))
@@ -139,36 +151,56 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     print("\n📋 Canonical Workload Matrix (W1 – W7, E5a):")
     wl_table_rows = []
     for e in result.evaluations:
-        status = "PASS" if e.verdict.passed else ("INCONCLUSIVE" if e.verdict.state == VerdictState.INCONCLUSIVE else "FAIL")
+        status = (
+            "PASS" if e.verdict.passed else ("INCONCLUSIVE" if e.verdict.state == VerdictState.INCONCLUSIVE else "FAIL")
+        )
         b95 = f"{e.summary.baseline_p95_ms:.1f}ms" if e.summary.baseline_p95_ms is not None else "null"
         c95 = f"{e.summary.candidate_p95_ms:.1f}ms" if e.summary.candidate_p95_ms is not None else "null"
         sp = f"{e.summary.p95_speedup:.2f}x" if e.summary.p95_speedup is not None else "null"
         succ = f"{e.summary.candidate_success_rate:.1%}" if e.summary.candidate_success_rate is not None else "null"
-        wl_table_rows.append([
-            e.workload_id,
-            f"{e.candidate_name} vs {e.baseline_name}",
-            b95,
-            c95,
-            sp,
-            succ,
-            status,
-        ])
-    print(ascii_table(["ID", "Comparison", "Base P95", "Cand P95", "Speedup", "Success", "Status"], wl_table_rows, ["left", "left", "right", "right", "right", "right", "center"]))
+        wl_table_rows.append(
+            [
+                e.workload_id,
+                f"{e.candidate_name} vs {e.baseline_name}",
+                b95,
+                c95,
+                sp,
+                succ,
+                status,
+            ]
+        )
+    print(
+        ascii_table(
+            ["ID", "Comparison", "Base P95", "Cand P95", "Speedup", "Success", "Status"],
+            wl_table_rows,
+            ["left", "left", "right", "right", "right", "right", "center"],
+        )
+    )
 
     if result.negative_controls:
         print("\n🔬 Negative Control Verification:")
         neg_rows = []
         for nc in result.negative_controls:
-            neg_rows.append([nc["control"], f"{nc['p95_speedup']:.2f}x", "PASS" if nc["passed_expected_null"] else "FAIL", nc["detail"]])
-        print(ascii_table(["Control", "Measured Speedup", "Null Check", "Detail"], neg_rows, ["left", "right", "center", "left"]))
+            neg_rows.append(
+                [
+                    nc["control"],
+                    f"{nc['p95_speedup']:.2f}x",
+                    "PASS" if nc["passed_expected_null"] else "FAIL",
+                    nc["detail"],
+                ]
+            )
+        print(
+            ascii_table(
+                ["Control", "Measured Speedup", "Null Check", "Detail"], neg_rows, ["left", "right", "center", "left"]
+            )
+        )
 
     print(f"\n📁 Benchmark Bundle saved to: {out_dir}")
     print(f"⏱️ Total runtime: {result.total_runtime_s:.2f}s | Overall Verdict: {result.overall_verdict.value}\n")
 
-    if getattr(args, "require_pass", False):
-        if result.overall_verdict != VerdictState.PASSED:
-            print(f"❌ Failure: --require-pass specified and overall verdict is '{result.overall_verdict.value}'")
-            return 1
+    if getattr(args, "require_pass", False) and result.overall_verdict != VerdictState.PASSED:
+        print(f"❌ Failure: --require-pass specified and overall verdict is '{result.overall_verdict.value}'")
+        return 1
 
     return 0
 
@@ -205,8 +237,8 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_falsify(args: argparse.Namespace) -> int:
     """Evaluate hypothesis falsification status from an existing benchmark bundle."""
-    print(f"\n🔬 ToolSpeed Scientific Falsification Evaluator")
-    print(f"================================================\n")
+    print("\n🔬 ToolSpeed Scientific Falsification Evaluator")
+    print("================================================\n")
 
     input_path = getattr(args, "input", None)
     if not input_path:
@@ -234,7 +266,9 @@ def cmd_falsify(args: argparse.Namespace) -> int:
 
     min_required = 1000 if ev_level == "replay_integration" else 200
     if not is_eligible or trial_count < min_required:
-        print(f"⚠️ Smoke run / Insufficient sample size (n={trial_count} < {min_required}). Marked SMOKE — NOT VERDICT-ELIGIBLE.")
+        print(
+            f"⚠️ Smoke run / Insufficient sample size (n={trial_count} < {min_required}). Marked SMOKE — NOT VERDICT-ELIGIBLE."
+        )
         print("  => Exit code 2 (Inconclusive).")
         return 2
 
@@ -253,11 +287,21 @@ def cmd_falsify(args: argparse.Namespace) -> int:
         is_pass = verd.get("passed", False)
         if not is_pass:
             all_passed = False
-        sp = f"{summ.get('p95_speedup', 0.0):.2f}x" if summ.get('p95_speedup') is not None else "null"
-        succ = f"{summ.get('candidate_success_rate', 0.0):.1%}" if summ.get('candidate_success_rate') is not None else "null"
+        sp = f"{summ.get('p95_speedup', 0.0):.2f}x" if summ.get("p95_speedup") is not None else "null"
+        succ = (
+            f"{summ.get('candidate_success_rate', 0.0):.1%}"
+            if summ.get("candidate_success_rate") is not None
+            else "null"
+        )
         rows.append([wl, comp, sp, succ, "✅ PASS" if is_pass else "❌ FAIL"])
 
-    print(ascii_table(["Workload", "Comparison", "P95 Speedup", "Success Rate", "Status"], rows, ["left", "left", "right", "right", "center"]))
+    print(
+        ascii_table(
+            ["Workload", "Comparison", "P95 Speedup", "Success Rate", "Status"],
+            rows,
+            ["left", "left", "right", "right", "center"],
+        )
+    )
 
     if all_passed:
         print(f"\n✅ Result: ALL HYPOTHESES PASSED under evidence level '{ev_level}'.")
@@ -291,7 +335,14 @@ def cmd_validate_bundle(args: argparse.Namespace) -> int:
         checks_passed = False
     else:
         print("✅ PASS: ArtifactManifest present.")
-        required_manifest_fields = ["code_git_sha", "evidence_level", "trial_count", "benchmark_config_hash", "workload_fixture_hash", "raw_trace_hash"]
+        required_manifest_fields = [
+            "code_git_sha",
+            "evidence_level",
+            "trial_count",
+            "benchmark_config_hash",
+            "workload_fixture_hash",
+            "raw_trace_hash",
+        ]
         for f in required_manifest_fields:
             if f not in manifest:
                 print(f"❌ FAILED: Manifest missing required field '{f}'")
@@ -328,7 +379,27 @@ def cmd_validate_bundle(args: argparse.Namespace) -> int:
             print(f"❌ FAILED [{e.get('workload_id')}]: Found {side_effects} unapproved side-effects!")
             checks_passed = False
 
-    # 4. Report files existence
+    # 4. File byte SHA-256 hash provenance verification
+    file_hashes = manifest.get("file_hashes", {}) if manifest else {}
+    if file_hashes and parent_dir.is_dir():
+        from toolspeed.core.types import compute_file_sha256
+        print("🔐 Verifying bundle file SHA-256 byte hashes...")
+        for fname, expected_hash in file_hashes.items():
+            if fname == "manifest.json":
+                continue
+            fpath = parent_dir / fname
+            if not fpath.exists():
+                print(f"❌ FAILED: File '{fname}' listed in manifest file_hashes does not exist.")
+                checks_passed = False
+            else:
+                actual_hash = compute_file_sha256(fpath)
+                if actual_hash != expected_hash:
+                    print(f"❌ FAILED: File '{fname}' hash mismatch! Expected {expected_hash}, computed {actual_hash}")
+                    checks_passed = False
+                else:
+                    print(f"  • {fname} SHA-256 verified ({actual_hash[:12]}...)")
+
+    # 5. Report files existence
     if parent_dir.is_dir():
         if (parent_dir / "report.md").exists() and (parent_dir / "report.html").exists():
             print("✅ PASS: report.md and report.html verified on disk.")
@@ -346,6 +417,7 @@ def cmd_validate_bundle(args: argparse.Namespace) -> int:
 def cmd_test(args: argparse.Namespace) -> int:
     """Run unittest suite and adversarial integrity tests."""
     import unittest
+
     suite = unittest.defaultTestLoader.discover(start_dir="tests", pattern="test_*.py")
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
@@ -361,7 +433,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # simulate
     p_sim = subparsers.add_parser("simulate", aliases=["run"], help="Run synthetic analytical simulation")
-    p_sim.add_argument("--experiment", "-e", choices=["e1", "e2", "e3", "e4", "e5", "all"], default="all", help="Experiment ID")
+    p_sim.add_argument(
+        "--experiment", "-e", choices=["e1", "e2", "e3", "e4", "e5", "all"], default="all", help="Experiment ID"
+    )
     p_sim.add_argument("--trials", "-n", type=int, default=1000, help="Number of trials per condition")
     p_sim.add_argument("--seed", "-s", type=int, default=20260825, help="Random seed")
     p_sim.add_argument("--out", "-o", type=str, default="artifacts/synthetic", help="Output directory")
@@ -369,7 +443,13 @@ def main(argv: list[str] | None = None) -> int:
     # benchmark
     p_bm = subparsers.add_parser("benchmark", help="Run real paired benchmark suite on Replay or Local backends")
     p_bm.add_argument("--backend", "-b", choices=["replay", "local"], default="replay", help="Execution backend")
-    p_bm.add_argument("--trials", "-n", type=int, default=None, help="Number of trials per condition (defaults: replay=1000, local=200)")
+    p_bm.add_argument(
+        "--trials",
+        "-n",
+        type=int,
+        default=None,
+        help="Number of trials per condition (defaults: replay=1000, local=200)",
+    )
     p_bm.add_argument("--seed", "-s", type=int, default=20260825, help="Random seed")
     p_bm.add_argument("--concurrency", "-c", type=int, default=16, help="Concurrency limit")
     p_bm.add_argument("--out", "-o", type=str, default=None, help="Output directory")
@@ -386,7 +466,9 @@ def main(argv: list[str] | None = None) -> int:
     p_rep.add_argument("--out", "-o", type=str, default=None, help="Output directory for generated reports")
 
     # validate-bundle
-    p_val = subparsers.add_parser("validate-bundle", help="Verify structural integrity, hash provenance, and verdict eligibility")
+    p_val = subparsers.add_parser(
+        "validate-bundle", help="Verify structural integrity, hash provenance, and verdict eligibility"
+    )
     p_val.add_argument("--input", "-i", type=str, required=True, help="Path to result bundle JSON or directory")
 
     # test

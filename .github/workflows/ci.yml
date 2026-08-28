@@ -5,10 +5,11 @@ on:
     branches: [ main, "repair/**" ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  test:
-    name: Test (Python ${{ matrix.python-version }})
+  matrix-compatibility:
+    name: Compatibility Matrix (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -23,7 +24,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Install package and development dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
@@ -32,43 +33,81 @@ jobs:
         run: |
           ruff check .
 
-      - name: Run Full Unit & Adversarial Test Suite with Coverage
+      - name: Run Full Unit & Adversarial Test Suite
         run: |
-          coverage run -m unittest discover -s tests -p "test_*.py"
-          coverage report -m
-
-      - name: Run 45 Adversarial Scientific Integrity Tests
-        run: |
-          python -m unittest tests/test_adversarial_integrity.py
-
-      - name: Run Synthetic Simulation
-        run: |
-          python -m toolspeed.cli simulate --trials 200 --out artifacts/synthetic
-
-      - name: Run Deterministic Replay Benchmark Suite
-        run: |
-          python -m toolspeed.cli benchmark --backend replay --trials 1000 --out artifacts/replay
-
-      - name: Validate Replay Result Bundle
-        run: |
-          python -m toolspeed.cli validate-bundle --input artifacts/replay
-
-      - name: Run Falsification Evaluation on Replay Bundle
-        run: |
-          python -m toolspeed.cli falsify --input artifacts/replay
-
-      - name: Run Real Local Wall-Clock Benchmark Suite
-        run: |
-          python -m toolspeed.cli benchmark --backend local --trials 200 --out artifacts/local
-
-      - name: Validate Local Result Bundle
-        run: |
-          python -m toolspeed.cli validate-bundle --input artifacts/local
-
-      - name: Run Falsification Evaluation on Local Bundle
-        run: |
-          python -m toolspeed.cli falsify --input artifacts/local
+          python -m unittest discover -s tests -p "test_*.py"
 
       - name: Build Wheel Distribution Package
         run: |
           python -m build
+
+  benchmark-smoke:
+    name: Benchmark Smoke (Python 3.12, Non-Verdict-Eligible)
+    runs-on: ubuntu-latest
+    needs: [matrix-compatibility]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Synthetic Simulation Smoke
+        run: |
+          python -m toolspeed.cli simulate --trials 10 --out /tmp/smoke-synthetic
+
+      - name: Run Replay Benchmark Smoke (10 trials)
+        run: |
+          python -m toolspeed.cli benchmark --backend replay --trials 10 --out /tmp/smoke-replay
+
+      - name: Run Local Wall-Clock Benchmark Smoke (5 trials)
+        run: |
+          python -m toolspeed.cli benchmark --backend local --trials 5 --out /tmp/smoke-local
+
+  full-evidence:
+    name: Full Evidence Sweep (Replay 1000 & Local 200)
+    runs-on: ubuntu-latest
+    needs: [benchmark-smoke]
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Deterministic Replay Benchmark (1,000 trials)
+        run: |
+          python -m toolspeed.cli benchmark --backend replay --trials 1000 --out /tmp/evidence-replay
+
+      - name: Validate Replay Bundle
+        run: |
+          python -m toolspeed.cli validate-bundle --input /tmp/evidence-replay
+
+      - name: Falsification on Replay Bundle
+        run: |
+          python -m toolspeed.cli falsify --input /tmp/evidence-replay
+
+      - name: Run Local Wall-Clock Benchmark (200 trials)
+        run: |
+          python -m toolspeed.cli benchmark --backend local --trials 200 --out /tmp/evidence-local
+
+      - name: Validate Local Bundle
+        run: |
+          python -m toolspeed.cli validate-bundle --input /tmp/evidence-local
+
+      - name: Falsification on Local Bundle
+        run: |
+          python -m toolspeed.cli falsify --input /tmp/evidence-local

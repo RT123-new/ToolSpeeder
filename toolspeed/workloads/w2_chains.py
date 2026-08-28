@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 import hashlib
+from collections.abc import Sequence
 from typing import Any
+
 import numpy as np
 
 from toolspeed.adapters.base import BaseToolAdapter
@@ -21,13 +22,13 @@ from toolspeed.workloads.base import BaseWorkload
 
 def _compute_step_transform(step: int, input_data: str) -> str:
     """Deterministic transformation step function."""
-    h = hashlib.sha256(f"step_{step}:{input_data}".encode("utf-8")).hexdigest()[:12]
+    h = hashlib.sha256(f"step_{step}:{input_data}".encode()).hexdigest()[:12]
     return f"{input_data}->s{step}_{h}"
 
 
 class W2ChainsWorkload(BaseWorkload):
     """Workload Family 2: Deterministic Dependent Chains.
-    
+
     Evaluates serial multi-turn LLM reasoning vs programmatic workflow fusion.
     """
 
@@ -94,7 +95,7 @@ class W2ChainsWorkload(BaseWorkload):
             task = TaskInstance(
                 task_id=f"w2_task_{idx:04d}_d{depth}",
                 workload_family="w2_chains",
-                prompt=f"Run a {depth}-step deterministic pipeline starting with input '{initial_seed}' through steps 0 to {depth-1}.",
+                prompt=f"Run a {depth}-step deterministic pipeline starting with input '{initial_seed}' through steps 0 to {depth - 1}.",
                 expected_tools=["execute_pipeline_step"],
                 expected_output={"final_value": current_val, "depth": depth},
                 parameters={"depth": depth, "initial_input": initial_seed},
@@ -105,7 +106,9 @@ class W2ChainsWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: ExecutionTrace | None) -> tuple[bool, str, dict[str, Any]]:
+        def _validate(
+            task: TaskInstance, output: Any, trace: ExecutionTrace | None
+        ) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 
@@ -119,7 +122,8 @@ class W2ChainsWorkload(BaseWorkload):
             if trace is not None:
                 expected_depth = task.parameters.get("depth", 0)
                 step_calls = [
-                    c for c in trace.tool_calls
+                    c
+                    for c in trace.tool_calls
                     if (c.tool_name == "execute_pipeline_step" or c.name == "execute_pipeline_step")
                 ]
                 # Fail if model emitted answer without running required steps

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 import numpy as np
 
 from toolspeed.adapters.base import BaseToolAdapter
@@ -20,7 +21,7 @@ from toolspeed.workloads.base import BaseWorkload
 
 class W7SideEffectsWorkload(BaseWorkload):
     """Workload Family 7: Side-Effecting Mutations.
-    
+
     Evaluates safety guardrails for irreversible actions requiring explicit human/policy
     approval and cryptographic/unique idempotency keys.
     """
@@ -32,9 +33,7 @@ class W7SideEffectsWorkload(BaseWorkload):
     ):
         self.median_tool_ms = median_tool_ms
         self.sigma = sigma
-        self.accounts: dict[str, float] = {
-            f"acc_{i:03d}": 10_000.0 for i in range(100)
-        }
+        self.accounts: dict[str, float] = {f"acc_{i:03d}": 10_000.0 for i in range(100)}
         self.processed_idempotency_keys: dict[str, dict[str, Any]] = {}
 
     def get_spec(self) -> WorkloadSpec:
@@ -148,9 +147,7 @@ class W7SideEffectsWorkload(BaseWorkload):
                     "amount": amount,
                     "idempotency_key": idempotency_key,
                 },
-                expected_args={
-                    "execute_fund_transfer": expected_args
-                },
+                expected_args={"execute_fund_transfer": expected_args},
                 parameters={
                     "from_account": from_acc,
                     "to_account": to_acc,
@@ -165,7 +162,9 @@ class W7SideEffectsWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: ExecutionTrace | None) -> tuple[bool, str, dict[str, Any]]:
+        def _validate(
+            task: TaskInstance, output: Any, trace: ExecutionTrace | None
+        ) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 
@@ -179,9 +178,10 @@ class W7SideEffectsWorkload(BaseWorkload):
 
             if trace is not None:
                 for call in trace.tool_calls:
-                    if (call.tool_name == "execute_fund_transfer" or call.name == "execute_fund_transfer"):
-                        if not call.arguments.get("idempotency_key"):
-                            return False, "Side-effect tool call missing idempotency key!", {}
+                    if (
+                        call.tool_name == "execute_fund_transfer" or call.name == "execute_fund_transfer"
+                    ) and not call.arguments.get("idempotency_key"):
+                        return False, "Side-effect tool call missing idempotency key!", {}
 
             return True, "Side-effect mutation validated successfully", {"status": output.get("status")}
 

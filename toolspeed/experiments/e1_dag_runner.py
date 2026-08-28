@@ -11,7 +11,8 @@ Evaluates hypothesis:
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 import numpy as np
 
 from toolspeed.experiments.runner import (
@@ -19,7 +20,6 @@ from toolspeed.experiments.runner import (
     FalsificationVerdict,
     HypothesisCheck,
     LatencyProfile,
-    MetricSummary,
     WorkloadFamily,
     compute_summary,
     samples,
@@ -31,7 +31,7 @@ class E1DAGExperiment:
 
     def __init__(
         self,
-        profile: Optional[LatencyProfile] = None,
+        profile: LatencyProfile | None = None,
         trials: int = 10_000,
         seed: int = 20260825,
     ) -> None:
@@ -42,19 +42,19 @@ class E1DAGExperiment:
     def run(
         self,
         fanouts: tuple[int, ...] = (2, 4, 8, 16, 32),
-        concurrency_limit: Optional[int] = None,
-        rate_limit_capacity: Optional[int] = None,
+        concurrency_limit: int | None = None,
+        rate_limit_capacity: int | None = None,
         test_false_independence: bool = True,
     ) -> ExperimentResult:
         start_time = time.perf_counter()
-        rows: List[Dict[str, Any]] = []
-        checks: List[HypothesisCheck] = []
+        rows: list[dict[str, Any]] = []
+        checks: list[HypothesisCheck] = []
 
         rl_cap = rate_limit_capacity or self.profile.rate_limit_capacity
 
-        p95_improvements: List[float] = []
-        success_deltas: List[float] = []
-        rl_increases: List[float] = []
+        p95_improvements: list[float] = []
+        success_deltas: list[float] = []
+        rl_increases: list[float] = []
 
         for calls in fanouts:
             rng = np.random.default_rng(self.seed + calls)
@@ -142,7 +142,9 @@ class E1DAGExperiment:
             fi_row = {
                 "independent_calls": "4_with_hidden_dep",
                 "concurrency_limit": "DAG_ordered",
-                "p95_reduction_pct": float((fi_summary.baseline_p95_ms - fi_summary.candidate_p95_ms) / fi_summary.baseline_p95_ms * 100.0),
+                "p95_reduction_pct": float(
+                    (fi_summary.baseline_p95_ms - fi_summary.candidate_p95_ms) / fi_summary.baseline_p95_ms * 100.0
+                ),
                 "rate_limit_increase_pp": 0.0,
             }
             fi_row.update(fi_summary.to_dict())
@@ -229,7 +231,9 @@ class E1DAGExperiment:
             evidence_log_row={
                 "experiment": "E1 — DAG parallelism",
                 "tested": "Yes",
-                "succeeded": "Parallel wave dispatch reduces P95 CCL by up to 70% with zero success loss" if all_passed else "Failed",
+                "succeeded": "Parallel wave dispatch reduces P95 CCL by up to 70% with zero success loss"
+                if all_passed
+                else "Failed",
                 "failed": "None" if all_passed else "Tail latency or rate-limit regression",
                 "still_unproven": "Live dynamic multi-tenant RPC rate-limiting feedback",
                 "next_action": "Integrate with live client transport and backpressure monitor",
@@ -257,7 +261,7 @@ class E1DAGExperiment:
 
 
 def run_e1_experiment(
-    profile: Optional[LatencyProfile] = None,
+    profile: LatencyProfile | None = None,
     trials: int = 10_000,
     seed: int = 20260825,
 ) -> ExperimentResult:

@@ -15,12 +15,12 @@ from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, Scheduler
 
 class ActionBytecodeCodec:
     """E5a: Compact binary transport codec for tool calls.
-    
+
     Format:
       [Version (1B)] [Opcode (2B >H)] [ArgCount (2B >H)]
       Repeated per argument:
         [KeyLen (2B >H)] [ValLen (4B >I)] [KeyBytes] [ValBytes (JSON)]
-        
+
     Enforces:
       - Max packet size: 64 MB
       - Max key length: 64 KB
@@ -30,6 +30,7 @@ class ActionBytecodeCodec:
       - Rejection of unknown opcodes and trailing bytes
       - No dynamic opcode registration during encode
     """
+
     PROTOCOL_VERSION = 0x02
     MAX_PACKET_SIZE = 64 * 1024 * 1024
     MAX_KEY_LEN = 65535
@@ -44,11 +45,15 @@ class ActionBytecodeCodec:
 
         if tool_specs:
             for idx, spec in enumerate(tool_specs, start=1):
-                self.register_tool(spec.name, list(spec.parameters.get("properties", {}).keys()) or spec.required_args, opcode=idx)
+                self.register_tool(
+                    spec.name, list(spec.parameters.get("properties", {}).keys()) or spec.required_args, opcode=idx
+                )
             self._compute_schema_hash(tool_specs)
 
     def _compute_schema_hash(self, tool_specs: list[ToolSpec]) -> None:
-        raw = json.dumps([{"name": s.name, "params": s.parameters} for s in sorted(tool_specs, key=lambda s: s.name)], sort_keys=True)
+        raw = json.dumps(
+            [{"name": s.name, "params": s.parameters} for s in sorted(tool_specs, key=lambda s: s.name)], sort_keys=True
+        )
         self._schema_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @property
@@ -88,9 +93,7 @@ class ActionBytecodeCodec:
                 raise ValueError(f"Argument key '{k}' exceeds maximum length of {self.MAX_KEY_LEN} bytes")
             if len(v_bytes) > self.MAX_VAL_LEN:
                 raise ValueError(f"Argument value for '{k}' exceeds maximum payload limit of {self.MAX_VAL_LEN} bytes")
-            payload_parts.append(
-                struct.pack(">HI", len(k_bytes), len(v_bytes)) + k_bytes + v_bytes
-            )
+            payload_parts.append(struct.pack(">HI", len(k_bytes), len(v_bytes)) + k_bytes + v_bytes)
 
         body = b"".join(payload_parts)
         if 5 + len(body) > self.MAX_PACKET_SIZE:
@@ -126,7 +129,9 @@ class ActionBytecodeCodec:
             k_len, val_len = struct.unpack(">HI", data[offset : offset + 6])
             offset += 6
             if offset + k_len + val_len > len(data):
-                raise ValueError(f"Bytecode packet truncated: expected {k_len + val_len} bytes for argument {i}, got {len(data) - offset}")
+                raise ValueError(
+                    f"Bytecode packet truncated: expected {k_len + val_len} bytes for argument {i}, got {len(data) - offset}"
+                )
 
             key = data[offset : offset + k_len].decode("utf-8")
             if key in seen_keys:
@@ -140,7 +145,7 @@ class ActionBytecodeCodec:
             try:
                 parsed_val = json.loads(val_bytes.decode("utf-8"))
             except Exception as ex:
-                raise ValueError(f"Malformed JSON argument value for key '{key}': {ex}")
+                raise ValueError(f"Malformed JSON argument value for key '{key}': {ex}") from ex
 
             args[key] = parsed_val
 
@@ -151,7 +156,9 @@ class ActionBytecodeCodec:
 
     def calculate_compression_ratio(self, call: ToolCall) -> tuple[int, int, float]:
         """Compares JSON character count to compact binary bytecode size."""
-        json_len = len(json.dumps({"name": call.name or call.tool_name, "arguments": call.arguments}, separators=(",", ":")))
+        json_len = len(
+            json.dumps({"name": call.name or call.tool_name, "arguments": call.arguments}, separators=(",", ":"))
+        )
         bc_len = len(self.encode(call))
         ratio = json_len / max(1, bc_len)
         return json_len, bc_len, ratio
@@ -159,7 +166,7 @@ class ActionBytecodeCodec:
 
 class ActionBytecodeScheduler(BaseScheduler):
     """Experiment E5a: Action Bytecode Transport Codec Engine.
-    
+
     Evaluates binary transport codec compression and wire serialization efficiency.
     Note: Direct model action-token generation is scoped as E5b and remains UNIMPLEMENTED for live LLMs.
     """
@@ -175,7 +182,9 @@ class ActionBytecodeScheduler(BaseScheduler):
         tools: ToolRegistry,
     ) -> Any:
         for spec in tools.list_specs():
-            self.codec.register_tool(spec.name, spec.required_args or list(spec.parameters.get("properties", {}).keys()))
+            self.codec.register_tool(
+                spec.name, spec.required_args or list(spec.parameters.get("properties", {}).keys())
+            )
 
         for turn in range(ctx.config.max_turns):
             ctx.step_count = turn + 1

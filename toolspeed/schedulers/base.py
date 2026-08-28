@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field
 import asyncio
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, ToolRegistry
@@ -104,7 +103,8 @@ class ExecutionContext:
     task: Task
     config: SchedulerConfig
     tools: ToolRegistry
-    profiler: LatencyProfiler = field(default_factory=LatencyProfiler)
+    clock: Any = None
+    profiler: LatencyProfiler = field(init=False)
     guardrails: GuardrailMonitor = field(default_factory=GuardrailMonitor)
     rate_limiter: RateLimiter = field(default_factory=RateLimiter)
     executor: ToolExecutor = field(init=False)
@@ -117,6 +117,12 @@ class ExecutionContext:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self.profiler = LatencyProfiler(task_id=self.task.task_id, clock=self.clock)
+        # Populate any initial trusted grants from task metadata
+        grant = self.task.metadata.get("approval_grant")
+        if grant is not None and isinstance(grant, ApprovalGrant):
+            self.trusted_grants[grant.tool_name] = grant
+
         if self.config.shared_rate_limiter is not None:
             self.rate_limiter = self.config.shared_rate_limiter
         else:
@@ -130,11 +136,8 @@ class ExecutionContext:
             profiler=self.profiler,
             guardrails=self.guardrails,
             default_timeout_s=self.config.timeout_seconds,
+            trusted_grants=self.trusted_grants,
         )
-        # Populate any initial trusted grants from task metadata
-        grant = self.task.metadata.get("approval_grant")
-        if grant is not None and isinstance(grant, ApprovalGrant):
-            self.trusted_grants[grant.tool_name] = grant
 
     def record_model_decision(self, decision: LLMDecision) -> None:
         self.guardrails.record_model_usage(
@@ -180,7 +183,8 @@ class BaseScheduler(ABC):
         tools: ToolRegistry,
     ) -> TaskResult:
         """Executes a task under this scheduler policy with full lifecycle instrumentation."""
-        ctx = ExecutionContext(task=task, config=self.config, tools=tools)
+        clock = getattr(model, "clock", None) or getattr(tools, "clock", None)
+        ctx = ExecutionContext(task=task, config=self.config, tools=tools, clock=clock)
         ctx.guardrails.record_task_start()
         ctx.profiler.start()
 
@@ -216,7 +220,7 @@ class BaseScheduler(ABC):
             success = False
             raise
         except Exception as e:
-            error = f"Scheduler execution error: {str(e)}"
+            error = f"Scheduler execution error: {e!s}"
             success = False
         finally:
             total_ms = ctx.profiler.finish(ctx)
@@ -265,4 +269,3 @@ class BaseScheduler(ABC):
         tools: ToolRegistry,
     ) -> Any:
         """Scheduler-specific execution strategy returning the final task answer."""
-        pass

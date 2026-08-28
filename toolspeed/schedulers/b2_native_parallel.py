@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, List
-import time
+from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
 from toolspeed.core.types import EventType, ToolResult
@@ -13,7 +12,7 @@ from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
 
 class NativeParallelScheduler(BaseScheduler):
     """Baseline 2: Native Parallel Tool Execution.
-    
+
     Executes multiple tool calls emitted in a single model decision turn concurrently using asyncio.gather.
     """
 
@@ -50,9 +49,7 @@ class NativeParallelScheduler(BaseScheduler):
             async def _run_call(call):
                 return await ctx.executor.execute(call)
 
-            results: List[ToolResult] = await asyncio.gather(
-                *[_run_call(c) for c in decision.tool_calls]
-            )
+            results: list[ToolResult] = await asyncio.gather(*[_run_call(c) for c in decision.tool_calls])
 
             for res in results:
                 ctx.record_tool_result(res)

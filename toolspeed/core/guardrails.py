@@ -156,16 +156,25 @@ class GuardrailTracker:
                     rate_limit_failures += 1
                 elif ev_type in (EventType.JIT_FUSION_DEOPT.value, "jit_fusion_deopt"):
                     total_deopts += 1
-                elif ev_type in (EventType.APPROVAL_REJECTED.value, "approval_rejected", EventType.GUARDRAIL_VIOLATION.value, "guardrail_violation"):
+                elif ev_type in (
+                    EventType.APPROVAL_REJECTED.value,
+                    "approval_rejected",
+                    EventType.GUARDRAIL_VIOLATION.value,
+                    "guardrail_violation",
+                ):
                     blocked_unsafe_attempts += 1
 
             # Speculative wasted = speculative calls executed but not committed or hit
             for call in trace.tool_calls:
                 if call.requires_approval and not call.is_approved:
                     unsafe_side_effects += 1
-                if call.is_speculative and not call.metadata.get("committed", False) and not call.metadata.get("hit", False):
-                    if not call.metadata.get("cancelled", False):
-                        speculative_wasted += 1
+                if (
+                    call.is_speculative
+                    and not call.metadata.get("committed", False)
+                    and not call.metadata.get("hit", False)
+                    and not call.metadata.get("cancelled", False)
+                ):
+                    speculative_wasted += 1
 
             # Check cache freshness violations from tool results
             for res in trace.tool_results:
@@ -186,7 +195,9 @@ class GuardrailTracker:
 
         exact_success = successful_tasks / total_tasks if total_tasks > 0 else 0.0
         avg_tool_selection = (sum(tool_selection_scores) / len(tool_selection_scores)) if tool_selection_scores else 1.0
-        avg_argument_acc = (sum(argument_accuracy_scores) / len(argument_accuracy_scores)) if argument_accuracy_scores else 1.0
+        avg_argument_acc = (
+            (sum(argument_accuracy_scores) / len(argument_accuracy_scores)) if argument_accuracy_scores else 1.0
+        )
         cost_per_task = total_cost_usd / total_tasks if total_tasks > 0 else 0.0
 
         return GuardrailMetrics(
@@ -199,7 +210,9 @@ class GuardrailTracker:
             total_tool_calls=total_tool_calls,
             unnecessary_calls=unnecessary_calls,
             duplicated_calls=duplicated_calls,
-            speculative_calls_launched=max(speculative_launched, speculative_committed + speculative_wasted + speculative_cancelled),
+            speculative_calls_launched=max(
+                speculative_launched, speculative_committed + speculative_wasted + speculative_cancelled
+            ),
             speculative_calls_hit=speculative_committed,
             speculative_calls_wasted=speculative_wasted,
             speculative_calls_cancelled=speculative_cancelled,
@@ -231,9 +244,21 @@ class GuardrailTracker:
         for trace in traces:
             for ev in trace.events:
                 ev_type = str(ev.event_type)
-                if ev_type in (EventType.TOOL_START.value, EventType.SPECULATION_START.value, "tool_start", "speculation_start"):
+                if ev_type in (
+                    EventType.TOOL_START.value,
+                    EventType.SPECULATION_START.value,
+                    "tool_start",
+                    "speculation_start",
+                ):
                     intervals.append((ev.timestamp_ns, 1))
-                elif ev_type in (EventType.TOOL_END.value, EventType.SPECULATION_CANCELLED.value, EventType.TOOL_CANCELLED.value, "tool_end", "speculation_cancelled", "tool_cancelled"):
+                elif ev_type in (
+                    EventType.TOOL_END.value,
+                    EventType.SPECULATION_CANCELLED.value,
+                    EventType.TOOL_CANCELLED.value,
+                    "tool_end",
+                    "speculation_cancelled",
+                    "tool_cancelled",
+                ):
                     intervals.append((ev.timestamp_ns, -1))
 
         intervals.sort(key=lambda x: (x[0], -x[1]))
@@ -241,8 +266,7 @@ class GuardrailTracker:
         peak = max_c
         for _, change in intervals:
             current += change
-            if current > peak:
-                peak = current
+            peak = max(peak, current)
 
         return max(1, peak)
 
@@ -261,6 +285,22 @@ class GuardrailMonitor:
         self._lock = threading.Lock()
         self._seen_tool_calls: set[str] = set()
         self._current_concurrency: int = 0
+
+    @property
+    def total_tool_calls(self) -> int:
+        return self.metrics.total_tool_calls
+
+    @total_tool_calls.setter
+    def total_tool_calls(self, val: int) -> None:
+        self.metrics.total_tool_calls = val
+
+    @property
+    def peak_concurrency(self) -> int:
+        return self.metrics.peak_concurrency
+
+    @property
+    def total_deopts(self) -> int:
+        return self.metrics.total_deopts
 
     def record_task_start(self) -> None:
         with self._lock:
@@ -322,8 +362,7 @@ class GuardrailMonitor:
     def record_concurrency_enter(self) -> int:
         with self._lock:
             self._current_concurrency += 1
-            if self._current_concurrency > self.metrics.peak_concurrency:
-                self.metrics.peak_concurrency = self._current_concurrency
+            self.metrics.peak_concurrency = max(self.metrics.peak_concurrency, self._current_concurrency)
             return self._current_concurrency
 
     def record_concurrency_exit(self) -> None:
@@ -335,17 +374,28 @@ class GuardrailMonitor:
             self.metrics.rate_limit_failures += 1
             self.metrics.rate_limit_errors += 1
 
-    def record_model_usage(
-        self, input_tokens: int = 0, output_tokens: int = 0
-    ) -> None:
+    def record_model_usage(self, input_tokens: int = 0, output_tokens: int = 0) -> None:
         with self._lock:
             self.metrics.total_model_calls += 1
             self.metrics.total_model_input_tokens += input_tokens
             self.metrics.total_model_output_tokens += output_tokens
 
-    def record_deopt(self) -> None:
+    def record_tool_error(self, tool_name: str, error: str) -> None:
+        with self._lock:
+            pass
+
+    def record_guardrail_violation(self, rule_id: str, details: dict[str, Any] | None = None) -> None:
+        with self._lock:
+            if rule_id == "SPECULATION_SIDE_EFFECT_ATTEMPT":
+                self.metrics.blocked_unsafe_attempts += 1
+
+    def record_deoptimization(self, workflow_id: str, reason: str = "", step_index: int = 0) -> None:
         with self._lock:
             self.metrics.total_deopts += 1
+
+    def record_semantic_mutation(self, original_call: Any = None, mutated_call: Any = None) -> None:
+        with self._lock:
+            pass
 
     def get_metrics(self) -> GuardrailMetrics:
         with self._lock:

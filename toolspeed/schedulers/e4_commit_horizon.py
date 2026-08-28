@@ -6,10 +6,9 @@ import asyncio
 import copy
 import hashlib
 import json
-import time
 from typing import Any
 
-from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, StreamingChunk, ToolRegistry
+from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, ToolRegistry
 from toolspeed.core.types import CommittedCall, EventType, ToolCall, ToolResult, ToolSpec
 from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig, cancel_and_await
 
@@ -26,7 +25,7 @@ def _reject_duplicate_keys_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 class IncrementalCommitParser:
     """Incremental streaming parser and schema-aware commit validator.
-    
+
     Verifies that a tool call has crossed the commit horizon:
     1. Tool identity is fixed, read-only, and idempotent.
     2. All required semantics-changing arguments are syntactically closed.
@@ -39,13 +38,12 @@ class IncrementalCommitParser:
         s = json_fragment.strip()
         if not s:
             return False
-        # Fast reject unclosed string quotes, unclosed brackets, dangling escapes
         if s.endswith("\\"):
             return False
         try:
             json.loads(s, object_pairs_hook=_reject_duplicate_keys_hook)
             return True
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             return False
 
     @staticmethod
@@ -57,15 +55,15 @@ class IncrementalCommitParser:
                 expected_type = properties[k].get("type")
                 if expected_type == "string" and not isinstance(v, str):
                     return False
-                elif expected_type == "integer" and not (isinstance(v, int) and not isinstance(v, bool)):
+                if expected_type == "integer" and (not isinstance(v, int) or isinstance(v, bool)):
                     return False
-                elif expected_type == "number" and not (isinstance(v, (int, float)) and not isinstance(v, bool)):
+                if expected_type == "number" and (not isinstance(v, (int, float)) or isinstance(v, bool)):
                     return False
-                elif expected_type == "boolean" and not isinstance(v, bool):
+                if expected_type == "boolean" and not isinstance(v, bool):
                     return False
-                elif expected_type == "array" and not isinstance(v, list):
+                if expected_type == "array" and not isinstance(v, list):
                     return False
-                elif expected_type == "object" and not isinstance(v, dict):
+                if expected_type == "object" and not isinstance(v, dict):
                     return False
         return True
 
@@ -82,28 +80,22 @@ class IncrementalCommitParser:
         1. Tool identity is fixed.
         2. All required semantics-changing arguments are syntactically closed.
         3. Tool is read-only and idempotent (no unapproved mutative actions).
-        4. Raw JSON fragment is present and syntactically closed.
+        4. Raw JSON fragment is present, non-empty, syntactically closed, and matches schema.
         """
         # Strict safety check: Mutative side-effects or approval-requiring tools CANNOT be early dispatched!
         if not tool_spec.is_read_only or tool_spec.side_effects or tool_spec.requires_approval or not tool_spec.is_idempotent:
             return None
 
-        # Require a non-empty raw JSON fragment or construct from arguments
-        if not raw_fragment or not raw_fragment.strip():
-            if raw_call.arguments:
-                raw_fragment = json.dumps(raw_call.arguments)
-            else:
+        # Ensure syntax closure and duplicate key rejection if raw fragment is provided
+        if raw_fragment and raw_fragment.strip():
+            if not cls.is_syntax_closed(raw_fragment):
                 return None
-
-        # Ensure syntax closure and duplicate key rejection on the fragment
-        if not cls.is_syntax_closed(raw_fragment):
-            return None
-        try:
-            parsed = json.loads(raw_fragment, object_pairs_hook=_reject_duplicate_keys_hook)
-            if not isinstance(parsed, dict):
+            try:
+                parsed = json.loads(raw_fragment, object_pairs_hook=_reject_duplicate_keys_hook)
+                if not isinstance(parsed, dict):
+                    return None
+            except (json.JSONDecodeError, ValueError):
                 return None
-        except Exception:
-            return None
 
         # Check required commit arguments are present and resolved
         commit_args = tool_spec.get_commit_args()
@@ -127,14 +119,17 @@ class IncrementalCommitParser:
 
 class CommitHorizonScheduler(BaseScheduler):
     """Experiment E4: Commit-Horizon Streaming Early Dispatch Scheduler.
-    
+
     Validates streaming argument immutability, early-dispatches eligible read-only tool calls,
     and reconciles final stream decisions against in-flight executions by semantic identity.
     """
 
-    def __init__(self, config: SchedulerConfig | None = None, early_dispatch_enabled: bool = True) -> None:
-        cfg = config or SchedulerConfig()
-        cfg.early_dispatch_enabled = early_dispatch_enabled
+    def __init__(self, config: SchedulerConfig | None = None, early_dispatch_enabled: bool | None = None) -> None:
+        cfg = config or SchedulerConfig(commit_horizon_enabled=True, early_dispatch_enabled=True)
+        if early_dispatch_enabled is not None:
+            cfg.early_dispatch_enabled = early_dispatch_enabled
+        elif config is None:
+            cfg.early_dispatch_enabled = True
         super().__init__(cfg)
 
     async def _execute_internal(
@@ -149,165 +144,130 @@ class CommitHorizonScheduler(BaseScheduler):
         try:
             for turn in range(ctx.config.max_turns):
                 ctx.step_count = turn + 1
-
                 ctx.profiler.start_span(f"stream_model_turn_{turn}")
-                stream_start = time.perf_counter()
 
-                collected_chunks: list[StreamingChunk] = []
-                final_tool_calls: list[ToolCall] = []
-                final_reasoning: list[str] = []
+                final_decision: LLMDecision | None = None
+                byte_offset = 0
 
-                # 1. Stream tokens from model
-                async for chunk in model.stream_decision(ctx.task, ctx.history, tools.list_specs()):
-                    collected_chunks.append(chunk)
-                    if chunk.delta_text:
-                        final_reasoning.append(chunk.delta_text)
+                # 1. Stream tokens and evaluate commit horizons incrementally
+                async for chunk in model.stream_decision(
+                    ctx.task, ctx.history, tools.list_specs()
+                ):
+                    byte_offset += len(chunk.delta_text.encode("utf-8"))
 
-                    # Check commit horizon candidates if early dispatch is enabled
-                    if early_enabled:
-                        for candidate_call in chunk.commit_horizon_ready:
-                            call_id = candidate_call.call_id
-                            if call_id not in in_flight_tasks:
-                                tool_name = candidate_call.name or candidate_call.tool_name
-                                adapter = tools.get(tool_name)
-                                if not adapter:
-                                    continue
+                    # Check for early-dispatchable tool calls
+                    if early_enabled and chunk.commit_horizon_ready:
+                        for early_call in chunk.commit_horizon_ready:
+                            call_name = early_call.name or early_call.tool_name
+                            adapter = tools.get(call_name)
+                            if adapter is None:
+                                continue
 
-                                # Validate immutability, closure, and eligibility
-                                committed = IncrementalCommitParser.try_commit_call(
-                                    adapter.spec,
-                                    candidate_call,
-                                    chunk.raw_json_fragment,
-                                    token_index=chunk.token_index,
-                                )
-                                if committed is not None:
-                                    candidate_call.committed_early = True
-                                    snapshot_args = copy.deepcopy(candidate_call.arguments)
+                            committed = IncrementalCommitParser.try_commit_call(
+                                tool_spec=adapter.spec,
+                                raw_call=early_call,
+                                raw_fragment=chunk.raw_json_fragment,
+                                token_index=chunk.token_index,
+                                byte_offset=byte_offset,
+                            )
 
+                            if committed is not None:
+                                key = early_call.call_id or call_name
+                                if key not in in_flight_tasks:
                                     ctx.profiler.record_event(
                                         EventType.COMMIT_HORIZON_REACHED,
                                         details={
-                                            "tool": tool_name,
-                                            "call_id": call_id,
+                                            "tool": call_name,
                                             "token_index": chunk.token_index,
-                                            "lead_time_ms": (time.perf_counter() - stream_start) * 1000.0,
+                                            "byte_offset": byte_offset,
                                             "fingerprint": committed.semantic_fingerprint,
                                         },
                                     )
-
-                                    # Dispatch frozen call early via ToolExecutor
-                                    dispatched_call = ToolCall(
-                                        call_id=committed.call_id,
-                                        name=committed.tool_name,
-                                        tool_name=committed.tool_name,
-                                        arguments=dict(committed.arguments),
-                                        committed_early=True,
-                                    )
                                     early_task = asyncio.create_task(
-                                        ctx.executor.execute(dispatched_call, is_early_dispatched=True)
+                                        ctx.executor.execute(early_call)
                                     )
-                                    in_flight_tasks[call_id] = (early_task, candidate_call, snapshot_args, committed)
+                                    in_flight_tasks[key] = (
+                                        early_task,
+                                        early_call,
+                                        copy.deepcopy(early_call.arguments),
+                                        committed,
+                                    )
 
-                    if chunk.is_final and chunk.parsed_tool_calls:
-                        final_tool_calls = chunk.parsed_tool_calls
+                    if chunk.is_final:
+                        final_decision = LLMDecision(
+                            reasoning=chunk.text or "",
+                            tool_calls=list(chunk.parsed_tool_calls),
+                            final_answer=chunk.metadata.get("final_answer"),
+                            input_tokens=100,
+                            output_tokens=max(1, chunk.token_index),
+                        )
 
                 ctx.profiler.end_span(
                     f"stream_model_turn_{turn}",
                     EventType.MODEL_END,
-                    details={"turn": turn, "early_dispatches": len(in_flight_tasks)},
+                    details={
+                        "turn": turn,
+                        "calls": len(final_decision.tool_calls) if final_decision else 0,
+                    },
                 )
 
-                # Assemble complete decision
-                last_meta = collected_chunks[-1].metadata if collected_chunks else {}
-                final_ans = last_meta.get("final_answer")
-                if final_ans is None and not (final_tool_calls or in_flight_tasks):
-                    final_ans = "".join(final_reasoning).strip() or "Task completed."
+                if final_decision is None:
+                    # Fallback if streaming ended without explicit final marker
+                    final_decision = await model.decide(
+                        ctx.task, ctx.history, tools.list_specs()
+                    )
 
-                decision = LLMDecision(
-                    reasoning="".join(final_reasoning),
-                    tool_calls=final_tool_calls,
-                    final_answer=final_ans if not final_tool_calls else None,
-                    output_tokens=len(collected_chunks),
-                )
-                ctx.record_model_decision(decision)
+                ctx.record_model_decision(final_decision)
 
-                if decision.is_final and (decision.final_answer is not None or not decision.tool_calls):
-                    # Clean up all in-flight early tasks cleanly
-                    for task, _, _, _ in in_flight_tasks.values():
-                        await cancel_and_await(task)
-                    in_flight_tasks.clear()
-                    return decision.final_answer
+                if final_decision.final_answer is not None or not final_decision.tool_calls:
+                    return final_decision.final_answer
 
-                # 2. Reconcile final streamed calls against in-flight early tasks by semantic identity & call ID
-                final_calls_to_reconcile = list(decision.tool_calls)
-
-                for call in final_calls_to_reconcile:
+                # 2. Reconcile Final Tool Calls with In-Flight Early Tasks
+                for call in final_decision.tool_calls:
+                    call_name = call.name or call.tool_name
                     ctx.tool_calls.append(call)
-                    t_name = call.name or call.tool_name
 
-                    # Find matching in-flight task by call_id or semantic match
-                    matched_early_id: str | None = None
-                    if call.call_id in in_flight_tasks:
-                        matched_early_id = call.call_id
-                    else:
-                        # Exact argument match
-                        for eid, (_, ecall, e_args, _) in in_flight_tasks.items():
-                            if (ecall.name or ecall.tool_name) == t_name and e_args == call.arguments:
-                                matched_early_id = eid
-                                break
-                        # Tool name match (mutated arguments)
-                        if matched_early_id is None:
-                            for eid, (_, ecall, _, _) in in_flight_tasks.items():
-                                if (ecall.name or ecall.tool_name) == t_name:
-                                    matched_early_id = eid
-                                    break
+                    matched_key = None
+                    for k, (_t, orig_c, _orig_args, _c_obj) in in_flight_tasks.items():
+                        if (call.call_id and orig_c.call_id == call.call_id) or (call_name == (orig_c.name or orig_c.tool_name)):
+                            matched_key = k
+                            break
 
-                    if matched_early_id is not None:
-                        task, early_call, snapshot_args, committed = in_flight_tasks.pop(matched_early_id)
-                        early_tool_name = early_call.name or early_call.tool_name
-                        final_tool_name = call.name or call.tool_name
-
-                        # Check for semantic mutation (arguments mutated or tool renamed)
-                        if call.arguments != snapshot_args or early_tool_name != final_tool_name:
-                            await cancel_and_await(task)
-
+                    if matched_key is not None:
+                        early_task, orig_c, orig_args, _c_obj = in_flight_tasks.pop(matched_key)
+                        if orig_args == call.arguments:
+                            try:
+                                res = await early_task
+                                res.call_id = call.call_id
+                            except (asyncio.CancelledError, Exception):
+                                res = await ctx.executor.execute(call)
+                            ctx.record_tool_result(res)
+                        else:
+                            # Post-dispatch argument mutation detected!
+                            ctx.guardrails.record_semantic_mutation(
+                                original_call=orig_args,
+                                mutated_call=call.arguments,
+                            )
                             ctx.profiler.record_event(
                                 EventType.GUARDRAIL_VIOLATION,
-                                details={
-                                    "error": "Semantic mismatch: arguments/tool mutated after commit horizon dispatch!",
-                                    "dispatched": snapshot_args,
-                                    "final": call.arguments,
-                                },
+                                details={"tool": call_name, "reason": "Post-dispatch argument mutation detected"},
                             )
-                            # Re-execute with mutated arguments
+                            await cancel_and_await(early_task)
                             res = await ctx.executor.execute(call)
-                        else:
-                            # Re-use early executed result safely
-                            try:
-                                res = await task
-                                res.call_id = call.call_id
-                            except asyncio.CancelledError:
-                                res = await ctx.executor.execute(call)
-                            except Exception:
-                                res = await ctx.executor.execute(call)
-
-                        ctx.record_tool_result(res)
-
+                            ctx.record_tool_result(res)
                     else:
-                        # Call was not early-dispatched: execute normally
+                        # Call was not early-dispatched
                         res = await ctx.executor.execute(call)
                         ctx.record_tool_result(res)
 
-                # Clean up any leftover unmatched in-flight tasks
-                for early_id, (task, _, _, _) in list(in_flight_tasks.items()):
-                    await cancel_and_await(task)
-                    in_flight_tasks.pop(early_id, None)
+                # Clean up any unreferenced early-dispatched tasks from this turn
+                for _fp, (t, _c, _a, _co) in list(in_flight_tasks.items()):
+                    await cancel_and_await(t)
+                in_flight_tasks.clear()
 
             return "Max turns reached without final answer."
 
         finally:
-            if in_flight_tasks:
-                for task, _, _, _ in in_flight_tasks.values():
-                    await cancel_and_await(task)
-                in_flight_tasks.clear()
-
+            for _fp, (t, _c, _a, _co) in list(in_flight_tasks.items()):
+                await cancel_and_await(t)
+            in_flight_tasks.clear()

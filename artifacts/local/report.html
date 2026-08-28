@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>ToolSpeed Paired Benchmark Suite (Local Wall-Clock Backend)</title>
+  <title>ToolSpeed Paired Benchmark Suite (LOCAL_WALL_CLOCK)</title>
   <style>
     :root {
       --bg: #0d1117; --card-bg: #161b22; --border: #30363d;
@@ -22,8 +22,8 @@
 </head>
 <body>
   <div class="container">
-    <h1>ToolSpeed Paired Benchmark Suite (Local Wall-Clock Backend)</h1>
-    <p>Evidence Level: <code>local_wall_clock</code> | Runtime: 41.29s | Verdict: <strong>PASSED</strong></p>
+    <h1>ToolSpeed Paired Benchmark Suite (LOCAL_WALL_CLOCK)</h1>
+    <p>Evidence Level: <code>local_wall_clock</code> | Runtime: 18.92s | Verdict: <strong>FALSIFIED</strong></p>
     <div class="card">
       <h2>Workload Performance Matrix</h2>
       <table>
@@ -37,81 +37,81 @@
         <tr>
           <td><strong>W1</strong></td>
           <td>DAGScheduler vs SyncReActScheduler</td>
-          <td>185.0 ms</td>
-          <td>85.0 ms</td>
-          <td><strong>2.18x</strong></td>
+          <td>5.8 ms</td>
+          <td>5.4 ms</td>
+          <td><strong>1.07x</strong></td>
           <td>100.0%</td>
-          <td><span class="badge badge-success">PASS</span></td>
+          <td><span class="badge badge-danger">FAIL</span></td>
         </tr>
         
         <tr>
           <td><strong>W2</strong></td>
           <td>JITFusionScheduler vs SyncReActScheduler</td>
-          <td>100.9 ms</td>
-          <td>15.5 ms</td>
-          <td><strong>6.50x</strong></td>
+          <td>6.2 ms</td>
+          <td>7.5 ms</td>
+          <td><strong>0.83x</strong></td>
           <td>100.0%</td>
-          <td><span class="badge badge-success">PASS</span></td>
+          <td><span class="badge badge-danger">FAIL</span></td>
         </tr>
         
         <tr>
           <td><strong>W3</strong></td>
           <td>SpeculativeReadScheduler vs SyncReActScheduler</td>
-          <td>85.0 ms</td>
-          <td>60.0 ms</td>
-          <td><strong>1.42x</strong></td>
+          <td>5.6 ms</td>
+          <td>5.9 ms</td>
+          <td><strong>0.95x</strong></td>
           <td>100.0%</td>
-          <td><span class="badge badge-success">PASS</span></td>
+          <td><span class="badge badge-danger">FAIL</span></td>
         </tr>
         
         <tr>
           <td><strong>W4</strong></td>
           <td>CacheScheduler vs SyncReActScheduler</td>
-          <td>125.0 ms</td>
-          <td>90.2 ms</td>
-          <td><strong>1.39x</strong></td>
+          <td>5.9 ms</td>
+          <td>5.8 ms</td>
+          <td><strong>1.02x</strong></td>
           <td>100.0%</td>
-          <td><span class="badge badge-success">PASS</span></td>
+          <td><span class="badge badge-danger">FAIL</span></td>
         </tr>
         
         <tr>
           <td><strong>W5</strong></td>
           <td>CommitHorizonScheduler vs SyncReActScheduler</td>
-          <td>85.0 ms</td>
-          <td>72.5 ms</td>
-          <td><strong>1.17x</strong></td>
+          <td>5.5 ms</td>
+          <td>5.5 ms</td>
+          <td><strong>0.99x</strong></td>
           <td>100.0%</td>
-          <td><span class="badge badge-success">PASS</span></td>
+          <td><span class="badge badge-danger">FAIL</span></td>
         </tr>
         
         <tr>
           <td><strong>W6</strong></td>
           <td>CompositeScheduler vs SyncReActScheduler</td>
-          <td>110.0 ms</td>
-          <td>88.6 ms</td>
-          <td><strong>1.24x</strong></td>
+          <td>6.9 ms</td>
+          <td>7.1 ms</td>
+          <td><strong>0.97x</strong></td>
           <td>100.0%</td>
-          <td><span class="badge badge-success">PASS</span></td>
+          <td><span class="badge badge-danger">FAIL</span></td>
         </tr>
         
         <tr>
           <td><strong>W7</strong></td>
           <td>CompositeScheduler vs SyncReActScheduler</td>
-          <td>60.1 ms</td>
-          <td>60.1 ms</td>
-          <td><strong>1.00x</strong></td>
+          <td>5.3 ms</td>
+          <td>6.5 ms</td>
+          <td><strong>0.81x</strong></td>
           <td>100.0%</td>
-          <td><span class="badge badge-success">PASS</span></td>
+          <td><span class="badge badge-danger">FAIL</span></td>
         </tr>
         
         <tr>
           <td><strong>E5a</strong></td>
           <td>ActionBytecodeScheduler vs SyncReActScheduler</td>
-          <td>60.0 ms</td>
-          <td>36.0 ms</td>
-          <td><strong>1.67x</strong></td>
+          <td>4.3 ms</td>
+          <td>4.6 ms</td>
+          <td><strong>0.94x</strong></td>
           <td>100.0%</td>
-          <td><span class="badge badge-success">PASS</span></td>
+          <td><span class="badge badge-danger">FAIL</span></td>
         </tr>
         
         </tbody>

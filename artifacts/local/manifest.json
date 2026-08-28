@@ -1,0 +1,32 @@
+{
+  "git_sha": "14c19751c218b8498712060e2aee81f62283390c",
+  "code_git_sha": "14c19751c218b8498712060e2aee81f62283390c",
+  "git_dirty": true,
+  "command": "toolspeed benchmark --backend local_wall_clock --trials 200",
+  "evidence_level": "local_wall_clock",
+  "timestamp_utc": "2026-08-28T19:36:11Z",
+  "seed": 20260825,
+  "python_version": "3.13.15",
+  "os_platform": "Darwin 27.0.0 (arm64)",
+  "hardware_info": {},
+  "dependency_versions": {
+    "numpy": "2.5.2"
+  },
+  "benchmark_config_hash": "8a2cac096a21a59246f05e7e9458bcdaf17bd5424d2e51cffdd0736f956f7eba",
+  "workload_fixture_hash": "1d2b20293b63eec9a0aa7c8bb9233dc781ed410890374d6d2ae7788edb720f0f",
+  "raw_trace_hash": "eac1b9cfe2eb4400b9309f38eb96a6aad2320f3bd46468ce3938f2b5fc1fb86e",
+  "file_hashes": {
+    "report.md": "0e7dee3570ea39accc724d6332f93fbfd174487ead91e3dd4f31f46528eedf1c",
+    "report.html": "ae059dc2beedc2f6443b1f0f9c8443e8cf3f074941906e5a6a6b643626b0081c",
+    "raw-traces.jsonl": "c7fa099d6436743b469f5993cdbf8bf433066a7d26c2bc42c0abde3001c4ef60",
+    "summary.json": "0f55b1be9890d7bb6bbca1de8e664e663ad8dd881992d062ee6f221e1bf60752",
+    "benchmark_result.json": "c065eefb1d6be5b72b16c91620e7434bcfb8bf8da9a82335691557adf878e302"
+  },
+  "report_generator_version": "2.0.0",
+  "is_simulated": false,
+  "is_verdict_eligible": true,
+  "trial_count": 200,
+  "warmup_count": 5,
+  "resource_topology": {},
+  "required_metric_policy_version": "2.0.0"
+}

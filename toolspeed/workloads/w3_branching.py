@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 import numpy as np
 
 from toolspeed.adapters.base import BaseToolAdapter
@@ -19,7 +20,7 @@ from toolspeed.workloads.base import BaseWorkload
 
 class W3BranchingWorkload(BaseWorkload):
     """Workload Family 3: Branching Workflows.
-    
+
     Evaluates dynamic branch resolution where intermediate tool returns determine
     downstream execution paths (low-risk approve vs medium stepup vs high-risk fraud).
     """
@@ -56,7 +57,9 @@ class W3BranchingWorkload(BaseWorkload):
                     parameters={"type": "object", "properties": {"tx_id": {"type": "string"}}, "required": ["tx_id"]},
                     median_ms=self.median_tool_ms,
                     sigma=self.sigma,
-                    handler=lambda args: self._tx_registry.get(args.get("tx_id", ""), {"risk_score": 50, "amount": 100}),
+                    handler=lambda args: self._tx_registry.get(
+                        args.get("tx_id", ""), {"risk_score": 50, "amount": 100}
+                    ),
                 )
             )
         )
@@ -70,7 +73,11 @@ class W3BranchingWorkload(BaseWorkload):
                     parameters={"type": "object", "properties": {"tx_id": {"type": "string"}}, "required": ["tx_id"]},
                     median_ms=self.median_tool_ms,
                     sigma=self.sigma,
-                    handler=lambda args: {"status": "APPROVED", "tx_id": args.get("tx_id"), "approval_code": f"APP_{args.get('tx_id')}"},
+                    handler=lambda args: {
+                        "status": "APPROVED",
+                        "tx_id": args.get("tx_id"),
+                        "approval_code": f"APP_{args.get('tx_id')}",
+                    },
                 )
             )
         )
@@ -84,7 +91,11 @@ class W3BranchingWorkload(BaseWorkload):
                     parameters={"type": "object", "properties": {"tx_id": {"type": "string"}}, "required": ["tx_id"]},
                     median_ms=self.median_tool_ms,
                     sigma=self.sigma,
-                    handler=lambda args: {"tx_id": args.get("tx_id"), "challenge_id": f"CHAL_{args.get('tx_id')}", "otp_required": True},
+                    handler=lambda args: {
+                        "tx_id": args.get("tx_id"),
+                        "challenge_id": f"CHAL_{args.get('tx_id')}",
+                        "otp_required": True,
+                    },
                 )
             )
         )
@@ -179,7 +190,12 @@ class W3BranchingWorkload(BaseWorkload):
                     "If risk >= 75: quarantine transaction and notify fraud team."
                 ),
                 expected_tools=expected_tools,
-                expected_output={"tx_id": tx_id, "branch": expected_branch, "final_status": expected_status, "risk_score": risk},
+                expected_output={
+                    "tx_id": tx_id,
+                    "branch": expected_branch,
+                    "final_status": expected_status,
+                    "risk_score": risk,
+                },
                 parameters={"tx_id": tx_id, "expected_branch": expected_branch, "risk_score": risk},
                 context={"tx_data": self._tx_registry[tx_id]},
             )
@@ -188,7 +204,9 @@ class W3BranchingWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: ExecutionTrace | None) -> tuple[bool, str, dict[str, Any]]:
+        def _validate(
+            task: TaskInstance, output: Any, trace: ExecutionTrace | None
+        ) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 

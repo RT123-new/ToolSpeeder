@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import inspect
+from collections.abc import Callable
 from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
@@ -13,7 +13,7 @@ from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
 
 class HandwrittenWorkflowScheduler(BaseScheduler):
     """Baseline 5: Deterministic handwritten compiled workflow.
-    
+
     Executes pure Python deterministic logic for known task schemas with zero LLM round-trips.
     """
 

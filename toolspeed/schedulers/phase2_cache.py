@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
@@ -30,8 +30,14 @@ class CacheEntry:
 class ToolResultCache:
     """Multi-tiered Exact and Semantic tool result cache with automatic mutation invalidation."""
 
-    def __init__(self, default_ttl_seconds: float = 300.0) -> None:
-        self.default_ttl_seconds = default_ttl_seconds
+    def __init__(
+        self,
+        default_ttl_seconds: float = 300.0,
+        max_entries: int = 1000,
+        ttl_seconds: float | None = None,
+    ) -> None:
+        self.default_ttl_seconds = ttl_seconds if ttl_seconds is not None else default_ttl_seconds
+        self.max_entries = max_entries
         self._exact_store: dict[str, CacheEntry] = {}
         self._semantic_store: dict[str, CacheEntry] = {}
 
@@ -112,11 +118,21 @@ class ToolResultCache:
 
     def invalidate_on_mutation(self, mutation_tool: str, arguments: dict[str, Any] | None = None) -> int:
         """Invalidates related cache entries when a mutation tool executes."""
-        domain = mutation_tool.replace("update_", "").replace("create_", "").replace("delete_", "").replace("set_", "").replace("modify_", "")
-        to_del_exact = [k for k, v in self._exact_store.items() if domain in v.tool_name or v.tool_name in mutation_tool]
+        domain = (
+            mutation_tool.replace("update_", "")
+            .replace("create_", "")
+            .replace("delete_", "")
+            .replace("set_", "")
+            .replace("modify_", "")
+        )
+        to_del_exact = [
+            k for k, v in self._exact_store.items() if domain in v.tool_name or v.tool_name in mutation_tool
+        ]
         for k in to_del_exact:
             self._exact_store.pop(k, None)
-        to_del_sem = [k for k, v in self._semantic_store.items() if domain in v.tool_name or v.tool_name in mutation_tool]
+        to_del_sem = [
+            k for k, v in self._semantic_store.items() if domain in v.tool_name or v.tool_name in mutation_tool
+        ]
         for k in to_del_sem:
             self._semantic_store.pop(k, None)
         return len(to_del_exact)
@@ -128,7 +144,7 @@ class ToolResultCache:
 
 class CacheScheduler(BaseScheduler):
     """Phase 2: Result Cache Scheduler.
-    
+
     Caches tool outputs with exact & semantic matching, respects freshness contracts, and
     automatically invalidates cached reads when side-effecting write tools execute.
     """
@@ -137,14 +153,15 @@ class CacheScheduler(BaseScheduler):
         self,
         config: SchedulerConfig | None = None,
         shared_cache: ToolResultCache | None = None,
-        cache_enabled: bool = True,
+        cache_enabled: bool | None = None,
     ) -> None:
-        cfg = config or SchedulerConfig()
-        cfg.cache_enabled = cache_enabled
+        cfg = config or SchedulerConfig(cache_enabled=True)
+        if cache_enabled is not None:
+            cfg.cache_enabled = cache_enabled
+        elif config is None:
+            cfg.cache_enabled = True
         super().__init__(cfg)
-        self.cache = shared_cache or ToolResultCache(
-            default_ttl_seconds=self.config.cache_ttl_seconds
-        )
+        self.cache = shared_cache or ToolResultCache(default_ttl_seconds=self.config.cache_ttl_seconds)
 
     async def _execute_tool_with_cache(
         self,

@@ -1,23 +1,10 @@
 """Unit tests for ToolSpeed mock and live tool adapters and LLM simulators."""
 
 import asyncio
-import os
 import shutil
 import tempfile
-import time
 import unittest
 
-from toolspeed.adapters.base import (
-    BaseLLMAdapter,
-    BaseToolAdapter,
-    StreamingChunk,
-    ToolSchema,
-)
-from toolspeed.adapters.mock_tools import (
-    MockToolAdapter,
-    MockToolConfig,
-    MockToolEngine,
-)
 from toolspeed.adapters.live_tools import (
     AsyncHTTPClientTool,
     AsyncLocalFileIOTool,
@@ -28,10 +15,14 @@ from toolspeed.adapters.live_tools import (
 from toolspeed.adapters.mock_models import (
     ActionBytecodeCodec,
     DraftPredictorModel,
-    ModelCostConfig,
     SimulatedLLM,
 )
-from toolspeed.core.types import LatencyProfile, ToolCall, ToolResult
+from toolspeed.adapters.mock_tools import (
+    MockToolAdapter,
+    MockToolConfig,
+    MockToolEngine,
+)
+from toolspeed.core.types import LatencyProfile, ToolCall
 
 
 class TestMockTools(unittest.IsolatedAsyncioTestCase):
@@ -285,7 +276,7 @@ class TestMockModelsAndBytecode(unittest.IsolatedAsyncioTestCase):
             ground_truth_args={"user_id": 123},
         )
         self.assertIsNotNone(res)
-        predicted_call, conf = res
+        predicted_call, _conf = res
         self.assertEqual(predicted_call.tool_name, "search_db")
         self.assertEqual(predicted_call.arguments, {"user_id": 123})
         self.assertTrue(predicted_call.is_speculative)
@@ -296,7 +287,7 @@ class TestMockModelsAndBytecode(unittest.IsolatedAsyncioTestCase):
 
         # Generate tool calls
         expected_call = ToolCall(tool_name="test_tool", arguments={"a": 1})
-        text, calls, tokens = await llm.generate(
+        _text, calls, tokens = await llm.generate(
             prompt="Call test tool",
             expected_calls=[expected_call],
             is_final=False,

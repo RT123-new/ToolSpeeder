@@ -7,12 +7,13 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from toolspeed.core.types import Task, TokenUsage, ToolCall, ToolResult, ToolSpec
+from toolspeed.core.types import Task, ToolCall, ToolResult, ToolSpec
 
 
 @dataclass
 class StreamingChunk:
     """A streaming token chunk emitted by an LLM adapter."""
+
     text: str = ""
     delta_text: str = ""
     tool_call_delta: dict[str, Any] | None = None
@@ -36,6 +37,7 @@ class StreamingChunk:
 @dataclass
 class ToolSchema:
     """JSON Schema definition and execution constraints for a tool."""
+
     name: str
     description: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
@@ -167,7 +169,7 @@ class BaseToolAdapter(ABC):
         if schema is not None:
             return schema
         if hasattr(self, "config"):
-            c = getattr(self, "config")
+            c = self.config
             return ToolSchema(
                 name=getattr(c, "name", "tool"),
                 description=getattr(c, "description", ""),
@@ -188,10 +190,7 @@ class BaseToolAdapter(ABC):
         """Validate input arguments against schema."""
         schema = self.get_schema()
         required = schema.parameters.get("required", []) or schema.required_args
-        for req in required:
-            if req not in args:
-                return False
-        return True
+        return all(req in args for req in required)
 
     async def cancel(self, call_id: str) -> bool:
         """Attempt to cancel an in-flight tool call."""
@@ -235,35 +234,7 @@ class ToolRegistry:
 class BaseLLMAdapter(ABC):
     """Abstract interface for model providers and simulators."""
 
-    async def generate(
-        self,
-        prompt: str,
-        tools: list[ToolSchema] | None = None,
-        **kwargs: Any,
-    ) -> tuple[str, list[ToolCall], TokenUsage]:
-        """Generate response and tool calls."""
-        task = Task(prompt=prompt)
-        specs = [ToolSpec(name=t.name, description=t.description, parameters=t.parameters) for t in (tools or [])]
-        dec = await self.decide(task, [], specs)
-        usage = TokenUsage(
-            prompt_tokens=dec.input_tokens,
-            completion_tokens=dec.output_tokens,
-            total_tokens=dec.input_tokens + dec.output_tokens,
-        )
-        return dec.reasoning or str(dec.final_answer or ""), dec.tool_calls, usage
-
-    async def stream_generate(
-        self,
-        prompt: str,
-        tools: list[ToolSchema] | None = None,
-        **kwargs: Any,
-    ) -> AsyncIterator[StreamingChunk]:
-        """Stream token chunks and partial tool calls."""
-        task = Task(prompt=prompt)
-        specs = [ToolSpec(name=t.name, description=t.description, parameters=t.parameters) for t in (tools or [])]
-        async for chunk in self.stream_decision(task, [], specs):
-            yield chunk
-
+    @abstractmethod
     async def decide(
         self,
         task: Task,
@@ -271,15 +242,7 @@ class BaseLLMAdapter(ABC):
         tools: list[ToolSpec],
     ) -> LLMDecision:
         """Generates a complete decision."""
-        schemas = [ToolSchema(name=t.name, description=t.description, parameters=t.parameters) for t in tools]
-        text, calls, usage = await self.generate(task.prompt, schemas)
-        return LLMDecision(
-            reasoning=text,
-            tool_calls=calls,
-            final_answer=text if not calls else None,
-            input_tokens=usage.prompt_tokens,
-            output_tokens=usage.completion_tokens,
-        )
+        ...
 
     async def stream_decision(
         self,

@@ -1,9 +1,8 @@
-"""Experiment E3: Confidence-Gated Speculative Read Scheduler."""
+"""Experiment E3: Speculative Read Execution Scheduler."""
 
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, ToolRegistry
@@ -14,24 +13,19 @@ from toolspeed.schedulers.executor import ToolExecutor
 
 
 class SpeculativeReadScheduler(BaseScheduler):
-    """Experiment E3: Confidence-Gated Speculative Read Scheduler.
-    
-    Predicts likely read-only tool calls and launches them concurrently with the primary model's reasoning.
-    Supports real 'isolated', 'shared_cancellable', and 'single_slot' resource topologies.
+    """Experiment E3: Speculative Read Execution Scheduler.
+
+    Speculatively dispatches high-confidence read-only tools concurrently with model reasoning,
+    cancelling on decision divergence and reconciling results on speculation hits.
     """
 
-    def __init__(self, config: SchedulerConfig | None = None, speculation_enabled: bool = True) -> None:
-        cfg = config or SchedulerConfig()
-        cfg.speculation_enabled = speculation_enabled
+    def __init__(self, config: SchedulerConfig | None = None, speculation_enabled: bool | None = None) -> None:
+        cfg = config or SchedulerConfig(speculation_enabled=True)
+        if speculation_enabled is not None:
+            cfg.speculation_enabled = speculation_enabled
+        elif config is None:
+            cfg.speculation_enabled = True
         super().__init__(cfg)
-
-    def _matches_call(self, a: ToolCall, b: ToolCall) -> bool:
-        """Determines if two tool calls are semantically identical."""
-        name_a = a.name or a.tool_name
-        name_b = b.name or b.tool_name
-        if name_a != name_b:
-            return False
-        return a.arguments == b.arguments
 
     async def _execute_internal(
         self,
@@ -75,8 +69,6 @@ class SpeculativeReadScheduler(BaseScheduler):
                 if spec_task and not spec_task.done():
                     await cancel_and_await(spec_task)
 
-                spec_dispatch_time: float | None = None
-
                 # 1. Launch Draft Prediction and Main Model Reasoning CONCURRENTLY if speculation enabled
                 if spec_enabled:
                     draft_task = asyncio.create_task(
@@ -90,7 +82,7 @@ class SpeculativeReadScheduler(BaseScheduler):
 
                 if spec_enabled and draft_task is not None:
                     # Wait for whichever completes first
-                    done, pending = await asyncio.wait(
+                    done, _pending = await asyncio.wait(
                         [draft_task, model_decision_task],
                         return_when=asyncio.FIRST_COMPLETED,
                     )
@@ -114,7 +106,6 @@ class SpeculativeReadScheduler(BaseScheduler):
                                 ):
                                     speculative_call = predicted
                                     speculative_call.is_speculative = True
-                                    spec_dispatch_time = time.perf_counter()
                                     ctx.profiler.record_event(
                                         EventType.SPECULATION_START,
                                         details={
@@ -131,13 +122,8 @@ class SpeculativeReadScheduler(BaseScheduler):
                             spec_task = None
                             speculative_call = None
 
-                # Wait for main model decision to finish
+                # 2. Await Main Model Decision
                 decision = await model_decision_task
-
-                # If draft prediction is still running after model decision completes, cancel and await it immediately!
-                if draft_task and not draft_task.done():
-                    await cancel_and_await(draft_task)
-
                 ctx.profiler.end_span(
                     f"model_turn_{turn}",
                     EventType.MODEL_END,
@@ -145,9 +131,12 @@ class SpeculativeReadScheduler(BaseScheduler):
                 )
                 ctx.record_model_decision(decision)
 
-                # 2. Speculation Resolution
+                # Clean up draft task if still running
+                if draft_task and not draft_task.done():
+                    await cancel_and_await(draft_task)
+
                 if decision.final_answer is not None or not decision.tool_calls:
-                    # Model produced final answer -> clean up speculation
+                    # Cancel in-flight speculative task on final answer
                     if spec_task and not spec_task.done():
                         await cancel_and_await(spec_task)
                         ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
@@ -155,38 +144,36 @@ class SpeculativeReadScheduler(BaseScheduler):
                     elif spec_task and spec_task.done():
                         ctx.guardrails.record_speculation_resolved(hit=False, cancelled=False)
                         ctx.profiler.record_event(EventType.SPECULATION_MISS)
-                    spec_task = None
-                    speculative_call = None
                     return decision.final_answer
 
-                # Check if ANY tool call in the decision matches the speculative call
+                # 3. Check for Speculation Hit vs Miss
+                speculation_hit = False
+                hit_result: ToolResult | None = None
                 matching_call_index = -1
-                if speculative_call and spec_task:
+
+                if speculative_call is not None and spec_task is not None:
+                    # Compare predicted call against authoritative decision calls
                     for idx, call in enumerate(decision.tool_calls):
-                        if self._matches_call(speculative_call, call):
+                        pred_name = speculative_call.name or speculative_call.tool_name
+                        act_name = call.name or call.tool_name
+                        if pred_name == act_name and speculative_call.arguments == call.arguments:
+                            speculation_hit = True
                             matching_call_index = idx
                             break
 
-                speculation_hit = False
-                hit_result: ToolResult | None = None
-
-                if matching_call_index >= 0 and spec_task is not None:
-                    # Await or retrieve speculative result
+                if speculation_hit and spec_task is not None:
+                    # Hit: await the speculative result
                     try:
-                        if spec_task.done():
-                            hit_result = spec_task.result()
-                        else:
-                            hit_result = await spec_task
-
+                        hit_result = await spec_task
                         if hit_result.is_success:
-                            speculation_hit = True
-                            saved_ms = hit_result.execution_time_ms if (hit_result.execution_time_ms and hit_result.execution_time_ms > 0) else 25.0
+                            ctx.guardrails.record_speculation_resolved(hit=True)
                             ctx.profiler.record_event(
                                 EventType.SPECULATION_HIT,
-                                duration_ms=saved_ms,
-                                details={"tool": decision.tool_calls[matching_call_index].name, "saved_ms": saved_ms},
+                                details={
+                                    "tool": speculative_call.name if speculative_call else "unknown",
+                                    "confidence": speculative_call.speculation_confidence if speculative_call else 1.0,
+                                },
                             )
-                            ctx.guardrails.record_speculation_resolved(hit=True)
                         else:
                             speculation_hit = False
                     except (Exception, asyncio.CancelledError):
@@ -199,12 +186,10 @@ class SpeculativeReadScheduler(BaseScheduler):
                     # Miss: clean up speculation based on contention topology
                     if spec_task and not spec_task.done():
                         if contention_mode in ("shared_cancellable", "cancellable"):
-                            # Cancel immediately to free slot
                             await cancel_and_await(spec_task)
                             ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
                             ctx.profiler.record_event(EventType.SPECULATION_CANCELLED)
                         elif contention_mode == "single_slot":
-                            # Single-slot contention: blocks until the speculative slot completes
                             try:
                                 await spec_task
                             except Exception:
@@ -212,8 +197,7 @@ class SpeculativeReadScheduler(BaseScheduler):
                             ctx.guardrails.record_speculation_resolved(hit=False, cancelled=False)
                             ctx.profiler.record_event(EventType.SPECULATION_MISS)
                         elif contention_mode == "isolated":
-                            # Isolated mode: cancel background task without blocking authoritative dispatch
-                            asyncio.create_task(cancel_and_await(spec_task))
+                            await cancel_and_await(spec_task)
                             ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
                             ctx.profiler.record_event(EventType.SPECULATION_MISS)
                     elif spec_task and spec_task.done():
@@ -222,11 +206,10 @@ class SpeculativeReadScheduler(BaseScheduler):
                     spec_task = None
                     speculative_call = None
 
-                # Execute all decision tool calls
+                # 4. Execute all decision tool calls
                 for idx, call in enumerate(decision.tool_calls):
                     ctx.tool_calls.append(call)
                     if idx == matching_call_index and speculation_hit and hit_result is not None:
-                        # Reuse speculative result with authoritative call ID
                         hit_result.call_id = call.call_id
                         ctx.record_tool_result(hit_result)
                     else:
@@ -242,4 +225,3 @@ class SpeculativeReadScheduler(BaseScheduler):
                 await cancel_and_await(draft_task)
             if model_decision_task and not model_decision_task.done():
                 await cancel_and_await(model_decision_task)
-

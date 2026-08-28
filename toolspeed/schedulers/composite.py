@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
 import json
-import time
 from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, StreamingChunk, ToolRegistry
@@ -21,7 +19,7 @@ from toolspeed.schedulers.phase2_cache import ToolResultCache
 
 class CompositeScheduler(BaseScheduler):
     """Unified Composite Optimizer combining all verified latency reduction mechanisms:
-    
+
     1. Predictive Prewarming for cold-start tools / sandboxes
     2. Exact & Semantic Result Caching with Freshness Contracts
     3. JIT Workflow Fusion for recognized sub-plans with Deopt Fallback
@@ -101,9 +99,7 @@ class CompositeScheduler(BaseScheduler):
                 # 4. Speculative Prediction concurrently with Streaming Generation
                 spec_call: ToolCall | None = None
                 if self.config.speculation_enabled:
-                    draft_task = asyncio.create_task(
-                        model.predict_draft(ctx.task, ctx.history, tools.list_specs())
-                    )
+                    draft_task = asyncio.create_task(model.predict_draft(ctx.task, ctx.history, tools.list_specs()))
 
                 ctx.profiler.start_span(f"composite_turn_{turn}")
                 collected_chunks: list[StreamingChunk] = []
@@ -133,7 +129,9 @@ class CompositeScheduler(BaseScheduler):
                                 ):
                                     spec_call = predicted
                                     spec_call.is_speculative = True
-                                    ctx.profiler.record_event(EventType.SPECULATION_START, details={"tool": predicted.name})
+                                    ctx.profiler.record_event(
+                                        EventType.SPECULATION_START, details={"tool": predicted.name}
+                                    )
                                     spec_task = asyncio.create_task(
                                         ctx.executor.execute(predicted, is_speculative=True)
                                     )
@@ -158,10 +156,13 @@ class CompositeScheduler(BaseScheduler):
                                         snapshot = copy.deepcopy(early_call.arguments)
                                         ctx.profiler.record_event(
                                             EventType.COMMIT_HORIZON_REACHED,
-                                            details={"tool": early_call.name, "fingerprint": committed.semantic_fingerprint},
+                                            details={
+                                                "tool": early_call.name,
+                                                "fingerprint": committed.semantic_fingerprint,
+                                            },
                                         )
                                         t = asyncio.create_task(
-                                            ctx.executor.execute(early_call, is_early_dispatched=True)
+                                            ctx.executor.execute(early_call)
                                         )
                                         in_flight_commit[cid] = (t, early_call, snapshot)
 
@@ -208,7 +209,9 @@ class CompositeScheduler(BaseScheduler):
                 matching_spec_idx = -1
                 if spec_call and spec_task:
                     for idx, c in enumerate(decision.tool_calls):
-                        if (c.name or c.tool_name) == (spec_call.name or spec_call.tool_name) and c.arguments == spec_call.arguments:
+                        if (c.name or c.tool_name) == (
+                            spec_call.name or spec_call.tool_name
+                        ) and c.arguments == spec_call.arguments:
                             matching_spec_idx = idx
                             break
 
@@ -278,7 +281,9 @@ class CompositeScheduler(BaseScheduler):
                     # Early commit horizon matching
                     if c.call_id in in_flight_commit:
                         task, early_call, snapshot = in_flight_commit.pop(c.call_id)
-                        if c.arguments != snapshot or (c.name or c.tool_name) != (early_call.name or early_call.tool_name):
+                        if c.arguments != snapshot or (c.name or c.tool_name) != (
+                            early_call.name or early_call.tool_name
+                        ):
                             await cancel_and_await(task)
                             ctx.profiler.record_event(
                                 EventType.GUARDRAIL_VIOLATION,
@@ -350,7 +355,7 @@ class CompositeScheduler(BaseScheduler):
                                 n.status = "failed"
                         break
 
-                    done, pending = await asyncio.wait(
+                    done, _pending = await asyncio.wait(
                         active_dag_tasks.keys(),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
