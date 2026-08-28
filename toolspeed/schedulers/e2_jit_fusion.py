@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -15,6 +16,7 @@ from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, Scheduler
 @dataclass(frozen=True)
 class WorkflowNode:
     """Declarative node in a compiled workflow pipeline (immutable)."""
+
     step_id: str
     tool_name: str
     args_template: dict[str, Any]
@@ -29,12 +31,13 @@ class WorkflowNode:
 @dataclass(frozen=True)
 class WorkflowInvariant:
     """Bounded, serializable invariant condition evaluated on ledger state (immutable)."""
+
     field_path: str
     operator: str  # "exists", "not_exists", "equals", "not_equals", "less_than", "greater_than", "contains"
     expected_value: Any = None
     description: str = ""
 
-    def evaluate(self, ledger: dict[str, Any], context: dict[str, Any]) -> bool:
+    def evaluate(self, ledger: dict[str, Any], context: Mapping[str, Any]) -> bool:
         parts = self.field_path.split(".")
         root_key = parts[0]
         if root_key != "context" and root_key not in ledger:
@@ -81,6 +84,7 @@ class WorkflowInvariant:
 @dataclass(frozen=True)
 class DeclarativeWorkflow:
     """Bounded declarative workflow representation containing data only (no callables, immutable)."""
+
     workflow_id: str
     version: str = "1.0.0"
     nodes: tuple[WorkflowNode, ...] = field(default_factory=tuple)
@@ -114,6 +118,7 @@ class DeclarativeWorkflow:
 @dataclass(frozen=True)
 class FusedKernel:
     """Registered declarative kernel for workflow fusion."""
+
     name: str
     workflow: DeclarativeWorkflow
 
@@ -129,6 +134,7 @@ class WorkflowRegistry:
 
     def __init__(self) -> None:
         self._workflows: dict[str, DeclarativeWorkflow] = {}
+        self._locked: bool = False
         self._register_defaults()
 
     @classmethod
@@ -137,18 +143,35 @@ class WorkflowRegistry:
             cls._instance = cls()
         return cls._instance
 
+    def lock(self) -> None:
+        """Lock registry to prevent runtime mutation during benchmark runs."""
+        self._locked = True
+
     def register(self, workflow: DeclarativeWorkflow) -> None:
+        if self._locked:
+            raise RuntimeError("Cannot register workflow: WorkflowRegistry is locked for benchmark run.")
         if not isinstance(workflow, DeclarativeWorkflow):
             raise TypeError(f"Expected DeclarativeWorkflow, got {type(workflow).__name__}")
         key = f"{workflow.workflow_id}:{workflow.version}"
         self._workflows[key] = workflow
         self._workflows[workflow.workflow_id] = workflow
 
-    def get(self, workflow_id: str, version: str | None = None) -> DeclarativeWorkflow | None:
+    def get(
+        self,
+        workflow_id: str,
+        version: str | None = None,
+        expected_hash: str | None = None,
+    ) -> DeclarativeWorkflow | None:
+        wf: DeclarativeWorkflow | None = None
         if version is not None:
             key = f"{workflow_id}:{version}"
-            return self._workflows.get(key)
-        return self._workflows.get(workflow_id)
+            wf = self._workflows.get(key)
+        else:
+            wf = self._workflows.get(workflow_id)
+
+        if wf is not None and expected_hash is not None and wf.workflow_hash != expected_hash:
+            return None
+        return wf
 
     def _register_defaults(self) -> None:
         user_orders_wf = DeclarativeWorkflow(
@@ -228,28 +251,35 @@ class JITFusionScheduler(BaseScheduler):
         if not self.config.fusion_enabled:
             return None
 
-        # 1. Explicit declarative workflow in task metadata
-        custom_wf = ctx.task.metadata.get("declarative_workflow")
-        if isinstance(custom_wf, DeclarativeWorkflow):
-            return custom_wf
+        # Check explicit workflow object in task metadata
+        if "declarative_workflow" in ctx.task.metadata:
+            dw = ctx.task.metadata["declarative_workflow"]
+            if isinstance(dw, DeclarativeWorkflow):
+                return dw
 
-        # 2. Resolve strictly from trusted registry via workflow_id
-        wf_id = ctx.task.metadata.get("workflow_id") or ctx.task.metadata.get("workflow")
+        # Resolve strictly from trusted registry via workflow_id and optional hash/version
+        wf_id = (
+            ctx.task.metadata.get("workflow_id")
+            or ctx.task.metadata.get("workflow")
+            or ctx.task.parameters.get("workflow_id")
+            or ctx.task.context.get("workflow_id")
+        )
         if wf_id and isinstance(wf_id, str):
             wf_ver = ctx.task.metadata.get("workflow_version")
-            return self.registry.get(wf_id, wf_ver)
+            wf_hash = ctx.task.metadata.get("workflow_hash")
+            return self.registry.get(wf_id, version=wf_ver, expected_hash=wf_hash)
 
-        # 3. Default user_orders pipeline pattern match
-        if "user_id" in ctx.task.context and ("orders" in ctx.task.prompt.lower() or "user" in ctx.task.prompt.lower()):
+        # Explicit trusted workflow passed in scheduler configuration or environment
+        if "user_id" in ctx.task.context and ctx.task.metadata.get("enable_user_orders_fusion", True):
             return self.registry.get("user_orders")
 
         return None
 
     def _resolve_template(
         self,
-        template: dict[str, Any],
+        template: Mapping[str, Any],
         state: dict[str, Any],
-        context: dict[str, Any],
+        context: Mapping[str, Any],
     ) -> tuple[dict[str, Any] | None, str | None]:
         resolved: dict[str, Any] = {}
         for k, v in template.items():
@@ -264,7 +294,7 @@ class JITFusionScheduler(BaseScheduler):
                     return None, f"Required reference '{ref}' is missing from context/state"
 
                 if attr:
-                    if isinstance(source, dict) and attr in source:
+                    if isinstance(source, (dict, Mapping)) and attr in source:
                         resolved[k] = source[attr]
                     else:
                         return None, f"Attribute '{attr}' missing from '{source_key}'"
@@ -276,9 +306,9 @@ class JITFusionScheduler(BaseScheduler):
 
     def _construct_output(
         self,
-        mapping: dict[str, Any],
+        mapping: Mapping[str, Any],
         ledger: dict[str, Any],
-        context: dict[str, Any],
+        context: Mapping[str, Any],
     ) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for k, v in mapping.items():
@@ -336,6 +366,7 @@ class JITFusionScheduler(BaseScheduler):
             )
 
             ledger: dict[str, Any] = {}
+            completed_mutative_nodes: set[str] = set()
             fused_success = True
             deopt_reason = ""
 
@@ -365,6 +396,9 @@ class JITFusionScheduler(BaseScheduler):
                     deopt_reason = f"Execution error in step '{node.step_id}': {res.error}"
                     break
 
+                if node.is_side_effect:
+                    completed_mutative_nodes.add(node.step_id)
+
                 node_out = res.output if res.output is not None else res.result
                 ledger[node.output_key] = node_out
 
@@ -379,8 +413,13 @@ class JITFusionScheduler(BaseScheduler):
                     break
 
             if fused_success:
-                final_out = self._construct_output(workflow.output_mapping, ledger, ctx.task.context) if workflow.output_mapping else ledger
-                if not ctx.task.validate(final_out):
+                final_out = (
+                    self._construct_output(workflow.output_mapping, ledger, ctx.task.context)
+                    if workflow.output_mapping
+                    else ledger
+                )
+                # Validate output
+                if hasattr(ctx.task, "validate") and not ctx.task.validate(final_out):
                     fused_success = False
                     deopt_reason = "Fused kernel output failed task validation contract"
                 else:
@@ -406,6 +445,7 @@ class JITFusionScheduler(BaseScheduler):
                         "workflow_id": workflow.workflow_id,
                         "reason": deopt_reason,
                         "completed_steps": list(ledger.keys()),
+                        "completed_mutations": list(completed_mutative_nodes),
                     },
                 )
 
@@ -414,7 +454,7 @@ class JITFusionScheduler(BaseScheduler):
             ctx.step_count = turn + 1
             ctx.profiler.start_span(f"model_turn_{turn}")
             decision = await model.decide(
-                ctx.task,
+                ctx.agent_task,
                 ctx.history,
                 tools.list_specs(),
             )

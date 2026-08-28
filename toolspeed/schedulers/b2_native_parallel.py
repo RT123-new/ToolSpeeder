@@ -28,7 +28,7 @@ class NativeParallelScheduler(BaseScheduler):
             # 1. Model Decision Step
             ctx.profiler.start_span(f"model_turn_{turn}")
             decision = await model.decide(
-                ctx.task,
+                ctx.agent_task,
                 ctx.history,
                 tools.list_specs(),
             )
@@ -46,7 +46,7 @@ class NativeParallelScheduler(BaseScheduler):
             for call in decision.tool_calls:
                 ctx.tool_calls.append(call)
 
-            async def _run_call(call):
+            async def _run_call(call: Any) -> ToolResult:
                 return await ctx.executor.execute(call)
 
             results: list[ToolResult] = await asyncio.gather(*[_run_call(c) for c in decision.tool_calls])

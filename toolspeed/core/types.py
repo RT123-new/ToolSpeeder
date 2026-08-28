@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -12,6 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 
@@ -115,6 +117,18 @@ def strict_json_dumps(obj: Any, indent: int | None = 2) -> str:
     return json.dumps(sanitized, indent=indent, allow_nan=False)
 
 
+def compute_file_sha256(file_path: Any) -> str:
+    """Compute SHA-256 over exact file bytes."""
+    p = Path(file_path)
+    if not p.exists() or not p.is_file():
+        raise FileNotFoundError(f"Cannot compute hash for missing file: {p}")
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 @dataclass(frozen=True)
 class AgentTask:
     """Task input presented strictly to the agent/model (NO oracle or expected outputs)."""
@@ -157,13 +171,14 @@ class StateSnapshot:
     data: Mapping[str, Any] = field(default_factory=dict)
 
     def clone(self) -> StateSnapshot:
-        import copy
-
         return StateSnapshot(
             state_id=str(uuid.uuid4()),
             namespace=self.namespace,
             data=copy.deepcopy(dict(self.data)),
         )
+
+    def compute_hash(self) -> str:
+        return hashlib.sha256(json.dumps(dict(self.data), sort_keys=True).encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -171,6 +186,14 @@ class StateSnapshot:
             "namespace": self.namespace,
             "data": dict(self.data),
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> StateSnapshot:
+        return cls(
+            state_id=data.get("state_id", str(uuid.uuid4())),
+            namespace=data.get("namespace", "default"),
+            data=dict(data.get("data", {})),
+        )
 
 
 @dataclass(frozen=True)
@@ -198,6 +221,19 @@ class ExpectedOutcome:
             "oracle_canary": self.oracle_canary,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ExpectedOutcome:
+        return cls(
+            expected_final_value=data.get("expected_final_value"),
+            expected_tool_sequence=tuple(data.get("expected_tool_sequence", ())),
+            expected_tool_arguments=dict(data.get("expected_tool_arguments", {})),
+            expected_state_diff=dict(data.get("expected_state_diff", {})),
+            required_tools=tuple(data.get("required_tools", ())),
+            disallowed_tools=tuple(data.get("disallowed_tools", ())),
+            max_allowed_calls=int(data.get("max_allowed_calls", 100)),
+            oracle_canary=data.get("oracle_canary", "ORACLE_CANARY_SECRET_789XYZ"),
+        )
+
 
 @dataclass(frozen=True)
 class ApprovalGrant:
@@ -209,6 +245,8 @@ class ApprovalGrant:
     argument_fingerprint: str
     expires_at: float
     authority: str
+    tenant: str = "default_tenant"
+    run_id: str = "default_run"
     single_use: bool = True
 
     @classmethod
@@ -219,28 +257,90 @@ class ApprovalGrant:
         authority: str = "trusted_system",
         ttl_seconds: float = 300.0,
         subject: str = "default_subject",
+        tenant: str = "default_tenant",
+        run_id: str = "default_run",
         single_use: bool = True,
+        current_time: float | None = None,
     ) -> ApprovalGrant:
         fp_payload = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}".encode()
         fp = hashlib.sha256(fp_payload).hexdigest()[:16]
+        now = current_time if current_time is not None else time.perf_counter()
         return cls(
             approval_id=str(uuid.uuid4()),
             subject=subject,
             tool_name=tool_name,
             argument_fingerprint=fp,
-            expires_at=time.perf_counter() + ttl_seconds,
+            expires_at=now + ttl_seconds,
             authority=authority,
+            tenant=tenant,
+            run_id=run_id,
             single_use=single_use,
         )
 
-    def matches(self, tool_name: str, arguments: Mapping[str, Any]) -> bool:
+    def matches(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        subject: str | None = None,
+        tenant: str | None = None,
+        run_id: str | None = None,
+        current_time: float | None = None,
+        allowed_authorities: Sequence[str] = ("trusted_system", "human_supervisor"),
+    ) -> bool:
+        if self.authority not in allowed_authorities:
+            return False
         if self.tool_name != tool_name:
             return False
-        if time.perf_counter() > self.expires_at:
+        if subject is not None and self.subject != subject:
+            return False
+        if tenant is not None and self.tenant != tenant:
+            return False
+        if run_id is not None and self.run_id != run_id:
+            return False
+        now = current_time if current_time is not None else time.perf_counter()
+        if now > self.expires_at:
             return False
         fp_payload = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}".encode()
         fp = hashlib.sha256(fp_payload).hexdigest()[:16]
         return self.argument_fingerprint == fp
+
+
+@dataclass
+class ExecutionAuthorityContext:
+    """Opaque trusted capability store attached to the execution context (NEVER passed to the model)."""
+
+    tenant: str = "default_tenant"
+    run_id: str = "default_run"
+    subject: str = "default_subject"
+    allowed_authorities: list[str] = field(default_factory=lambda: ["trusted_system", "human_supervisor"])
+    grants: list[ApprovalGrant] = field(default_factory=list)
+    consumed_grant_ids: set[str] = field(default_factory=set)
+
+    def add_grant(self, grant: ApprovalGrant) -> None:
+        self.grants.append(grant)
+
+    def verify_and_consume_grant(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        current_time: float | None = None,
+    ) -> bool:
+        for grant in self.grants:
+            if grant.approval_id in self.consumed_grant_ids:
+                continue
+            if grant.matches(
+                tool_name=tool_name,
+                arguments=arguments,
+                subject=self.subject,
+                tenant=self.tenant,
+                run_id=self.run_id,
+                current_time=current_time,
+                allowed_authorities=self.allowed_authorities,
+            ):
+                if grant.single_use:
+                    self.consumed_grant_ids.add(grant.approval_id)
+                return True
+        return False
 
 
 @dataclass(frozen=True)
@@ -263,8 +363,6 @@ class CommittedCall:
         token_index: int = 0,
         byte_offset: int = 0,
     ) -> CommittedCall:
-        import copy
-
         t_name = call.name or call.tool_name
         args_copy = copy.deepcopy(call.arguments)
         fp_payload = f"{t_name}:{json.dumps(args_copy, sort_keys=True)}:{schema_hash}".encode()
@@ -280,26 +378,15 @@ class CommittedCall:
         )
 
 
-def compute_file_sha256(file_path: Any) -> str:
-    """Compute SHA-256 over exact file bytes."""
-    from pathlib import Path
-
-    p = Path(file_path)
-    if not p.exists() or not p.is_file():
-        raise FileNotFoundError(f"Cannot compute hash for missing file: {p}")
-    h = hashlib.sha256()
-    with open(p, "rb") as f:
-        while chunk := f.read(65536):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 @dataclass
 class ArtifactManifest:
     """Provenance and execution environment metadata for benchmark artifact bundles."""
 
     git_sha: str = "unknown"
+    git_tree_sha: str = "unknown"
     git_dirty: bool = False
+    workflow_run_id: str = ""
+    workflow_job_id: str = ""
     command: str = ""
     evidence_level: EvidenceLevel = EvidenceLevel.SYNTHETIC
     timestamp_utc: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
@@ -308,13 +395,18 @@ class ArtifactManifest:
     os_platform: str = f"{platform.system()} {platform.release()} ({platform.machine()})"
     hardware_info: dict[str, Any] = field(default_factory=dict)
     dependency_versions: dict[str, str] = field(default_factory=dict)
-    benchmark_config_hash: str = ""
-    workload_fixture_hash: str = ""
-    raw_trace_hash: str = ""
+    benchmark_plan_hash: str = ""
+    fixture_manifest_hash: str = ""
+    cases_hash: str = ""
+    baseline_trace_hash: str = ""
+    candidate_trace_hash: str = ""
+    controls_trace_hash: str = ""
+    result_hash: str = ""
+    falsification_hash: str = ""
     file_hashes: dict[str, str] = field(default_factory=dict)
     report_generator_version: str = "2.0.0"
     is_simulated: bool = False
-    is_verdict_eligible: bool = True
+    is_verdict_eligible: bool = False
     trial_count: int = 0
     warmup_count: int = 0
     resource_topology: dict[str, Any] = field(default_factory=dict)
@@ -332,7 +424,10 @@ class ArtifactManifest:
         return {
             "git_sha": self.git_sha,
             "code_git_sha": self.git_sha,
+            "git_tree_sha": self.git_tree_sha,
             "git_dirty": self.git_dirty,
+            "workflow_run_id": self.workflow_run_id,
+            "workflow_job_id": self.workflow_job_id,
             "command": self.command,
             "evidence_level": self.evidence_level.value
             if isinstance(self.evidence_level, EvidenceLevel)
@@ -343,9 +438,14 @@ class ArtifactManifest:
             "os_platform": self.os_platform,
             "hardware_info": self.hardware_info,
             "dependency_versions": self.dependency_versions,
-            "benchmark_config_hash": self.benchmark_config_hash,
-            "workload_fixture_hash": self.workload_fixture_hash,
-            "raw_trace_hash": self.raw_trace_hash,
+            "benchmark_plan_hash": self.benchmark_plan_hash,
+            "fixture_manifest_hash": self.fixture_manifest_hash,
+            "cases_hash": self.cases_hash,
+            "baseline_trace_hash": self.baseline_trace_hash,
+            "candidate_trace_hash": self.candidate_trace_hash,
+            "controls_trace_hash": self.controls_trace_hash,
+            "result_hash": self.result_hash,
+            "falsification_hash": self.falsification_hash,
             "file_hashes": self.file_hashes,
             "report_generator_version": self.report_generator_version,
             "is_simulated": self.is_simulated,
@@ -357,22 +457,61 @@ class ArtifactManifest:
         }
 
     @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ArtifactManifest:
+        ev_level_raw = data.get("evidence_level", "synthetic")
+        try:
+            ev_level = EvidenceLevel(ev_level_raw)
+        except ValueError:
+            ev_level = EvidenceLevel.SYNTHETIC
+        return cls(
+            git_sha=data.get("git_sha") or data.get("code_git_sha", "unknown"),
+            git_tree_sha=data.get("git_tree_sha", "unknown"),
+            git_dirty=bool(data.get("git_dirty", False)),
+            workflow_run_id=data.get("workflow_run_id", ""),
+            workflow_job_id=data.get("workflow_job_id", ""),
+            command=data.get("command", ""),
+            evidence_level=ev_level,
+            timestamp_utc=data.get("timestamp_utc", ""),
+            seed=int(data.get("seed", 0)),
+            python_version=data.get("python_version", platform.python_version()),
+            os_platform=data.get("os_platform", ""),
+            hardware_info=dict(data.get("hardware_info", {})),
+            dependency_versions=dict(data.get("dependency_versions", {})),
+            benchmark_plan_hash=data.get("benchmark_plan_hash", ""),
+            fixture_manifest_hash=data.get("fixture_manifest_hash", ""),
+            cases_hash=data.get("cases_hash", ""),
+            baseline_trace_hash=data.get("baseline_trace_hash", ""),
+            candidate_trace_hash=data.get("candidate_trace_hash", ""),
+            controls_trace_hash=data.get("controls_trace_hash", ""),
+            result_hash=data.get("result_hash", ""),
+            falsification_hash=data.get("falsification_hash", ""),
+            file_hashes=dict(data.get("file_hashes", {})),
+            report_generator_version=data.get("report_generator_version", "2.0.0"),
+            is_simulated=bool(data.get("is_simulated", False)),
+            is_verdict_eligible=bool(data.get("is_verdict_eligible", False)),
+            trial_count=int(data.get("trial_count", 0)),
+            warmup_count=int(data.get("warmup_count", 0)),
+            resource_topology=dict(data.get("resource_topology", {})),
+            required_metric_policy_version=data.get("required_metric_policy_version", "2.0.0"),
+        )
+
+    @classmethod
     def create(
         cls,
         evidence_level: EvidenceLevel = EvidenceLevel.SYNTHETIC,
         seed: int = 42,
         command: str = "toolspeed",
         is_simulated: bool = False,
-        is_verdict_eligible: bool = True,
+        is_verdict_eligible: bool = False,
         trial_count: int = 0,
         warmup_count: int = 0,
-        config_data: Any = None,
-        fixture_data: Any = None,
-        trace_data: Any = None,
         resource_topology: dict[str, Any] | None = None,
         file_hashes: dict[str, str] | None = None,
+        workflow_run_id: str = "",
+        workflow_job_id: str = "",
     ) -> ArtifactManifest:
         sha = "unknown"
+        tree_sha = "unknown"
         dirty = False
         try:
             import subprocess
@@ -382,6 +521,11 @@ class ArtifactManifest:
             )
             if res_sha.returncode == 0:
                 sha = res_sha.stdout.strip()
+            res_tree = subprocess.run(
+                ["git", "rev-parse", "HEAD^{tree}"], capture_output=True, text=True, timeout=2, check=False
+            )
+            if res_tree.returncode == 0:
+                tree_sha = res_tree.stdout.strip()
             res_status = subprocess.run(
                 ["git", "status", "--porcelain"], capture_output=True, text=True, timeout=2, check=False
             )
@@ -398,33 +542,27 @@ class ArtifactManifest:
         except Exception:
             pass
 
-        config_hash = (
-            hashlib.sha256(json.dumps(sanitize_for_json(config_data), sort_keys=True).encode("utf-8")).hexdigest()
-            if config_data
-            else hashlib.sha256(f"config:{command}:{seed}".encode()).hexdigest()
-        )
-        fixture_hash = (
-            hashlib.sha256(json.dumps(sanitize_for_json(fixture_data), sort_keys=True).encode("utf-8")).hexdigest()
-            if fixture_data
-            else hashlib.sha256(f"fixture:{command}:{evidence_level}".encode()).hexdigest()
-        )
-        trace_hash = (
-            hashlib.sha256(json.dumps(sanitize_for_json(trace_data), sort_keys=True).encode("utf-8")).hexdigest()
-            if trace_data
-            else hashlib.sha256(f"trace:{command}:{seed}:{trial_count}".encode()).hexdigest()
-        )
+        hashes = file_hashes or {}
 
         return cls(
             git_sha=sha,
+            git_tree_sha=tree_sha,
             git_dirty=dirty,
+            workflow_run_id=workflow_run_id,
+            workflow_job_id=workflow_job_id,
             command=command,
             evidence_level=evidence_level,
             seed=seed,
             dependency_versions=deps,
-            benchmark_config_hash=config_hash,
-            workload_fixture_hash=fixture_hash,
-            raw_trace_hash=trace_hash,
-            file_hashes=file_hashes or {},
+            benchmark_plan_hash=hashes.get("benchmark_plan.json", ""),
+            fixture_manifest_hash=hashes.get("fixture_manifest.json", ""),
+            cases_hash=hashes.get("cases.jsonl", ""),
+            baseline_trace_hash=hashes.get("baseline_traces.jsonl", ""),
+            candidate_trace_hash=hashes.get("candidate_traces.jsonl", ""),
+            controls_trace_hash=hashes.get("controls_traces.jsonl", ""),
+            result_hash=hashes.get("result.json", ""),
+            falsification_hash=hashes.get("falsification.json", ""),
+            file_hashes=hashes,
             is_simulated=is_simulated,
             is_verdict_eligible=is_verdict_eligible,
             trial_count=trial_count,
@@ -718,7 +856,13 @@ class LatencyProfile:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LatencyProfile:
-        return cls(**{k: float(v) for k, v in data.items() if k in cls.__dataclass_fields__})
+        kwargs: dict[str, Any] = {}
+        for k, v in data.items():
+            if k == "rate_limit_capacity":
+                kwargs[k] = int(v)
+            elif k in cls.__dataclass_fields__:
+                kwargs[k] = float(v)
+        return cls(**kwargs)
 
 
 @dataclass
@@ -787,7 +931,7 @@ class Task:
     task_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     prompt: str = ""
     expected_output: Any = None
-    validator: Callable[..., bool] | None = None
+    validator: Callable[..., Any] | None = None
     context: dict[str, Any] = field(default_factory=dict)
     parameters: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -798,16 +942,28 @@ class Task:
             prompt=self.prompt,
             workload_family=self.metadata.get("workload_family", "default"),
             context=dict(self.context),
-            parameters=dict(self.metadata.get("parameters", {})),
+            parameters=dict(self.metadata.get("parameters", self.parameters)),
             metadata=dict(self.metadata),
         )
 
-    def validate(self, actual_output: Any, trace: ExecutionTrace | None = None) -> bool:
+    def validate(
+        self,
+        actual_output: Any,
+        trace: ExecutionTrace | None = None,
+        initial_state: StateSnapshot | None = None,
+        final_state: StateSnapshot | None = None,
+    ) -> bool:
         """Strict validation: task cannot automatically pass if neither validator nor expected_output is provided."""
         if self.validator is not None:
             try:
                 if hasattr(self.validator, "validate"):
-                    res = self.validator.validate(self, actual_output, trace=trace)
+                    res = self.validator.validate(
+                        task=self,
+                        output=actual_output,
+                        trace=trace,
+                        initial_state=initial_state,
+                        final_state=final_state,
+                    )
                     if isinstance(res, tuple):
                         return bool(res[0])
                     return bool(res)
@@ -821,7 +977,6 @@ class Task:
             except Exception:
                 return False
 
-        # Benchmark-wide invariant: A model emitting the expected final answer after an unhandled tool failure must not pass!
         if trace is not None:
             for r in trace.tool_results:
                 if (r.is_error or r.error is not None) and not r.cancelled and not r.speculated:
@@ -830,7 +985,7 @@ class Task:
         if self.expected_output is None:
             return False
 
-        return self.expected_output == actual_output
+        return bool(self.expected_output == actual_output)
 
 
 @dataclass
@@ -838,8 +993,17 @@ class ExecutionTrace:
     """Complete chronological audit trace of an agent task execution."""
 
     task_id: str
+    pair_id: str = ""
+    arm: str = "candidate"  # "baseline" or "candidate"
     workload_family: str = "default"
+    workload_id: str = "default"
+    mechanism: str = "default"
     scheduler_name: str = "default"
+    case_id: str = ""
+    fixture_hash: str = ""
+    initial_state_hash: str = ""
+    final_state: dict[str, Any] = field(default_factory=dict)
+    model_decisions: list[dict[str, Any]] = field(default_factory=list)
     success: bool = False
     final_output: Any = None
     start_ns: int = 0
@@ -853,6 +1017,11 @@ class ExecutionTrace:
     tool_results: list[ToolResult] = field(default_factory=list)
     token_usage: TokenUsage = field(default_factory=TokenUsage)
     validator_result: dict[str, Any] = field(default_factory=dict)
+    approval_decisions: list[dict[str, Any]] = field(default_factory=list)
+    side_effects_recorded: int = 0
+    cost_usd: float = 0.0
+    seed: int = 0
+    timing_source: str = "virtual_clock"
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -871,6 +1040,11 @@ class ExecutionTrace:
 
         if self.success and self.ccl_ms is None and self.duration_ms > 0:
             self.ccl_ms = self.duration_ms
+
+        if not self.workload_id and self.workload_family:
+            self.workload_id = self.workload_family
+        elif not self.workload_family and self.workload_id:
+            self.workload_family = self.workload_id
 
     @property
     def duration_ns(self) -> int:
@@ -891,8 +1065,17 @@ class ExecutionTrace:
     def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
+            "pair_id": self.pair_id,
+            "arm": self.arm,
             "workload_family": self.workload_family,
+            "workload_id": self.workload_id,
+            "mechanism": self.mechanism,
             "scheduler_name": self.scheduler_name,
+            "case_id": self.case_id,
+            "fixture_hash": self.fixture_hash,
+            "initial_state_hash": self.initial_state_hash,
+            "final_state": self.final_state,
+            "model_decisions": self.model_decisions,
             "success": self.success,
             "final_output": self.final_output,
             "start_ns": self.start_ns,
@@ -906,6 +1089,11 @@ class ExecutionTrace:
             "tool_results": [r.to_dict() for r in self.tool_results],
             "token_usage": self.token_usage.to_dict(),
             "validator_result": self.validator_result,
+            "approval_decisions": self.approval_decisions,
+            "side_effects_recorded": self.side_effects_recorded,
+            "cost_usd": self.cost_usd,
+            "seed": self.seed,
+            "timing_source": self.timing_source,
             "metadata": self.metadata,
         }
 
@@ -913,8 +1101,17 @@ class ExecutionTrace:
     def from_dict(cls, data: dict[str, Any]) -> ExecutionTrace:
         return cls(
             task_id=data["task_id"],
+            pair_id=data.get("pair_id", ""),
+            arm=data.get("arm", "candidate"),
             workload_family=data.get("workload_family", "default"),
+            workload_id=data.get("workload_id", data.get("workload_family", "default")),
+            mechanism=data.get("mechanism", "default"),
             scheduler_name=data.get("scheduler_name", "default"),
+            case_id=data.get("case_id", ""),
+            fixture_hash=data.get("fixture_hash", ""),
+            initial_state_hash=data.get("initial_state_hash", ""),
+            final_state=dict(data.get("final_state", {})),
+            model_decisions=list(data.get("model_decisions", [])),
             success=bool(data.get("success", False)),
             final_output=data.get("final_output"),
             start_ns=int(data.get("start_ns", 0) or data.get("start_time_ns", 0)),
@@ -928,6 +1125,11 @@ class ExecutionTrace:
             tool_results=[ToolResult.from_dict(r) for r in data.get("tool_results", [])],
             token_usage=TokenUsage.from_dict(data.get("token_usage", {})),
             validator_result=dict(data.get("validator_result", {})),
+            approval_decisions=list(data.get("approval_decisions", [])),
+            side_effects_recorded=int(data.get("side_effects_recorded", 0)),
+            cost_usd=float(data.get("cost_usd", 0.0)),
+            seed=int(data.get("seed", 0)),
+            timing_source=data.get("timing_source", "virtual_clock"),
             metadata=dict(data.get("metadata", {})),
         )
 
@@ -941,15 +1143,29 @@ class TaskValidator(ABC):
         task: Any,
         output: Any,
         trace: ExecutionTrace | None = None,
+        initial_state: StateSnapshot | None = None,
+        final_state: StateSnapshot | None = None,
     ) -> tuple[bool, str, dict[str, Any]]:
-        """Validate output and execution trace."""
+        """Validate output, trace, and state transitions."""
         ...
 
     def __call__(self, *args: Any, **kwargs: Any) -> bool:
         if len(args) == 2 and isinstance(args[0], Task):
-            res = self.validate(args[0], args[1], kwargs.get("trace"))
+            res = self.validate(
+                args[0],
+                args[1],
+                kwargs.get("trace"),
+                kwargs.get("initial_state"),
+                kwargs.get("final_state"),
+            )
         elif len(args) == 1:
-            res = self.validate(None, args[0], kwargs.get("trace"))
+            res = self.validate(
+                None,
+                args[0],
+                kwargs.get("trace"),
+                kwargs.get("initial_state"),
+                kwargs.get("final_state"),
+            )
         else:
             res = self.validate(*args, **kwargs)  # type: ignore[misc]
         if isinstance(res, tuple):
@@ -962,7 +1178,7 @@ class FunctionValidator(TaskValidator):
 
     def __init__(
         self,
-        fn: Callable[[Any, Any, ExecutionTrace | None], tuple[bool, str, dict[str, Any]]],
+        fn: Callable[..., tuple[bool, str, dict[str, Any]] | bool],
     ):
         self._fn = fn
 
@@ -971,8 +1187,29 @@ class FunctionValidator(TaskValidator):
         task: Any,
         output: Any,
         trace: ExecutionTrace | None = None,
+        initial_state: StateSnapshot | None = None,
+        final_state: StateSnapshot | None = None,
     ) -> tuple[bool, str, dict[str, Any]]:
-        return self._fn(task, output, trace)
+        try:
+            res = self._fn(
+                task=task,
+                output=output,
+                trace=trace,
+                initial_state=initial_state,
+                final_state=final_state,
+            )
+        except TypeError:
+            try:
+                res = self._fn(task, output, trace)
+            except TypeError:
+                res = self._fn(output)
+
+        if isinstance(res, tuple):
+            valid = bool(res[0])
+            msg = str(res[1]) if len(res) > 1 else ("Passed" if valid else "Failed")
+            details = dict(res[2]) if len(res) > 2 and isinstance(res[2], dict) else {}
+            return valid, msg, details
+        return bool(res), "Passed" if res else "Failed", {}
 
 
 @dataclass(frozen=True)
@@ -1000,10 +1237,10 @@ class GuardrailMetrics:
 
     total_tasks: int = 0
     successful_tasks: int = 0
-    exact_success: float = 0.0
-    exact_accuracy: float = 0.0
-    tool_selection_accuracy: float = 1.0
-    argument_accuracy: float = 1.0
+    exact_success: float | None = None
+    exact_accuracy: float | None = None
+    tool_selection_accuracy: float | None = None
+    argument_accuracy: float | None = None
     total_tool_calls: int = 0
     unnecessary_calls: int = 0
     duplicated_calls: int = 0
@@ -1027,8 +1264,8 @@ class GuardrailMetrics:
     total_model_output_tokens: int = 0
     total_model_calls: int = 0
     total_deopts: int = 0
-    tool_cost_multiplier: float = 1.0
-    cost_per_task_usd: float = 0.0
+    tool_cost_multiplier: float | None = None
+    cost_per_task_usd: float | None = None
     total_cost_usd: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -1096,14 +1333,23 @@ class WorkloadSpec:
 
 @dataclass
 class TaskResult:
+    """Summary and raw audit information for an executed task trial."""
+
     task_id: str
     success: bool
     final_answer: Any = None
     ccl_ms: float | None = None
     total_duration_ms: float = 0.0
+    pair_id: str = ""
+    arm: str = "candidate"
+    workload_id: str = "default"
+    scheduler_name: str = "default"
     events: list[ExecutionEvent] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)
+    initial_state: dict[str, Any] = field(default_factory=dict)
+    final_state: dict[str, Any] = field(default_factory=dict)
+    validator_result: dict[str, Any] = field(default_factory=dict)
     guardrails: GuardrailMetrics = field(default_factory=GuardrailMetrics)
     error: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -1111,13 +1357,44 @@ class TaskResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
+            "pair_id": self.pair_id,
+            "arm": self.arm,
+            "workload_id": self.workload_id,
+            "scheduler_name": self.scheduler_name,
             "success": self.success,
             "final_answer": self.final_answer,
             "ccl_ms": self.ccl_ms,
             "total_duration_ms": self.total_duration_ms,
-            "tool_calls_count": len(self.tool_calls),
-            "tool_results_count": len(self.tool_results),
+            "events": [e.to_dict() for e in self.events],
+            "tool_calls": [c.to_dict() for c in self.tool_calls],
+            "tool_results": [r.to_dict() for r in self.tool_results],
+            "initial_state": self.initial_state,
+            "final_state": self.final_state,
+            "validator_result": self.validator_result,
             "guardrails": self.guardrails.to_dict(),
             "error": self.error,
             "metadata": self.metadata,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TaskResult:
+        return cls(
+            task_id=data["task_id"],
+            pair_id=data.get("pair_id", ""),
+            arm=data.get("arm", "candidate"),
+            workload_id=data.get("workload_id", "default"),
+            scheduler_name=data.get("scheduler_name", "default"),
+            success=bool(data.get("success", False)),
+            final_answer=data.get("final_answer"),
+            ccl_ms=float(data["ccl_ms"]) if data.get("ccl_ms") is not None else None,
+            total_duration_ms=float(data.get("total_duration_ms", 0.0)),
+            events=[ExecutionEvent.from_dict(e) for e in data.get("events", [])],
+            tool_calls=[ToolCall.from_dict(c) for c in data.get("tool_calls", [])],
+            tool_results=[ToolResult.from_dict(r) for r in data.get("tool_results", [])],
+            initial_state=dict(data.get("initial_state", {})),
+            final_state=dict(data.get("final_state", {})),
+            validator_result=dict(data.get("validator_result", {})),
+            guardrails=GuardrailMetrics.from_dict(data.get("guardrails", {})),
+            error=data.get("error"),
+            metadata=dict(data.get("metadata", {})),
+        )

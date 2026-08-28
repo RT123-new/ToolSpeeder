@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, StreamingChunk, ToolSchema
-from toolspeed.core.types import LatencyProfile, Task, TokenUsage, ToolCall, ToolSpec
+from toolspeed.core.types import AgentTask, LatencyProfile, TokenUsage, ToolCall, ToolSpec
 
 
 class ActionBytecodeCodec:
@@ -110,11 +110,19 @@ class DraftPredictorModel:
         accuracy: float = 0.85,
         confidence_threshold: float = 0.70,
         seed: int | None = None,
+        clock: Any = None,
     ):
         self.latency_ms = latency_ms
         self.accuracy = accuracy
         self.confidence_threshold = confidence_threshold
+        self.clock = clock
         self._rng = np.random.default_rng(seed)
+
+    async def _sleep_ms(self, delay_ms: float) -> None:
+        if self.clock is not None and hasattr(self.clock, "sleep_ms"):
+            await self.clock.sleep_ms(delay_ms)
+        elif delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000.0)
 
     async def predict(
         self,
@@ -124,7 +132,7 @@ class DraftPredictorModel:
         ground_truth_args: dict[str, Any] | None = None,
     ) -> tuple[ToolCall, float] | None:
         """Simulate fast draft prediction with confidence score."""
-        await asyncio.sleep(max(0.0001, self.latency_ms / 1000.0))
+        await self._sleep_ms(max(0.0001, self.latency_ms))
 
         confidence = float(self._rng.uniform(0.5, 1.0))
         if confidence < self.confidence_threshold:
@@ -137,7 +145,7 @@ class DraftPredictorModel:
         else:
             other_tools = [t for t in candidate_tools if t != ground_truth_tool]
             tool_name = (
-                self._rng.choice(other_tools)
+                str(self._rng.choice(other_tools))
                 if other_tools
                 else (candidate_tools[0] if candidate_tools else "default_tool")
             )
@@ -167,23 +175,32 @@ class SimulatedLLM(BaseLLMAdapter):
         use_bytecode: bool = False,
         commit_fraction: float = 0.5,
         seed: int | None = None,
+        clock: Any = None,
     ):
         self.profile = profile or LatencyProfile()
         self.tokens_per_second = max(1.0, tokens_per_second)
         self.cost_config = cost_config or ModelCostConfig()
         self.use_bytecode = use_bytecode
         self.commit_fraction = commit_fraction
+        self.clock = clock
         self._rng = np.random.default_rng(seed)
         self.draft_predictor = DraftPredictorModel(
             latency_ms=self.profile.draft_model_ms,
             accuracy=draft_accuracy,
             confidence_threshold=draft_confidence_threshold,
             seed=seed,
+            clock=clock,
         )
 
     def _sample_reasoning_ms(self, is_final: bool = False) -> float:
         median = self.profile.model_final_ms if is_final else self.profile.model_decision_ms
         return float(self._rng.lognormal(np.log(max(1.0, median)), self.profile.sigma))
+
+    async def _sleep_ms(self, delay_ms: float) -> None:
+        if self.clock is not None and hasattr(self.clock, "sleep_ms"):
+            await self.clock.sleep_ms(delay_ms)
+        elif delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000.0)
 
     async def generate(
         self,
@@ -195,7 +212,7 @@ class SimulatedLLM(BaseLLMAdapter):
         **kwargs: Any,
     ) -> tuple[str, list[ToolCall], TokenUsage]:
         reasoning_ms = self._sample_reasoning_ms(is_final=is_final)
-        await asyncio.sleep(max(0.0001, reasoning_ms / 1000.0))
+        await self._sleep_ms(max(0.0001, reasoning_ms))
 
         calls = list(expected_calls or [])
         if self.use_bytecode:
@@ -221,18 +238,25 @@ class SimulatedLLM(BaseLLMAdapter):
 
     async def decide(
         self,
-        task: Task,
+        task: AgentTask,
         history: list[dict[str, Any]],
         tools: list[ToolSpec],
     ) -> LLMDecision:
         is_final = len(history) >= 2 or not tools
         reasoning_ms = self._sample_reasoning_ms(is_final=is_final)
-        await asyncio.sleep(max(0.0001, reasoning_ms / 1000.0))
+        await self._sleep_ms(max(0.0001, reasoning_ms))
 
         if is_final:
+            # Derive answer strictly from tool results in history or prompt context
+            last_tool_res = None
+            for h in reversed(history):
+                if h.get("role") == "tool":
+                    last_tool_res = h.get("output")
+                    break
+
             return LLMDecision(
                 reasoning="Task completed.",
-                final_answer=task.expected_output or "Completed.",
+                final_answer=last_tool_res if last_tool_res is not None else {"status": "done", "prompt": task.prompt},
                 duration_ms=reasoning_ms,
                 input_tokens=100,
                 output_tokens=20,
@@ -259,16 +283,16 @@ class SimulatedLLM(BaseLLMAdapter):
         **kwargs: Any,
     ) -> AsyncIterator[StreamingChunk]:
         reasoning_ms = self._sample_reasoning_ms(is_final=is_final)
-        await asyncio.sleep(max(0.0001, reasoning_ms / 1000.0))
+        await self._sleep_ms(max(0.0001, reasoning_ms))
 
         target_text = final_answer if is_final else ""
         calls = list(expected_calls or [])
-        token_delay_s = 1.0 / self.tokens_per_second
+        token_delay_ms = 1000.0 / self.tokens_per_second
 
         if is_final:
             words = target_text.split()
             for idx, word in enumerate(words):
-                await asyncio.sleep(token_delay_s)
+                await self._sleep_ms(token_delay_ms)
                 is_last = idx == len(words) - 1
                 yield StreamingChunk(
                     text=word + " ",
@@ -281,7 +305,7 @@ class SimulatedLLM(BaseLLMAdapter):
             commit_token_idx = int(total_call_tokens * self.commit_fraction)
 
             for idx in range(total_call_tokens):
-                await asyncio.sleep(token_delay_s)
+                await self._sleep_ms(token_delay_ms)
                 chunk_delta = None
                 meta: dict[str, Any] = {}
 
@@ -314,6 +338,7 @@ class SimulatedLLM(BaseLLMAdapter):
         ground_truth_tool: str | None = None,
         ground_truth_args: dict[str, Any] | None = None,
         candidate_tools: list[str] | None = None,
+        **kwargs: Any,
     ) -> ToolCall | None:
         res = await self.draft_predictor.predict(
             prompt=prompt,
@@ -333,12 +358,13 @@ class MockScriptedLLM(BaseLLMAdapter):
     def __init__(
         self,
         decision_steps: list[LLMDecision] | None = None,
-        decision_fn: Callable[[Task, list[dict[str, Any]]], LLMDecision] | None = None,
-        draft_predictor_fn: Callable[[Task, list[dict[str, Any]]], ToolCall | None] | None = None,
+        decision_fn: Callable[[AgentTask, list[dict[str, Any]]], LLMDecision] | None = None,
+        draft_predictor_fn: Callable[[AgentTask, list[dict[str, Any]]], ToolCall | None] | None = None,
         simulated_decision_ms: float = 5.0,
         simulated_draft_ms: float = 1.0,
         commit_horizon_fraction: float = 0.4,
         token_chunk_count: int = 4,
+        clock: Any = None,
     ) -> None:
         self.decision_steps = list(decision_steps or [])
         self.decision_fn = decision_fn
@@ -347,21 +373,33 @@ class MockScriptedLLM(BaseLLMAdapter):
         self.simulated_draft_ms = simulated_draft_ms
         self.commit_horizon_fraction = commit_horizon_fraction
         self.token_chunk_count = token_chunk_count
+        self.clock = clock
         self._current_step = 0
 
     def reset(self) -> None:
         self._current_step = 0
 
+    def _now_s(self) -> float:
+        if self.clock is not None and hasattr(self.clock, "now_s"):
+            return self.clock.now_s()
+        return time.perf_counter()
+
+    async def _sleep_ms(self, delay_ms: float) -> None:
+        if self.clock is not None and hasattr(self.clock, "sleep_ms"):
+            await self.clock.sleep_ms(delay_ms)
+        elif delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000.0)
+
     async def decide(
         self,
-        task: Task,
+        task: AgentTask,
         history: list[dict[str, Any]],
         tools: list[ToolSpec],
     ) -> LLMDecision:
-        start = time.perf_counter()
+        start = self._now_s()
 
         if self.simulated_decision_ms > 0:
-            await asyncio.sleep(self.simulated_decision_ms / 1000.0)
+            await self._sleep_ms(self.simulated_decision_ms)
 
         decision: LLMDecision
         if self.decision_fn:
@@ -370,7 +408,7 @@ class MockScriptedLLM(BaseLLMAdapter):
             decision = self.decision_steps[self._current_step]
             self._current_step += 1
         else:
-            # Look at observed tool results in history to synthesize final answer
+            # Derive answer strictly from observed tool history or prompt context
             last_tool_res = None
             for h in reversed(history):
                 if h.get("role") == "tool":
@@ -379,18 +417,18 @@ class MockScriptedLLM(BaseLLMAdapter):
 
             decision = LLMDecision(
                 reasoning="Completed task.",
-                final_answer=last_tool_res if last_tool_res is not None else "Task completed successfully.",
+                final_answer=last_tool_res if last_tool_res is not None else {"status": "done", "prompt": task.prompt},
                 input_tokens=150,
                 output_tokens=30,
             )
 
-        duration_ms = (time.perf_counter() - start) * 1000.0
+        duration_ms = (self._now_s() - start) * 1000.0
         decision.duration_ms = duration_ms
         return decision
 
     async def stream_decision(
         self,
-        task: Task,
+        task: AgentTask,
         history: list[dict[str, Any]],
         tools: list[ToolSpec],
     ) -> AsyncIterator[StreamingChunk]:
@@ -408,25 +446,22 @@ class MockScriptedLLM(BaseLLMAdapter):
 
             target = LLMDecision(
                 reasoning="Finished.",
-                final_answer=last_tool_res if last_tool_res is not None else "Task completed.",
+                final_answer=last_tool_res if last_tool_res is not None else {"status": "done", "prompt": task.prompt},
                 input_tokens=100,
                 output_tokens=20,
             )
 
         total_chunks = max(2, self.token_chunk_count)
-        per_chunk_sleep = (
-            (self.simulated_decision_ms / total_chunks) / 1000.0 if self.simulated_decision_ms > 0 else 0.0
-        )
+        per_chunk_sleep_ms = (self.simulated_decision_ms / total_chunks) if self.simulated_decision_ms > 0 else 0.0
         commit_chunk_index = int(total_chunks * self.commit_horizon_fraction)
 
-        # Determine streaming text
         full_text = target.reasoning or (str(target.final_answer) if target.final_answer is not None else "")
         words = full_text.split() if full_text else [f"token_{i}" for i in range(total_chunks)]
 
         commit_emitted = False
         for chunk_idx in range(total_chunks):
-            if per_chunk_sleep > 0:
-                await asyncio.sleep(per_chunk_sleep)
+            if per_chunk_sleep_ms > 0:
+                await self._sleep_ms(per_chunk_sleep_ms)
 
             is_last = chunk_idx == (total_chunks - 1)
             is_commit_time = (chunk_idx >= commit_chunk_index) and not commit_emitted and bool(target.tool_calls)
@@ -435,7 +470,6 @@ class MockScriptedLLM(BaseLLMAdapter):
             if is_commit_time:
                 commit_emitted = True
 
-            # Pick word chunk
             chunk_word = words[chunk_idx] if chunk_idx < len(words) else f"token_{chunk_idx}"
             chunk_text = (chunk_word + " ") if not is_last else chunk_word
 
@@ -464,12 +498,12 @@ class MockScriptedLLM(BaseLLMAdapter):
 
     async def predict_draft(
         self,
-        task: Task,
+        task: AgentTask,
         history: list[dict[str, Any]],
         tools: list[ToolSpec],
     ) -> ToolCall | None:
         if self.simulated_draft_ms > 0:
-            await asyncio.sleep(self.simulated_draft_ms / 1000.0)
+            await self._sleep_ms(self.simulated_draft_ms)
 
         if self.draft_predictor_fn is not None:
             return self.draft_predictor_fn(task, history)

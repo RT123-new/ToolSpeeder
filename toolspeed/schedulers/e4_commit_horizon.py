@@ -26,11 +26,40 @@ def _reject_duplicate_keys_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 class IncrementalCommitParser:
     """Incremental streaming parser and schema-aware commit validator.
 
+    Maintains stateful parsing buffer across streaming token deltas.
     Verifies that a tool call has crossed the commit horizon:
     1. Tool identity is fixed, read-only, and idempotent.
     2. All required semantics-changing arguments are syntactically closed.
     3. JSON fragments are non-empty, valid, well-formed, reject duplicate keys, and match schemas.
     """
+
+    def __init__(self) -> None:
+        self._buffer: str = ""
+        self._token_index: int = 0
+        self._byte_offset: int = 0
+
+    def feed(self, delta_text: str) -> None:
+        """Feed incremental character / token delta to parser buffer."""
+        self._buffer += delta_text
+        self._byte_offset += len(delta_text.encode("utf-8"))
+        self._token_index += 1
+
+    @property
+    def buffer(self) -> str:
+        return self._buffer
+
+    @property
+    def byte_offset(self) -> int:
+        return self._byte_offset
+
+    @property
+    def token_index(self) -> int:
+        return self._token_index
+
+    def reset(self) -> None:
+        self._buffer = ""
+        self._token_index = 0
+        self._byte_offset = 0
 
     @staticmethod
     def is_syntax_closed(json_fragment: str) -> bool:
@@ -39,6 +68,11 @@ class IncrementalCommitParser:
         if not s:
             return False
         if s.endswith("\\"):
+            return False
+        # Basic bracket balance quick check
+        if s.startswith("{") and not s.endswith("}"):
+            return False
+        if s.startswith("[") and not s.endswith("]"):
             return False
         try:
             json.loads(s, object_pairs_hook=_reject_duplicate_keys_hook)
@@ -83,7 +117,12 @@ class IncrementalCommitParser:
         4. Raw JSON fragment is present, non-empty, syntactically closed, and matches schema.
         """
         # Strict safety check: Mutative side-effects or approval-requiring tools CANNOT be early dispatched!
-        if not tool_spec.is_read_only or tool_spec.side_effects or tool_spec.requires_approval or not tool_spec.is_idempotent:
+        if (
+            not tool_spec.is_read_only
+            or tool_spec.side_effects
+            or tool_spec.requires_approval
+            or not tool_spec.is_idempotent
+        ):
             return None
 
         # Ensure syntax closure and duplicate key rejection if raw fragment is provided
@@ -114,7 +153,9 @@ class IncrementalCommitParser:
 
         # Generate committed immutable call
         schema_hash = hashlib.sha256(json.dumps(tool_spec.parameters, sort_keys=True).encode("utf-8")).hexdigest()
-        return CommittedCall.from_call(raw_call, schema_hash=schema_hash, token_index=token_index, byte_offset=byte_offset)
+        return CommittedCall.from_call(
+            raw_call, schema_hash=schema_hash, token_index=token_index, byte_offset=byte_offset
+        )
 
 
 class CommitHorizonScheduler(BaseScheduler):
@@ -147,13 +188,11 @@ class CommitHorizonScheduler(BaseScheduler):
                 ctx.profiler.start_span(f"stream_model_turn_{turn}")
 
                 final_decision: LLMDecision | None = None
-                byte_offset = 0
+                parser = IncrementalCommitParser()
 
                 # 1. Stream tokens and evaluate commit horizons incrementally
-                async for chunk in model.stream_decision(
-                    ctx.task, ctx.history, tools.list_specs()
-                ):
-                    byte_offset += len(chunk.delta_text.encode("utf-8"))
+                async for chunk in model.stream_decision(ctx.agent_task, ctx.history, tools.list_specs()):
+                    parser.feed(chunk.delta_text)
 
                     # Check for early-dispatchable tool calls
                     if early_enabled and chunk.commit_horizon_ready:
@@ -168,24 +207,22 @@ class CommitHorizonScheduler(BaseScheduler):
                                 raw_call=early_call,
                                 raw_fragment=chunk.raw_json_fragment,
                                 token_index=chunk.token_index,
-                                byte_offset=byte_offset,
+                                byte_offset=parser.byte_offset,
                             )
 
                             if committed is not None:
-                                key = early_call.call_id or call_name
+                                key = early_call.call_id or committed.semantic_fingerprint
                                 if key not in in_flight_tasks:
                                     ctx.profiler.record_event(
                                         EventType.COMMIT_HORIZON_REACHED,
                                         details={
                                             "tool": call_name,
                                             "token_index": chunk.token_index,
-                                            "byte_offset": byte_offset,
+                                            "byte_offset": parser.byte_offset,
                                             "fingerprint": committed.semantic_fingerprint,
                                         },
                                     )
-                                    early_task = asyncio.create_task(
-                                        ctx.executor.execute(early_call)
-                                    )
+                                    early_task = asyncio.create_task(ctx.executor.execute(early_call))
                                     in_flight_tasks[key] = (
                                         early_task,
                                         early_call,
@@ -212,10 +249,7 @@ class CommitHorizonScheduler(BaseScheduler):
                 )
 
                 if final_decision is None:
-                    # Fallback if streaming ended without explicit final marker
-                    final_decision = await model.decide(
-                        ctx.task, ctx.history, tools.list_specs()
-                    )
+                    final_decision = await model.decide(ctx.agent_task, ctx.history, tools.list_specs())
 
                 ctx.record_model_decision(final_decision)
 
@@ -228,8 +262,9 @@ class CommitHorizonScheduler(BaseScheduler):
                     ctx.tool_calls.append(call)
 
                     matched_key = None
-                    for k, (_t, orig_c, _orig_args, _c_obj) in in_flight_tasks.items():
-                        if (call.call_id and orig_c.call_id == call.call_id) or (call_name == (orig_c.name or orig_c.tool_name)):
+                    for k, (_t, orig_c, _orig_args, c_obj) in in_flight_tasks.items():
+                        # Strict reconciliation by call_id or semantic fingerprint (never tool name alone!)
+                        if (call.call_id and orig_c.call_id == call.call_id) or (k == c_obj.semantic_fingerprint):
                             matched_key = k
                             break
 

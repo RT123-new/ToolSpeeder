@@ -45,6 +45,7 @@ class SpeculativeReadScheduler(BaseScheduler):
             isolated_limiter = RateLimiter(
                 max_concurrency=ctx.config.concurrency_limit,
                 requests_per_second=ctx.config.rate_limit_rps,
+                clock=ctx.clock,
             )
             isolated_executor = ToolExecutor(
                 registry=tools,
@@ -52,6 +53,8 @@ class SpeculativeReadScheduler(BaseScheduler):
                 profiler=ctx.profiler,
                 guardrails=ctx.guardrails,
                 default_timeout_s=ctx.config.timeout_seconds,
+                authority_context=ctx.authority_context,
+                clock=ctx.clock,
             )
 
         spec_task: asyncio.Task[ToolResult] | None = None
@@ -72,13 +75,11 @@ class SpeculativeReadScheduler(BaseScheduler):
                 # 1. Launch Draft Prediction and Main Model Reasoning CONCURRENTLY if speculation enabled
                 if spec_enabled:
                     draft_task = asyncio.create_task(
-                        model.predict_draft(ctx.task, ctx.history, tools.list_specs())
+                        model.predict_draft(ctx.agent_task, ctx.history, tools.list_specs())
                     )
 
                 ctx.profiler.start_span(f"model_turn_{turn}")
-                model_decision_task = asyncio.create_task(
-                    model.decide(ctx.task, ctx.history, tools.list_specs())
-                )
+                model_decision_task = asyncio.create_task(model.decide(ctx.agent_task, ctx.history, tools.list_specs()))
 
                 if spec_enabled and draft_task is not None:
                     # Wait for whichever completes first
@@ -91,10 +92,7 @@ class SpeculativeReadScheduler(BaseScheduler):
                     if draft_task in done and not draft_task.cancelled():
                         try:
                             predicted = draft_task.result()
-                            if (
-                                predicted is not None
-                                and predicted.speculation_confidence >= threshold
-                            ):
+                            if predicted is not None and predicted.speculation_confidence >= threshold:
                                 spec_adapter = tools.get(predicted.name or predicted.tool_name)
                                 # Strict safety check: only speculate read-only, non-side-effect, idempotent tools
                                 if (
@@ -114,7 +112,11 @@ class SpeculativeReadScheduler(BaseScheduler):
                                             "mode": contention_mode,
                                         },
                                     )
-                                    exec_to_use = isolated_executor if (contention_mode == "isolated" and isolated_executor is not None) else ctx.executor
+                                    exec_to_use = (
+                                        isolated_executor
+                                        if (contention_mode == "isolated" and isolated_executor is not None)
+                                        else ctx.executor
+                                    )
                                     spec_task = asyncio.create_task(
                                         exec_to_use.execute(speculative_call, is_speculative=True)
                                     )

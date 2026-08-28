@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from dataclasses import dataclass, field
@@ -35,11 +36,18 @@ class ToolResultCache:
         default_ttl_seconds: float = 300.0,
         max_entries: int = 1000,
         ttl_seconds: float | None = None,
+        clock: Any = None,
     ) -> None:
         self.default_ttl_seconds = ttl_seconds if ttl_seconds is not None else default_ttl_seconds
         self.max_entries = max_entries
+        self.clock = clock
         self._exact_store: dict[str, CacheEntry] = {}
         self._semantic_store: dict[str, CacheEntry] = {}
+
+    def _now_s(self) -> float:
+        if self.clock is not None and hasattr(self.clock, "now_s"):
+            return self.clock.now_s()
+        return time.perf_counter()
 
     def _exact_key(self, tool_name: str, arguments: dict[str, Any]) -> str:
         return f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
@@ -60,7 +68,7 @@ class ToolResultCache:
         allow_semantic: bool = True,
     ) -> tuple[Any | None, bool, bool]:
         """Returns (cached_output, is_hit, is_fresh)."""
-        now = time.perf_counter()
+        now = self._now_s()
         exact_k = self._exact_key(tool_name, arguments)
 
         if exact_k in self._exact_store:
@@ -68,7 +76,7 @@ class ToolResultCache:
             is_fresh = entry.is_fresh(now)
             if is_fresh or entry.freshness_contract == "relaxed":
                 entry.hit_count += 1
-                return entry.output, True, is_fresh
+                return copy.deepcopy(entry.output), True, is_fresh
             else:
                 # Expired under strict contract -> treat as miss
                 return None, False, False
@@ -80,7 +88,7 @@ class ToolResultCache:
                 is_fresh = entry.is_fresh(now)
                 if is_fresh or entry.freshness_contract == "relaxed":
                     entry.hit_count += 1
-                    return entry.output, True, is_fresh
+                    return copy.deepcopy(entry.output), True, is_fresh
 
         return None, False, False
 
@@ -95,9 +103,9 @@ class ToolResultCache:
         ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl_seconds
         entry = CacheEntry(
             tool_name=tool_name,
-            arguments=arguments,
-            output=output,
-            created_at=time.perf_counter(),
+            arguments=copy.deepcopy(arguments),
+            output=copy.deepcopy(output),
+            created_at=self._now_s(),
             ttl_seconds=ttl,
             freshness_contract=freshness_contract,
         )
@@ -178,10 +186,11 @@ class CacheScheduler(BaseScheduler):
 
         # 1. Invalidation on mutation / side effects
         if adapter.spec.side_effects or not adapter.spec.is_read_only:
+            self.cache.invalidate_on_mutation(call.name, call.arguments)
             self.cache.invalidate_tool(call.name)
 
         # 2. Check Cache for Read-Only tools
-        if adapter.spec.is_read_only:
+        if adapter.spec.is_read_only and not adapter.spec.side_effects:
             lookup_start = time.perf_counter()
             cached_output, hit, is_fresh = self.cache.get(call.name, call.arguments)
             lookup_ms = (time.perf_counter() - lookup_start) * 1000.0
@@ -210,7 +219,7 @@ class CacheScheduler(BaseScheduler):
         res = await ctx.executor.execute(call)
 
         # 4. Populate Cache if successful and read-only
-        if res.is_success and adapter.spec.is_read_only:
+        if res.is_success and adapter.spec.is_read_only and not adapter.spec.side_effects:
             self.cache.put(
                 tool_name=call.name,
                 arguments=call.arguments,
@@ -230,7 +239,7 @@ class CacheScheduler(BaseScheduler):
             ctx.step_count = turn + 1
 
             ctx.profiler.start_span(f"model_turn_{turn}")
-            decision = await model.decide(ctx.task, ctx.history, tools.list_specs())
+            decision = await model.decide(ctx.agent_task, ctx.history, tools.list_specs())
             ctx.profiler.end_span(f"model_turn_{turn}", EventType.MODEL_END)
             ctx.record_model_decision(decision)
 

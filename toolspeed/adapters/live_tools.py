@@ -23,14 +23,46 @@ from toolspeed.core.types import ToolCall, ToolResult
 class AsyncSQLiteTool(BaseToolAdapter):
     """Real local asynchronous SQLite database query executor using parameterized queries in threadpool."""
 
-    def __init__(self, db_path: str = ":memory:", name: str = "sqlite_executor"):
+    def __init__(self, db_path: str = ":memory:", name: str = "sqlite_executor", initial_sql: str | None = None):
         self._db_path = db_path
         self._name = name
+        self._initial_sql = initial_sql
         self._lock = asyncio.Lock()
         self._conn: sqlite3.Connection | None = None
         if db_path == ":memory:":
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
+            if initial_sql:
+                self._conn.executescript(initial_sql)
+                self._conn.commit()
+
+    def clone(self) -> AsyncSQLiteTool:
+        """Creates an independent clone of this SQLite instance with identical schema/data."""
+        dump = ""
+        if self._conn:
+            dump = "\n".join(self._conn.iterdump())
+        elif self._db_path and os.path.exists(self._db_path):
+            with sqlite3.connect(self._db_path) as c:
+                dump = "\n".join(c.iterdump())
+        return AsyncSQLiteTool(db_path=":memory:", name=self._name, initial_sql=dump or self._initial_sql)
+
+    def get_state_snapshot(self) -> dict[str, Any]:
+        """Returns snapshot of current tables and row contents."""
+        conn = self._conn or sqlite3.connect(self._db_path)
+        cursor = conn.cursor()
+        snapshot: dict[str, Any] = {}
+        try:
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            tables = [row[0] for row in cursor.fetchall()]
+            for tbl in tables:
+                cursor.execute(f"SELECT * FROM {tbl}")
+                rows = cursor.fetchall()
+                snapshot[tbl] = [dict(r) if isinstance(r, sqlite3.Row) else list(r) for r in rows]
+        finally:
+            cursor.close()
+            if self._conn is None:
+                conn.close()
+        return snapshot
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(

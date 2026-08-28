@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from toolspeed.core.types import Task, ToolCall, ToolResult, ToolSpec
+from toolspeed.core.types import AgentTask, ToolCall, ToolResult, ToolSpec
 
 
 @dataclass
@@ -100,6 +100,8 @@ class BaseToolAdapter(ABC):
     """Abstract interface for tool executors."""
 
     def __init__(self, spec: ToolSpec | ToolSchema | None = None) -> None:
+        self._spec: ToolSpec | None = None
+        self._schema: ToolSchema | None = None
         if spec is not None:
             if isinstance(spec, ToolSpec):
                 self._spec = spec
@@ -126,9 +128,6 @@ class BaseToolAdapter(ABC):
                     requires_approval=spec.requires_approval,
                     is_idempotent=spec.is_idempotent,
                 )
-        else:
-            self._spec = None
-            self._schema = None
 
     @property
     def name(self) -> str:
@@ -232,12 +231,15 @@ class ToolRegistry:
 
 
 class BaseLLMAdapter(ABC):
-    """Abstract interface for model providers and simulators."""
+    """Abstract interface for model providers and simulators.
+
+    Strictly accepts AgentTask ONLY (never Task or Oracle).
+    """
 
     @abstractmethod
     async def decide(
         self,
-        task: Task,
+        task: AgentTask,
         history: list[dict[str, Any]],
         tools: list[ToolSpec],
     ) -> LLMDecision:
@@ -246,7 +248,7 @@ class BaseLLMAdapter(ABC):
 
     async def stream_decision(
         self,
-        task: Task,
+        task: AgentTask,
         history: list[dict[str, Any]],
         tools: list[ToolSpec],
     ) -> AsyncIterator[StreamingChunk]:
@@ -263,7 +265,7 @@ class BaseLLMAdapter(ABC):
 
     async def predict_draft(
         self,
-        task: Task,
+        task: AgentTask,
         history: list[dict[str, Any]],
         tools: list[ToolSpec],
     ) -> ToolCall | None:

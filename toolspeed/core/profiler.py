@@ -66,7 +66,7 @@ class SpanContext:
         self.start_ns: int = 0
 
     def __enter__(self) -> SpanContext:
-        self.start_ns = time.perf_counter_ns()
+        self.start_ns = self.profiler._now_ns()
         return self
 
     def __exit__(
@@ -75,7 +75,7 @@ class SpanContext:
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
-        end_ns = time.perf_counter_ns()
+        end_ns = self.profiler._now_ns()
         if exc_type is not None:
             self.metadata["exception"] = str(exc_val)
         duration_ms = (end_ns - self.start_ns) / 1_000_000.0
@@ -125,13 +125,13 @@ class LatencyStats:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LatencyStats:
-        return cls(
-            **{
-                k: float(v) if isinstance(v, (int, float)) else v
-                for k, v in data.items()
-                if k in cls.__dataclass_fields__
-            }
-        )
+        kwargs: dict[str, Any] = {}
+        for k, v in data.items():
+            if k in ("count", "failure_count"):
+                kwargs[k] = int(v) if v is not None else 0
+            elif k in cls.__dataclass_fields__:
+                kwargs[k] = float(v) if isinstance(v, (int, float)) else v
+        return cls(**kwargs)
 
 
 def calculate_percentiles(values: Sequence[float] | Sequence[int] | np.ndarray) -> LatencyStats:

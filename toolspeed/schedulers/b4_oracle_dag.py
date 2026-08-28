@@ -23,7 +23,11 @@ class OracleDAGScheduler(BaseScheduler):
         model: BaseLLMAdapter,
         tools: ToolRegistry,
     ) -> Any:
-        oracle_plan = ctx.task.metadata.get("oracle_plan") or ctx.task.context.get("oracle_plan")
+        oracle_plan = None
+        if hasattr(ctx.task, "metadata"):
+            oracle_plan = ctx.task.metadata.get("oracle_plan")
+        if not oracle_plan and hasattr(ctx.task, "context"):
+            oracle_plan = ctx.task.context.get("oracle_plan")
 
         if oracle_plan and isinstance(oracle_plan, list):
             accumulated_outputs: dict[str, Any] = {}
@@ -68,7 +72,7 @@ class OracleDAGScheduler(BaseScheduler):
                     accumulated_outputs[res.name] = res.output if res.output is not None else res.result
                     accumulated_outputs[res.call_id] = res.output if res.output is not None else res.result
 
-            answer_fn = ctx.task.metadata.get("oracle_final_answer_fn")
+            answer_fn = ctx.task.metadata.get("oracle_final_answer_fn") if hasattr(ctx.task, "metadata") else None
             if callable(answer_fn):
                 return answer_fn(accumulated_outputs)
 
@@ -76,7 +80,7 @@ class OracleDAGScheduler(BaseScheduler):
 
         # Fallback: initial 1-shot model plan
         ctx.profiler.start_span("oracle_initial_plan")
-        decision = await model.decide(ctx.task, ctx.history, tools.list_specs())
+        decision = await model.decide(ctx.agent_task, ctx.history, tools.list_specs())
         ctx.profiler.end_span("oracle_initial_plan", EventType.MODEL_END)
         ctx.record_model_decision(decision)
 
@@ -92,7 +96,7 @@ class OracleDAGScheduler(BaseScheduler):
 
         # Single final synthesis turn
         ctx.profiler.start_span("oracle_synthesis")
-        final_decision = await model.decide(ctx.task, ctx.history, tools.list_specs())
+        final_decision = await model.decide(ctx.agent_task, ctx.history, tools.list_specs())
         ctx.profiler.end_span("oracle_synthesis", EventType.MODEL_END)
         ctx.record_model_decision(final_decision)
 

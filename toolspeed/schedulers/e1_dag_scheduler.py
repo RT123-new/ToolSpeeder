@@ -359,7 +359,7 @@ class DAGScheduler(BaseScheduler):
             # 1. Model Decision Step
             ctx.profiler.start_span(f"model_turn_{turn}")
             decision = await model.decide(
-                ctx.task,
+                ctx.agent_task,
                 ctx.history,
                 tools.list_specs(),
             )

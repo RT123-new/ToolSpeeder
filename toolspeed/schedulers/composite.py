@@ -84,7 +84,7 @@ class CompositeScheduler(BaseScheduler):
             if wf is not None:
                 ctx.profiler.record_event(EventType.JIT_FUSION_START, details={"workflow": wf.workflow_id})
                 res = await self.jit_scheduler._execute_internal(ctx, model, tools)
-                if ctx.task.validate(res):
+                if hasattr(ctx.task, "validate") and ctx.task.validate(res):
                     return res
 
         spec_task: asyncio.Task[ToolResult] | None = None
@@ -99,14 +99,16 @@ class CompositeScheduler(BaseScheduler):
                 # 4. Speculative Prediction concurrently with Streaming Generation
                 spec_call: ToolCall | None = None
                 if self.config.speculation_enabled:
-                    draft_task = asyncio.create_task(model.predict_draft(ctx.task, ctx.history, tools.list_specs()))
+                    draft_task = asyncio.create_task(
+                        model.predict_draft(ctx.agent_task, ctx.history, tools.list_specs())
+                    )
 
                 ctx.profiler.start_span(f"composite_turn_{turn}")
                 collected_chunks: list[StreamingChunk] = []
                 final_calls: list[ToolCall] = []
                 reasoning_parts: list[str] = []
 
-                async for chunk in model.stream_decision(ctx.task, ctx.history, tools.list_specs()):
+                async for chunk in model.stream_decision(ctx.agent_task, ctx.history, tools.list_specs()):
                     collected_chunks.append(chunk)
                     if chunk.delta_text:
                         reasoning_parts.append(chunk.delta_text)
@@ -161,9 +163,7 @@ class CompositeScheduler(BaseScheduler):
                                                 "fingerprint": committed.semantic_fingerprint,
                                             },
                                         )
-                                        t = asyncio.create_task(
-                                            ctx.executor.execute(early_call)
-                                        )
+                                        t = asyncio.create_task(ctx.executor.execute(early_call))
                                         in_flight_commit[cid] = (t, early_call, snapshot)
 
                     if chunk.is_final and chunk.parsed_tool_calls:

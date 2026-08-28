@@ -191,7 +191,7 @@ class ActionBytecodeScheduler(BaseScheduler):
 
             ctx.profiler.start_span(f"bytecode_model_turn_{turn}")
             decision = await model.decide(
-                ctx.task,
+                ctx.agent_task,
                 ctx.history,
                 tools.list_specs(),
             )
