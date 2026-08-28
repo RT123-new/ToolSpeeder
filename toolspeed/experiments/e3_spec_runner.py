@@ -106,7 +106,9 @@ class E3SpeculationExperiment:
                     extra={"contention_mode": mode, "accuracy": acc_val},
                 )
 
-                p95_red = (summary.baseline_p95_ms - summary.candidate_p95_ms) / summary.baseline_p95_ms
+                b95 = summary.baseline_p95_ms or 1.0
+                c95 = summary.candidate_p95_ms or 1.0
+                p95_red = (b95 - c95) / max(1.0, b95)
                 row_data = {
                     "contention_mode": mode,
                     "prediction_accuracy": acc_val,
@@ -163,7 +165,9 @@ class E3SpeculationExperiment:
             cost_multipliers=cost_g,
             extra={"contention_mode": "confidence_gated", "threshold": confidence_threshold},
         )
-        gated_p95_red = (gated_summary.baseline_p95_ms - gated_summary.candidate_p95_ms) / gated_summary.baseline_p95_ms
+        g_b95 = gated_summary.baseline_p95_ms or 1.0
+        g_c95 = gated_summary.candidate_p95_ms or 1.0
+        gated_p95_red = (g_b95 - g_c95) / max(1.0, g_b95)
         gated_row = {
             "contention_mode": "confidence_gated",
             "prediction_accuracy": float(np.mean(confidence_scores)),
@@ -176,9 +180,12 @@ class E3SpeculationExperiment:
 
         # Falsification Checks
         # 1. P95 CCL reduction >= 15% at operating point or gated
+        gated_p95_red_val = float(gated_p95_red * 100.0)
+        op_sp = operating_summary.p95_speedup if (operating_summary and operating_summary.p95_speedup) else 1.0
+        op_red = (op_sp - 1.0) / op_sp * 100.0
         target_p95_red = max(
-            gated_row["p95_reduction_pct"],
-            (operating_summary.p95_speedup - 1.0) / operating_summary.p95_speedup * 100.0 if operating_summary else 0.0,
+            gated_p95_red_val,
+            float(op_red),
         )
         c1_passed = target_p95_red >= 15.0
         checks.append(
@@ -192,7 +199,7 @@ class E3SpeculationExperiment:
         )
 
         # 2. Wasted calls < 20%
-        wasted_rate_measured = gated_row["wasted_call_rate"]
+        wasted_rate_measured = float(np.mean(wasted_g))
         c2_passed = wasted_rate_measured < 0.20
         checks.append(
             HypothesisCheck(
@@ -205,7 +212,7 @@ class E3SpeculationExperiment:
         )
 
         # 3. Tool cost overhead < 5% (< 1.05x)
-        cost_mult_measured = gated_row["mean_tool_cost_multiplier"]
+        cost_mult_measured = float(np.mean(cost_g))
         c3_passed = cost_mult_measured < 1.05
         checks.append(
             HypothesisCheck(
@@ -218,12 +225,13 @@ class E3SpeculationExperiment:
         )
 
         # 4. Zero correctness loss
-        c4_passed = gated_summary.candidate_success_rate >= 1.0
+        cand_succ = float(gated_summary.candidate_success_rate or 0.0)
+        c4_passed = cand_succ >= 1.0
         checks.append(
             HypothesisCheck(
                 name="E3_Correctness_Preservation",
                 target="100.0% success (0 loss)",
-                measured=f"{gated_summary.candidate_success_rate * 100.0:.1f}%",
+                measured=f"{cand_succ * 100.0:.1f}%",
                 passed=c4_passed,
                 detail="Task output verification parity",
             )
@@ -232,10 +240,16 @@ class E3SpeculationExperiment:
         # 5. Tail latency regression check on single_slot contention
         # Single-slot at accuracy <= 0.3 should show regression (P95 speedup < 1.0)
         single_slot_low_acc = next(
-            (r for r in rows if r["contention_mode"] == "single_slot" and r["prediction_accuracy"] <= 0.2),
+            (
+                r
+                for r in rows
+                if r.get("contention_mode") == "single_slot" and float(r.get("prediction_accuracy", 1.0)) <= 0.2
+            ),
             None,
         )
-        c5_detected_regression = single_slot_low_acc is not None and single_slot_low_acc["p95_speedup"] < 1.0
+        c5_detected_regression = (
+            single_slot_low_acc is not None and float(single_slot_low_acc.get("p95_speedup", 1.0)) < 1.0
+        )
         checks.append(
             HypothesisCheck(
                 name="E3_Contention_Sensitivity_Check",

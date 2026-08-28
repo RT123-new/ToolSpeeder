@@ -149,7 +149,11 @@ class LocalWallClockBackend:
                 task_id=f"w2_local_trial_{trial_index:04d}",
                 prompt=f"Execute SQLite user orders chain for user u_{trial_index}",
                 context={"user_id": f"u_{trial_index}"},
-                expected_output={"user": {"user_id": f"u_{trial_index}", "name": f"User_{trial_index}"}, "orders": {"order_count": 2}, "fused": True},
+                expected_output={
+                    "user": {"user_id": f"u_{trial_index}", "name": f"User_{trial_index}"},
+                    "orders": {"order_count": 2},
+                    "fused": True,
+                },
                 metadata={"workload_id": "W2", "trial_index": trial_index, "workflow_id": "user_orders"},
             )
         elif workload_id == "W3":
@@ -183,7 +187,9 @@ class LocalWallClockBackend:
             )
         elif workload_id == "W7":
             idemp_key = f"tx_local_{trial_index:04d}"
-            grant = ApprovalGrant.create("execute_fund_transfer", {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key})
+            grant = ApprovalGrant.create(
+                "execute_fund_transfer", {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key}
+            )
             return Task(
                 task_id=f"w7_local_trial_{trial_index:04d}",
                 prompt=f"Execute fund transfer with idempotency key {idemp_key}",
@@ -206,6 +212,7 @@ class LocalWallClockBackend:
         server = self._get_shared_server()
 
         if workload_id == "W1":
+
             class HTTPShardTool(BaseToolAdapter):
                 def __init__(self, base_url: str, shard_idx: int) -> None:
                     self._base_url = base_url
@@ -339,14 +346,29 @@ class LocalWallClockBackend:
             registry.register(SQLiteFetchOrders())
 
             decisions = [
-                LLMDecision(reasoning="Fetching user", tool_calls=[ToolCall(name="fetch_user", arguments={"user_id": f"u_{trial_index}"})]),
-                LLMDecision(reasoning="Fetching orders", tool_calls=[ToolCall(name="fetch_orders", arguments={"user_id": f"u_{trial_index}"})]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"user": {"user_id": f"u_{trial_index}", "name": f"User_{trial_index}"}, "orders": {"order_count": 2}, "fused": True}),
+                LLMDecision(
+                    reasoning="Fetching user",
+                    tool_calls=[ToolCall(name="fetch_user", arguments={"user_id": f"u_{trial_index}"})],
+                ),
+                LLMDecision(
+                    reasoning="Fetching orders",
+                    tool_calls=[ToolCall(name="fetch_orders", arguments={"user_id": f"u_{trial_index}"})],
+                ),
+                LLMDecision(
+                    reasoning="Done",
+                    tool_calls=[],
+                    final_answer={
+                        "user": {"user_id": f"u_{trial_index}", "name": f"User_{trial_index}"},
+                        "orders": {"order_count": 2},
+                        "fused": True,
+                    },
+                ),
             ]
             model = LocalScriptedAdapter(decisions=decisions, decision_delay_s=0.001)
             return registry, model
 
         elif workload_id == "W3":
+
             class LocalBranchTool(BaseToolAdapter):
                 def __init__(self, name: str) -> None:
                     self._name = name
@@ -380,15 +402,24 @@ class LocalWallClockBackend:
             registry.register(LocalBranchTool("read_customer_state"))
             registry.register(LocalBranchTool("audit_transaction"))
 
-            spec_call = ToolCall(name="read_customer_state", arguments={"customer_id": f"cust_{trial_index}"}, speculation_confidence=0.95)
+            spec_call = ToolCall(
+                name="read_customer_state",
+                arguments={"customer_id": f"cust_{trial_index}"},
+                speculation_confidence=0.95,
+            )
             decisions = [
                 LLMDecision(reasoning="Checking state", tool_calls=[copy.deepcopy(spec_call)]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"status": "approved", "customer_id": f"cust_{trial_index}"}),
+                LLMDecision(
+                    reasoning="Done",
+                    tool_calls=[],
+                    final_answer={"status": "approved", "customer_id": f"cust_{trial_index}"},
+                ),
             ]
             model = LocalScriptedAdapter(decisions=decisions, draft_prediction=spec_call, decision_delay_s=0.001)
             return registry, model
 
         elif workload_id == "W4":
+
             class LocalPricingTool(BaseToolAdapter):
                 @property
                 def name(self) -> str:
@@ -428,6 +459,7 @@ class LocalWallClockBackend:
             return registry, model
 
         elif workload_id == "W5":
+
             class LocalStreamTool(BaseToolAdapter):
                 @property
                 def name(self) -> str:
@@ -437,7 +469,10 @@ class LocalWallClockBackend:
                     return ToolSchema(
                         name="stream_query_data",
                         description="Local stream query",
-                        parameters={"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}},
+                        parameters={
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+                        },
                     )
 
                 async def execute(self, call: ToolCall) -> ToolResult:
@@ -480,7 +515,9 @@ class LocalWallClockBackend:
                     )
 
                 def _run_subproc(self) -> dict[str, Any]:
-                    res = subprocess.run(["echo", "computed"], capture_output=True, text=True, cwd=sandbox_dir, check=False)
+                    res = subprocess.run(
+                        ["echo", "computed"], capture_output=True, text=True, cwd=sandbox_dir, check=False
+                    )
                     return {"status": "success", "exit_code": res.returncode, "stdout": res.stdout.strip()}
 
                 async def execute(self, call: ToolCall) -> ToolResult:
@@ -507,6 +544,7 @@ class LocalWallClockBackend:
             return registry, model
 
         elif workload_id == "W7":
+
             class LocalFundTransferTool(BaseToolAdapter):
                 @property
                 def name(self) -> str:
@@ -553,7 +591,11 @@ class LocalWallClockBackend:
             )
             decisions = [
                 LLMDecision(reasoning="Execute transfer", tool_calls=[call]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"status": "transferred", "idempotency_key": idemp_key}),
+                LLMDecision(
+                    reasoning="Done",
+                    tool_calls=[],
+                    final_answer={"status": "transferred", "idempotency_key": idemp_key},
+                ),
             ]
             model = LocalScriptedAdapter(decisions=decisions, decision_delay_s=0.001)
             return registry, model
@@ -569,7 +611,10 @@ class LocalWallClockBackend:
                     return ToolSchema(
                         name="bytecode_transport_tool",
                         description="Local transport tool",
-                        parameters={"type": "object", "properties": {"payload_id": {"type": "integer"}, "data": {"type": "string"}}},
+                        parameters={
+                            "type": "object",
+                            "properties": {"payload_id": {"type": "integer"}, "data": {"type": "string"}},
+                        },
                     )
 
                 async def execute(self, call: ToolCall) -> ToolResult:
@@ -587,7 +632,9 @@ class LocalWallClockBackend:
                     )
 
             registry.register(LocalBytecodeTool())
-            call = ToolCall(name="bytecode_transport_tool", arguments={"payload_id": trial_index, "data": f"content_{trial_index}"})
+            call = ToolCall(
+                name="bytecode_transport_tool", arguments={"payload_id": trial_index, "data": f"content_{trial_index}"}
+            )
             decisions = [
                 LLMDecision(reasoning="Transporting call", tool_calls=[call]),
                 LLMDecision(reasoning="Done", tool_calls=[], final_answer={"status": "done", "trial": trial_index}),
@@ -644,7 +691,7 @@ class LocalScriptedAdapter(BaseLLMAdapter):
         self.decision_delay_s = decision_delay_s
         self._turn_index = 0
 
-    def _get_decision_sync(self, task: Task) -> LLMDecision:
+    def _get_decision_sync(self, task: Any) -> LLMDecision:
         if self._turn_index < len(self.decisions):
             decision = self.decisions[self._turn_index]
             self._turn_index += 1
@@ -659,7 +706,7 @@ class LocalScriptedAdapter(BaseLLMAdapter):
 
     async def decide(
         self,
-        task: Task,
+        task: Any,
         history: list[dict[str, Any]],
         available_tools: list[ToolSpec],
     ) -> LLMDecision:
@@ -669,7 +716,7 @@ class LocalScriptedAdapter(BaseLLMAdapter):
 
     async def predict_draft(
         self,
-        task: Task,
+        task: Any,
         history: list[dict[str, Any]],
         available_tools: list[ToolSpec],
     ) -> ToolCall | None:
@@ -679,7 +726,7 @@ class LocalScriptedAdapter(BaseLLMAdapter):
 
     async def stream_decision(
         self,
-        task: Task,
+        task: Any,
         history: list[dict[str, Any]],
         available_tools: list[ToolSpec],
     ) -> AsyncIterator[StreamingChunk]:
@@ -690,9 +737,13 @@ class LocalScriptedAdapter(BaseLLMAdapter):
         for i in range(chunks):
             if delay > 0:
                 await asyncio.sleep(delay)
-            is_final = (i == chunks - 1)
+            is_final = i == chunks - 1
             ready_calls = list(decision.tool_calls) if (i >= 1 and decision.tool_calls) else []
-            fragment = json.dumps(ready_calls[0].arguments) if ready_calls else (json.dumps(decision.tool_calls[0].arguments) if (is_final and decision.tool_calls) else "")
+            fragment = (
+                json.dumps(ready_calls[0].arguments)
+                if ready_calls
+                else (json.dumps(decision.tool_calls[0].arguments) if (is_final and decision.tool_calls) else "")
+            )
 
             yield StreamingChunk(
                 token_index=i,

@@ -20,6 +20,7 @@ from toolspeed.core.types import (
 
 class WorkloadFamily(str, Enum):
     """Canonical workload families evaluated across synthetic and empirical benchmarks."""
+
     W1_FANOUT = "W1: Fan-out Independent Reads"
     W2_CHAINS = "W2: Dependent Sequential Chains"
     W3_BRANCHING = "W3: Branching with Speculative Read"
@@ -42,7 +43,9 @@ def samples(
         count = int(mean_or_median_or_count) if mean_or_median_or_count is not None else 100
         seed = int(sigma_or_std) if sigma_or_std is not None else 42
         rng = np.random.default_rng(seed)
-        return np.maximum(1.0, rng.normal(loc=profile.median_ms, scale=profile.std_dev_ms, size=count))
+        med = getattr(profile, "median_ms", getattr(profile, "tool_ms", 20.0))
+        std = getattr(profile, "std_dev_ms", getattr(profile, "sigma", 2.0))
+        return np.maximum(1.0, rng.normal(loc=med, scale=std, size=count))
 
     rng = rng_or_profile if hasattr(rng_or_profile, "normal") else np.random.default_rng(42)
     median_ms = kwargs.get("median_ms", mean_or_median_or_count)
@@ -62,6 +65,7 @@ def samples(
 @dataclass
 class HypothesisCheck:
     """Individual hypothesis criteria check evaluated against frozen thresholds."""
+
     name: str
     target: str
     measured: str
@@ -75,6 +79,7 @@ class HypothesisCheck:
 @dataclass
 class FalsificationVerdict:
     """Rigorous scientific hypothesis verdict."""
+
     experiment_id: str
     hypothesis: str
     passed: bool
@@ -96,7 +101,9 @@ class FalsificationVerdict:
             "passed": self.passed,
             "falsified": self.falsified,
             "state": self.state.value if isinstance(self.state, VerdictState) else str(self.state),
-            "evidence_level": self.evidence_level.value if isinstance(self.evidence_level, EvidenceLevel) else str(self.evidence_level),
+            "evidence_level": self.evidence_level.value
+            if isinstance(self.evidence_level, EvidenceLevel)
+            else str(self.evidence_level),
             "summary": self.summary,
             "checks": [c.to_dict() for c in self.checks],
             "is_verdict_eligible": self.is_verdict_eligible,
@@ -107,6 +114,7 @@ class FalsificationVerdict:
 @dataclass
 class MetricSummary:
     """Comprehensive paired evaluation statistical summary with honest null defaults."""
+
     baseline_p50_ms: float | None = None
     candidate_p50_ms: float | None = None
     p50_speedup: float | None = None
@@ -154,6 +162,7 @@ class MetricSummary:
 @dataclass
 class ExperimentResult:
     """Top-level container for an experiment evaluation."""
+
     experiment_id: str
     title: str
     parameter_name: str
@@ -172,7 +181,9 @@ class ExperimentResult:
         return {
             "experiment_id": self.experiment_id,
             "title": self.title,
-            "evidence_level": self.evidence_level.value if isinstance(self.evidence_level, EvidenceLevel) else str(self.evidence_level),
+            "evidence_level": self.evidence_level.value
+            if isinstance(self.evidence_level, EvidenceLevel)
+            else str(self.evidence_level),
             "parameter_name": self.parameter_name,
             "rows": sanitize_for_json(self.rows),
             "verdict": self.verdict.to_dict(),
@@ -203,7 +214,7 @@ def compute_percentiles(arr: np.ndarray, percentiles: list[float] | None = None)
 def bootstrap_confidence_interval(
     data: np.ndarray,
     stat_func: Callable[[np.ndarray], float],
-    num_samples: int = 1000,
+    num_samples: int = 2000,
     ci: float = 0.95,
     seed: int | None = 42,
 ) -> tuple[float, float]:
@@ -225,7 +236,7 @@ def paired_bootstrap_ci(
     baseline: np.ndarray,
     candidate: np.ndarray,
     stat_func: Callable[[np.ndarray, np.ndarray], float],
-    num_samples: int = 1000,
+    num_samples: int = 2000,
     ci: float = 0.95,
     seed: int | None = 42,
 ) -> tuple[float | None, float | None]:
@@ -251,11 +262,12 @@ def paired_bootstrap_ci(
 def paired_bootstrap_p95_ci(
     baseline: np.ndarray,
     candidate: np.ndarray,
-    num_samples: int = 1000,
+    num_samples: int = 2000,
     ci: float = 0.95,
     seed: int | None = 42,
 ) -> tuple[float | None, float | None]:
     """Paired bootstrap confidence interval for P95 reduction percentage."""
+
     def _calc_p95_red(b: np.ndarray, c: np.ndarray) -> float:
         b_p95 = float(np.percentile(b, 95))
         c_p95 = float(np.percentile(c, 95))
@@ -287,7 +299,8 @@ def compute_summary(
 ) -> MetricSummary:
     """Compute comprehensive MetricSummary from paired trial arrays.
 
-    Strict CCL invariant: CCL percentiles are computed on trials where tasks completed successfully.
+    Strict CCL invariant: Primary paired CCL percentiles and speedups are computed strictly
+    over the population where BOTH baseline AND candidate succeeded (both_succeeded pairs).
     Missing metrics default strictly to None.
     """
     b_succ = float(np.mean(baseline_success)) if baseline_success is not None and len(baseline_success) > 0 else None
@@ -295,44 +308,57 @@ def compute_summary(
     succ_delta = float(c_succ - b_succ) if (c_succ is not None and b_succ is not None) else None
 
     paired_counts: dict[str, int] = {}
-    if baseline_success is not None and candidate_success is not None and len(baseline_success) == len(candidate_success):
+    both_succeeded_mask: np.ndarray | None = None
+
+    if (
+        baseline_success is not None
+        and candidate_success is not None
+        and len(baseline_success) == len(candidate_success)
+    ):
         bs = np.asarray(baseline_success, dtype=bool)
         cs = np.asarray(candidate_success, dtype=bool)
+        both_succeeded_mask = bs & cs
         paired_counts = {
-            "both_succeeded": int(np.sum(bs & cs)),
+            "both_succeeded": int(np.sum(both_succeeded_mask)),
             "candidate_only": int(np.sum(~bs & cs)),
             "baseline_only": int(np.sum(bs & ~cs)),
             "both_failed": int(np.sum(~bs & ~cs)),
         }
 
-    # Filter for CCL (Correct Completion Latency)
-    if baseline_success is not None and len(baseline_success) == len(baseline):
-        valid_baseline = baseline[baseline_success.astype(bool)]
-    else:
+    # Strict CCL filtering: compute paired latencies over trials where both succeeded
+    if both_succeeded_mask is not None and np.sum(both_succeeded_mask) > 0:
+        valid_baseline = baseline[both_succeeded_mask]
+        valid_candidate = candidate[both_succeeded_mask]
+    elif baseline_success is None and candidate_success is None:
         valid_baseline = baseline
-
-    if candidate_success is not None and len(candidate_success) == len(candidate):
-        valid_candidate = candidate[candidate_success.astype(bool)]
-    else:
         valid_candidate = candidate
+    else:
+        valid_baseline = np.array([], dtype=np.float64)
+        valid_candidate = np.array([], dtype=np.float64)
 
+    b50: float | None = None
+    b90: float | None = None
+    b95: float | None = None
+    b99: float | None = None
+    b_mean: float | None = None
     if len(valid_baseline) > 0:
         b50 = float(np.percentile(valid_baseline, 50))
         b90 = float(np.percentile(valid_baseline, 90))
         b95 = float(np.percentile(valid_baseline, 95))
         b99 = float(np.percentile(valid_baseline, 99))
         b_mean = float(np.mean(valid_baseline))
-    else:
-        b50 = b90 = b95 = b99 = b_mean = None
 
+    c50: float | None = None
+    c90: float | None = None
+    c95: float | None = None
+    c99: float | None = None
+    c_mean: float | None = None
     if len(valid_candidate) > 0:
         c50 = float(np.percentile(valid_candidate, 50))
         c90 = float(np.percentile(valid_candidate, 90))
         c95 = float(np.percentile(valid_candidate, 95))
         c99 = float(np.percentile(valid_candidate, 99))
         c_mean = float(np.mean(valid_candidate))
-    else:
-        c50 = c90 = c95 = c99 = c_mean = None
 
     p50_speedup = float(b50 / c50) if (b50 is not None and c50 is not None and c50 > 0) else None
     p90_speedup = float(b90 / c90) if (b90 is not None and c90 is not None and c90 > 0) else None
@@ -342,7 +368,9 @@ def compute_summary(
 
     wasted_rate = float(np.mean(wasted_calls)) if wasted_calls is not None and len(wasted_calls) > 0 else None
     cost_mult = float(np.mean(cost_multipliers)) if cost_multipliers is not None and len(cost_multipliers) > 0 else None
-    rl_err_rate = float(np.mean(rate_limit_errors)) if rate_limit_errors is not None and len(rate_limit_errors) > 0 else None
+    rl_err_rate = (
+        float(np.mean(rate_limit_errors)) if rate_limit_errors is not None and len(rate_limit_errors) > 0 else None
+    )
 
     token_red = (
         float((input_tokens_base - input_tokens_cand) / input_tokens_base * 100.0)
@@ -351,41 +379,59 @@ def compute_summary(
     )
     deopt_rate_val = float(np.mean(deopt_events)) if deopt_events is not None and len(deopt_events) > 0 else None
 
-    t_start_p50 = float(np.percentile(tool_start_cand, 50)) if tool_start_cand is not None and len(tool_start_cand) > 0 else None
-    t_start_p95 = float(np.percentile(tool_start_cand, 95)) if tool_start_cand is not None and len(tool_start_cand) > 0 else None
-    if tool_start_base is not None and tool_start_cand is not None and len(tool_start_base) > 0 and len(tool_start_cand) > 0:
+    t_start_p50 = (
+        float(np.percentile(tool_start_cand, 50)) if tool_start_cand is not None and len(tool_start_cand) > 0 else None
+    )
+    t_start_p95 = (
+        float(np.percentile(tool_start_cand, 95)) if tool_start_cand is not None and len(tool_start_cand) > 0 else None
+    )
+    if (
+        tool_start_base is not None
+        and tool_start_cand is not None
+        and len(tool_start_base) > 0
+        and len(tool_start_cand) > 0
+    ):
         t_base_p95 = float(np.percentile(tool_start_base, 95))
         t_start_speedup = float(t_base_p95 / t_start_p95) if (t_start_p95 is not None and t_start_p95 > 0) else 1.0
     else:
         t_start_speedup = None
 
-    mutation_rate = float(np.mean(semantic_mutations)) if semantic_mutations is not None and len(semantic_mutations) > 0 else None
+    mutation_rate = (
+        float(np.mean(semantic_mutations)) if semantic_mutations is not None and len(semantic_mutations) > 0 else None
+    )
 
-    # Paired bootstrap CIs with 1,000 samples
-    ci_p95_low, ci_p95_high = paired_bootstrap_p95_ci(baseline, candidate, num_samples=1000)
-    p95_ci = (ci_p95_low, ci_p95_high) if (ci_p95_low is not None and ci_p95_high is not None) else None
+    # Paired bootstrap CIs with 2,000 samples over valid population
+    if len(valid_baseline) >= 5 and len(valid_candidate) >= 5:
+        ci_p95_low, ci_p95_high = paired_bootstrap_p95_ci(valid_baseline, valid_candidate, num_samples=2000)
+        p95_ci = (ci_p95_low, ci_p95_high) if (ci_p95_low is not None and ci_p95_high is not None) else None
 
-    def _calc_p50_red(b: np.ndarray, c: np.ndarray) -> float:
-        b5 = float(np.percentile(b, 50))
-        c5 = float(np.percentile(c, 50))
-        return ((b5 - c5) / b5) * 100.0 if b5 > 0 else 0.0
+        def _calc_p50_red(b: np.ndarray, c: np.ndarray) -> float:
+            b5 = float(np.percentile(b, 50))
+            c5 = float(np.percentile(c, 50))
+            return ((b5 - c5) / b5) * 100.0 if b5 > 0 else 0.0
 
-    ci_p50_low, ci_p50_high = paired_bootstrap_ci(baseline, candidate, _calc_p50_red, num_samples=1000)
-    p50_ci = (ci_p50_low, ci_p50_high) if (ci_p50_low is not None and ci_p50_high is not None) else None
+        ci_p50_low, ci_p50_high = paired_bootstrap_ci(valid_baseline, valid_candidate, _calc_p50_red, num_samples=2000)
+        p50_ci = (ci_p50_low, ci_p50_high) if (ci_p50_low is not None and ci_p50_high is not None) else None
 
-    def _calc_p99_red(b: np.ndarray, c: np.ndarray) -> float:
-        b9 = float(np.percentile(b, 99))
-        c9 = float(np.percentile(c, 99))
-        return ((b9 - c9) / b9) * 100.0 if b9 > 0 else 0.0
+        def _calc_p99_red(b: np.ndarray, c: np.ndarray) -> float:
+            b9 = float(np.percentile(b, 99))
+            c9 = float(np.percentile(c, 99))
+            return ((b9 - c9) / b9) * 100.0 if b9 > 0 else 0.0
 
-    ci_p99_low, ci_p99_high = paired_bootstrap_ci(baseline, candidate, _calc_p99_red, num_samples=1000)
-    p99_ci = (ci_p99_low, ci_p99_high) if (ci_p99_low is not None and ci_p99_high is not None) else None
+        ci_p99_low, ci_p99_high = paired_bootstrap_ci(valid_baseline, valid_candidate, _calc_p99_red, num_samples=2000)
+        p99_ci = (ci_p99_low, ci_p99_high) if (ci_p99_low is not None and ci_p99_high is not None) else None
+    else:
+        p95_ci = None
+        p50_ci = None
+        p99_ci = None
 
     def _calc_succ_delta(b: np.ndarray, c: np.ndarray) -> float:
         return float(np.mean(c) - np.mean(b))
 
-    if baseline_success is not None and candidate_success is not None:
-        ci_succ_low, ci_succ_high = paired_bootstrap_ci(baseline_success.astype(float), candidate_success.astype(float), _calc_succ_delta, num_samples=1000)
+    if baseline_success is not None and candidate_success is not None and len(baseline_success) >= 5:
+        ci_succ_low, ci_succ_high = paired_bootstrap_ci(
+            baseline_success.astype(float), candidate_success.astype(float), _calc_succ_delta, num_samples=2000
+        )
         succ_ci = (ci_succ_low, ci_succ_high) if (ci_succ_low is not None and ci_succ_high is not None) else None
     else:
         succ_ci = None

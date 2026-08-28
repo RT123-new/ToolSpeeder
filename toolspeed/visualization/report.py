@@ -225,13 +225,13 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
 
     e3 = suite_result.experiments.get("E3")
     if e3 and e3.rows:
-        e3_modes = {}
+        e3_modes: dict[str, list[tuple[float, float]]] = {}
         for r in e3.rows:
             mode = r.get("contention_mode")
             acc = r.get("prediction_accuracy")
             spd = r.get("p50_speedup")
             if mode and acc is not None and spd is not None and mode != "confidence_gated":
-                e3_modes.setdefault(mode, []).append((acc, spd))
+                e3_modes.setdefault(mode, []).append((float(acc), float(spd)))
         e3_svg = generate_speedup_line_chart(
             "E3: Speculative Execution Latency Speedup by Contention Mode",
             "Prediction Accuracy",
@@ -260,9 +260,10 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
     else:
         e4_svg = ""
 
-    all_speedups = [w.p95_speedup for w in suite_result.workloads.values()]
+    all_speedups = [w.p95_speedup for w in suite_result.workloads.values() if w.p95_speedup is not None]
     best_speedup = max(all_speedups) if all_speedups else 1.0
-    avg_red = sum(w.p95_reduction_pct for w in suite_result.workloads.values()) / max(1, len(suite_result.workloads))
+    valid_reds = [w.p95_reduction_pct for w in suite_result.workloads.values() if w.p95_reduction_pct is not None]
+    avg_red = sum(valid_reds) / max(1, len(valid_reds))
     passed_exps = sum(1 for exp in suite_result.experiments.values() if exp.verdict.passed)
     total_exps = len(suite_result.experiments)
 
@@ -684,79 +685,121 @@ def save_benchmark_reports(
     result: BenchmarkRunResult | dict[str, Any] | Any,
     out_dir: str | Path,
 ) -> dict[str, Path]:
-    """Save benchmark result bundle reports, compute file byte SHA-256 hashes, and write manifest."""
+    """Save benchmark result bundle reports, paired traces, compute file byte SHA-256 hashes, and write bundle.sha256."""
     p_out = Path(out_dir)
     p_out.mkdir(parents=True, exist_ok=True)
 
     data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
 
+    # 1. report.md
     md_path = p_out / "report.md"
     md_content = generate_benchmark_markdown_report(result)
     md_path.write_text(md_content, encoding="utf-8")
 
+    # 2. report.html
     html_path = p_out / "report.html"
     html_content = generate_benchmark_html_dashboard(result)
     html_path.write_text(html_content, encoding="utf-8")
 
-    # Compute raw traces JSONL
-    traces_path = p_out / "raw-traces.jsonl"
-    with open(traces_path, "w", encoding="utf-8") as f:
+    # 3. Paired Traces JSONL files
+    baseline_traces_path = p_out / "baseline-traces.jsonl"
+    candidate_traces_path = p_out / "candidate-traces.jsonl"
+    controls_traces_path = p_out / "controls-traces.jsonl"
+    cases_path = p_out / "cases.jsonl"
+
+    with (
+        open(baseline_traces_path, "w", encoding="utf-8") as f_b,
+        open(candidate_traces_path, "w", encoding="utf-8") as f_c,
+        open(cases_path, "w", encoding="utf-8") as f_cases,
+    ):
         if hasattr(result, "evaluations"):
             for ev in result.evaluations:
-                for r in ev.candidate_results:
-                    f.write(json.dumps(r.to_dict()) + "\n")
+                for idx, r_c in enumerate(ev.candidate_results):
+                    f_c.write(json.dumps(r_c.to_dict()) + "\n")
+                    f_cases.write(
+                        json.dumps({"workload_id": ev.workload_id, "trial_index": idx, "task_id": r_c.task_id}) + "\n"
+                    )
+                for r_b in ev.baseline_results:
+                    f_b.write(json.dumps(r_b.to_dict()) + "\n")
         else:
-            f.write(json.dumps({"info": "traces"}) + "\n")
+            f_b.write(json.dumps({"info": "baseline_traces"}) + "\n")
+            f_c.write(json.dumps({"info": "candidate_traces"}) + "\n")
+            f_cases.write(json.dumps({"info": "cases"}) + "\n")
 
-    # Summary JSON
-    summary_path = p_out / "summary.json"
-    summary_data = {
+    with open(controls_traces_path, "w", encoding="utf-8") as f_ctrl:
+        if hasattr(result, "negative_controls") and result.negative_controls:
+            for nc in result.negative_controls:
+                f_ctrl.write(json.dumps(nc) + "\n")
+        else:
+            f_ctrl.write(json.dumps({"info": "controls"}) + "\n")
+
+    # 4. Copy pre-registered benchmark plan if available
+    plan_path = p_out / "benchmark-plan.json"
+    repo_plan = Path("benchmark-plans/tool-speed-v1.json")
+    if repo_plan.exists():
+        plan_path.write_text(repo_plan.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        plan_path.write_text(json.dumps({"plan_id": "tool-speed-v1", "version": "1.0.0"}, indent=2), encoding="utf-8")
+
+    # 5. Falsification Verdict JSON
+    falsification_path = p_out / "falsification.json"
+    falsification_data = {
         "title": data.get("title"),
         "evidence_level": data.get("evidence_level"),
         "overall_verdict": data.get("overall_verdict"),
         "total_runtime_s": data.get("total_runtime_s"),
-        "evaluations": [
+        "verdicts": [
             {
                 "workload_id": e.get("workload_id"),
                 "comparison": f"{e.get('candidate_name')} vs {e.get('baseline_name')}",
-                "summary": e.get("summary"),
                 "verdict": e.get("verdict"),
+                "summary": e.get("summary"),
             }
             for e in data.get("evaluations", [])
         ],
     }
-    summary_path.write_text(strict_json_dumps(summary_data, indent=2), encoding="utf-8")
+    falsification_path.write_text(strict_json_dumps(falsification_data, indent=2), encoding="utf-8")
 
-    # Compute SHA-256 over exact file bytes
+    # 6. Result JSON (both benchmark_result.json and result.json)
+    result_path = p_out / "result.json"
+    result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
+
+    bm_result_path = p_out / "benchmark_result.json"
+    bm_result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
+
+    # 7. Compute SHA-256 over exact file bytes
     file_hashes: dict[str, str] = {
         "report.md": compute_file_sha256(md_path),
         "report.html": compute_file_sha256(html_path),
-        "raw-traces.jsonl": compute_file_sha256(traces_path),
-        "summary.json": compute_file_sha256(summary_path),
+        "baseline-traces.jsonl": compute_file_sha256(baseline_traces_path),
+        "candidate-traces.jsonl": compute_file_sha256(candidate_traces_path),
+        "controls-traces.jsonl": compute_file_sha256(controls_traces_path),
+        "cases.jsonl": compute_file_sha256(cases_path),
+        "benchmark-plan.json": compute_file_sha256(plan_path),
+        "falsification.json": compute_file_sha256(falsification_path),
+        "result.json": compute_file_sha256(result_path),
+        "benchmark_result.json": compute_file_sha256(bm_result_path),
     }
 
-    # Update manifest with exact file hashes
+    # 8. Manifest JSON
     manifest = data.get("manifest") or {}
     manifest["file_hashes"] = file_hashes
-    data["manifest"] = manifest
-
-    json_path = p_out / "benchmark_result.json"
-    json_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
-
-    file_hashes["benchmark_result.json"] = compute_file_sha256(json_path)
-    manifest["file_hashes"] = file_hashes
-
-    # Write standalone manifest.json
     manifest_path = p_out / "manifest.json"
     manifest_path.write_text(strict_json_dumps(manifest, indent=2), encoding="utf-8")
 
+    file_hashes["manifest.json"] = compute_file_sha256(manifest_path)
+
+    # 9. bundle.sha256 checksum file
+    bundle_sha_path = p_out / "bundle.sha256"
+    checksum_lines = [f"{hash_val}  {fname}" for fname, hash_val in sorted(file_hashes.items())]
+    bundle_sha_path.write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
+
     return {
-        "json": json_path,
+        "json": result_path,
         "markdown": md_path,
         "html": html_path,
-        "traces": traces_path,
-        "summary": summary_path,
         "manifest": manifest_path,
+        "bundle_sha": bundle_sha_path,
     }
 
 

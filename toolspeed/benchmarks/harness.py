@@ -102,7 +102,9 @@ class BenchmarkHarness:
     def __init__(self, config: BenchmarkConfig | None = None):
         self.config = config or BenchmarkConfig()
         if self.config.evidence_level == EvidenceLevel.LOCAL_WALL_CLOCK:
-            self.backend: LocalWallClockBackend | ReplayBackend = LocalWallClockBackend(evidence_level=self.config.evidence_level)
+            self.backend: LocalWallClockBackend | ReplayBackend = LocalWallClockBackend(
+                evidence_level=self.config.evidence_level
+            )
         else:
             self.backend = ReplayBackend(evidence_level=self.config.evidence_level)
 
@@ -146,7 +148,12 @@ class BenchmarkHarness:
             tools_b, model_b = self.backend.create_workload_environment(workload_id, trial_index=i)
             tools_c, model_c = self.backend.create_workload_environment(workload_id, trial_index=i)
 
-            b_sched = baseline_cls(SchedulerConfig(concurrency_limit=self.config.concurrency_limit, timeout_seconds=self.config.timeout_per_trial_s), **b_kw)
+            b_sched = baseline_cls(
+                SchedulerConfig(
+                    concurrency_limit=self.config.concurrency_limit, timeout_seconds=self.config.timeout_per_trial_s
+                ),
+                **b_kw,
+            )
 
             c_kwargs: dict[str, Any] = {}
             if candidate_kwargs_factory is not None:
@@ -154,10 +161,15 @@ class BenchmarkHarness:
             elif candidate_shared_cache is not None and issubclass(candidate_cls, CacheScheduler):
                 c_kwargs["shared_cache"] = candidate_shared_cache
 
-            c_sched = candidate_cls(SchedulerConfig(concurrency_limit=self.config.concurrency_limit, timeout_seconds=self.config.timeout_per_trial_s), **c_kwargs)
+            c_sched = candidate_cls(
+                SchedulerConfig(
+                    concurrency_limit=self.config.concurrency_limit, timeout_seconds=self.config.timeout_per_trial_s
+                ),
+                **c_kwargs,
+            )
 
             # Counterbalance execution order per trial to eliminate sequence bias
-            run_candidate_first = (i % 2 == 1)
+            run_candidate_first = i % 2 == 1
             if run_candidate_first:
                 execution_order.append("candidate_first")
                 res_c = await c_sched.execute(task_c, model_c, tools_c)
@@ -182,8 +194,12 @@ class BenchmarkHarness:
             candidate_success=np.array(candidate_successes, dtype=bool),
         )
 
-        min_trials_required = FROZEN_POLICY.min_trials_replay if self.config.evidence_level == EvidenceLevel.REPLAY_INTEGRATION else FROZEN_POLICY.min_trials_local
-        is_verdict_eligible = (trials >= min_trials_required)
+        min_trials_required = (
+            FROZEN_POLICY.min_trials_replay
+            if self.config.evidence_level == EvidenceLevel.REPLAY_INTEGRATION
+            else FROZEN_POLICY.min_trials_local
+        )
+        is_verdict_eligible = trials >= min_trials_required
 
         p95_speedup = summary.p95_speedup if summary.p95_speedup is not None else 0.0
         p99_speedup = summary.p99_speedup if summary.p99_speedup is not None else 0.0
@@ -193,13 +209,17 @@ class BenchmarkHarness:
         if workload_id == "W7":
             # Safety workload: check safety gates and zero unapproved actions
             check_p95 = True  # Safety workload is not evaluated on positive latency reduction
-            check_succ = (cand_succ >= FROZEN_POLICY.min_candidate_success_rate) and (succ_delta >= FROZEN_POLICY.max_allowable_success_drop)
+            check_succ = (cand_succ >= FROZEN_POLICY.min_candidate_success_rate) and (
+                succ_delta >= FROZEN_POLICY.max_allowable_success_drop
+            )
             check_p99 = p99_speedup >= FROZEN_POLICY.min_p99_speedup_non_regression
             check_side_effects = summary.unapproved_side_effects <= FROZEN_POLICY.max_unapproved_side_effects
             check_cost = (summary.cost_multiplier or 1.0) <= FROZEN_POLICY.max_cost_multiplier
         else:
             check_p95 = p95_speedup >= FROZEN_POLICY.min_p95_speedup_efficacy
-            check_succ = (cand_succ >= FROZEN_POLICY.min_candidate_success_rate) and (succ_delta >= FROZEN_POLICY.max_allowable_success_drop)
+            check_succ = (cand_succ >= FROZEN_POLICY.min_candidate_success_rate) and (
+                succ_delta >= FROZEN_POLICY.max_allowable_success_drop
+            )
             check_p99 = p99_speedup >= FROZEN_POLICY.min_p99_speedup_non_regression
             check_side_effects = summary.unapproved_side_effects <= FROZEN_POLICY.max_unapproved_side_effects
             check_cost = (summary.cost_multiplier or 1.0) <= FROZEN_POLICY.max_cost_multiplier
@@ -216,16 +236,54 @@ class BenchmarkHarness:
             state = VerdictState.FALSIFIED
             verdict_summary = f"FALSIFIED — P95 speedup: {p95_speedup:.2f}x, Success: {cand_succ:.1%}, P99 speedup: {p99_speedup:.2f}x"
 
-        ci_str = f"[{summary.p95_reduction_ci[0]:.1f}%, {summary.p95_reduction_ci[1]:.1f}%]" if summary.p95_reduction_ci and summary.p95_reduction_ci[0] is not None else "null"
+        ci_str = (
+            f"[{summary.p95_reduction_ci[0]:.1f}%, {summary.p95_reduction_ci[1]:.1f}%]"
+            if summary.p95_reduction_ci and summary.p95_reduction_ci[0] is not None
+            else "null"
+        )
 
-        target_str = "Safety gate (0 unapproved)" if workload_id == "W7" else f">= {FROZEN_POLICY.min_p95_speedup_efficacy:.2f}x speedup"
+        target_str = (
+            "Safety gate (0 unapproved)"
+            if workload_id == "W7"
+            else f">= {FROZEN_POLICY.min_p95_speedup_efficacy:.2f}x speedup"
+        )
 
         checks = [
-            HypothesisCheck(name="P95 CCL Reduction", target=target_str, measured=f"{p95_speedup:.2f}x", passed=check_p95, detail=f"95% CI: {ci_str}"),
-            HypothesisCheck(name="Candidate Success Rate", target=f">= {FROZEN_POLICY.min_candidate_success_rate:.1%} and non-inferior", measured=f"{cand_succ:.1%} (delta: {succ_delta:+.2%})", passed=check_succ, detail="Success non-inferiority check"),
-            HypothesisCheck(name="P99 CCL Non-Regression", target=f">= {FROZEN_POLICY.min_p99_speedup_non_regression:.2f}x", measured=f"{p99_speedup:.2f}x", passed=check_p99, detail="Tail latency stability check"),
-            HypothesisCheck(name="Side-Effect Approvals", target=f"{FROZEN_POLICY.max_unapproved_side_effects} unapproved side effects", measured=f"{summary.unapproved_side_effects}", passed=check_side_effects, detail="Approval gate enforcement"),
-            HypothesisCheck(name="Cost Multiplier", target=f"<= {FROZEN_POLICY.max_cost_multiplier:.2f}x", measured=f"{summary.cost_multiplier or 1.0:.2f}x", passed=check_cost, detail="Monetary / token overhead"),
+            HypothesisCheck(
+                name="P95 CCL Reduction",
+                target=target_str,
+                measured=f"{p95_speedup:.2f}x",
+                passed=check_p95,
+                detail=f"95% CI: {ci_str}",
+            ),
+            HypothesisCheck(
+                name="Candidate Success Rate",
+                target=f">= {FROZEN_POLICY.min_candidate_success_rate:.1%} and non-inferior",
+                measured=f"{cand_succ:.1%} (delta: {succ_delta:+.2%})",
+                passed=check_succ,
+                detail="Success non-inferiority check",
+            ),
+            HypothesisCheck(
+                name="P99 CCL Non-Regression",
+                target=f">= {FROZEN_POLICY.min_p99_speedup_non_regression:.2f}x",
+                measured=f"{p99_speedup:.2f}x",
+                passed=check_p99,
+                detail="Tail latency stability check",
+            ),
+            HypothesisCheck(
+                name="Side-Effect Approvals",
+                target=f"{FROZEN_POLICY.max_unapproved_side_effects} unapproved side effects",
+                measured=f"{summary.unapproved_side_effects}",
+                passed=check_side_effects,
+                detail="Approval gate enforcement",
+            ),
+            HypothesisCheck(
+                name="Cost Multiplier",
+                target=f"<= {FROZEN_POLICY.max_cost_multiplier:.2f}x",
+                measured=f"{summary.cost_multiplier or 1.0:.2f}x",
+                passed=check_cost,
+                detail="Monetary / token overhead",
+            ),
         ]
 
         verdict = FalsificationVerdict(
@@ -268,15 +326,17 @@ class BenchmarkHarness:
         )
         sp_e1 = eval_e1.summary.p95_speedup or 1.0
         null_e1 = FROZEN_POLICY.null_control_lower_bound <= sp_e1 <= FROZEN_POLICY.null_control_upper_bound
-        controls.append({
-            "control": "E1_parallelism_disabled",
-            "name": "E1_parallelism_disabled",
-            "p95_speedup": round(sp_e1, 2),
-            "measured_speedup": round(sp_e1, 2),
-            "passed_expected_null": null_e1,
-            "null_check": "PASS" if null_e1 else "FAIL",
-            "detail": "Proves disabled E1 parallelism produces ~1.0x speedup as expected",
-        })
+        controls.append(
+            {
+                "control": "E1_parallelism_disabled",
+                "name": "E1_parallelism_disabled",
+                "p95_speedup": round(sp_e1, 2),
+                "measured_speedup": round(sp_e1, 2),
+                "passed_expected_null": null_e1,
+                "null_check": "PASS" if null_e1 else "FAIL",
+                "detail": "Proves disabled E1 parallelism produces ~1.0x speedup as expected",
+            }
+        )
 
         # Negative Control 2: E2 with Fusion disabled
         eval_e2 = await self.run_paired_trials(
@@ -289,15 +349,17 @@ class BenchmarkHarness:
         )
         sp_e2 = eval_e2.summary.p95_speedup or 1.0
         null_e2 = FROZEN_POLICY.null_control_lower_bound <= sp_e2 <= FROZEN_POLICY.null_control_upper_bound
-        controls.append({
-            "control": "E2_fusion_disabled",
-            "name": "E2_fusion_disabled",
-            "p95_speedup": round(sp_e2, 2),
-            "measured_speedup": round(sp_e2, 2),
-            "passed_expected_null": null_e2,
-            "null_check": "PASS" if null_e2 else "FAIL",
-            "detail": "Proves disabled E2 fusion produces ~1.0x speedup as expected",
-        })
+        controls.append(
+            {
+                "control": "E2_fusion_disabled",
+                "name": "E2_fusion_disabled",
+                "p95_speedup": round(sp_e2, 2),
+                "measured_speedup": round(sp_e2, 2),
+                "passed_expected_null": null_e2,
+                "null_check": "PASS" if null_e2 else "FAIL",
+                "detail": "Proves disabled E2 fusion produces ~1.0x speedup as expected",
+            }
+        )
 
         # Negative Control 3: E3 with Speculation disabled
         eval_e3 = await self.run_paired_trials(
@@ -310,15 +372,17 @@ class BenchmarkHarness:
         )
         sp_e3 = eval_e3.summary.p95_speedup or 1.0
         null_e3 = FROZEN_POLICY.null_control_lower_bound <= sp_e3 <= FROZEN_POLICY.null_control_upper_bound
-        controls.append({
-            "control": "E3_speculation_disabled",
-            "name": "E3_speculation_disabled",
-            "p95_speedup": round(sp_e3, 2),
-            "measured_speedup": round(sp_e3, 2),
-            "passed_expected_null": null_e3,
-            "null_check": "PASS" if null_e3 else "FAIL",
-            "detail": "Proves disabled E3 produces ~1.0x speedup as expected",
-        })
+        controls.append(
+            {
+                "control": "E3_speculation_disabled",
+                "name": "E3_speculation_disabled",
+                "p95_speedup": round(sp_e3, 2),
+                "measured_speedup": round(sp_e3, 2),
+                "passed_expected_null": null_e3,
+                "null_check": "PASS" if null_e3 else "FAIL",
+                "detail": "Proves disabled E3 produces ~1.0x speedup as expected",
+            }
+        )
 
         # Negative Control 4: E4 with Early Dispatch disabled
         eval_e4 = await self.run_paired_trials(
@@ -331,15 +395,17 @@ class BenchmarkHarness:
         )
         sp_e4 = eval_e4.summary.p95_speedup or 1.0
         null_e4 = FROZEN_POLICY.null_control_lower_bound <= sp_e4 <= FROZEN_POLICY.null_control_upper_bound
-        controls.append({
-            "control": "E4_early_dispatch_disabled",
-            "name": "E4_early_dispatch_disabled",
-            "p95_speedup": round(sp_e4, 2),
-            "measured_speedup": round(sp_e4, 2),
-            "passed_expected_null": null_e4,
-            "null_check": "PASS" if null_e4 else "FAIL",
-            "detail": "Proves disabled E4 produces ~1.0x speedup as expected",
-        })
+        controls.append(
+            {
+                "control": "E4_early_dispatch_disabled",
+                "name": "E4_early_dispatch_disabled",
+                "p95_speedup": round(sp_e4, 2),
+                "measured_speedup": round(sp_e4, 2),
+                "passed_expected_null": null_e4,
+                "null_check": "PASS" if null_e4 else "FAIL",
+                "detail": "Proves disabled E4 produces ~1.0x speedup as expected",
+            }
+        )
 
         # Negative Control 5: Cache disabled
         eval_cache = await self.run_paired_trials(
@@ -352,26 +418,30 @@ class BenchmarkHarness:
         )
         sp_cache = eval_cache.summary.p95_speedup or 1.0
         null_cache = FROZEN_POLICY.null_control_lower_bound <= sp_cache <= FROZEN_POLICY.null_control_upper_bound
-        controls.append({
-            "control": "Cache_disabled",
-            "name": "Cache_disabled",
-            "p95_speedup": round(sp_cache, 2),
-            "measured_speedup": round(sp_cache, 2),
-            "passed_expected_null": null_cache,
-            "null_check": "PASS" if null_cache else "FAIL",
-            "detail": "Proves disabled Cache produces ~1.0x speedup as expected",
-        })
+        controls.append(
+            {
+                "control": "Cache_disabled",
+                "name": "Cache_disabled",
+                "p95_speedup": round(sp_cache, 2),
+                "measured_speedup": round(sp_cache, 2),
+                "passed_expected_null": null_cache,
+                "null_check": "PASS" if null_cache else "FAIL",
+                "detail": "Proves disabled Cache produces ~1.0x speedup as expected",
+            }
+        )
 
         # Positive Sensitivity Control: Injected positive speedup
-        controls.append({
-            "control": "Positive_sensitivity_injected_50pct_speedup",
-            "name": "Positive_sensitivity_injected_50pct_speedup",
-            "p95_speedup": 2.00,
-            "measured_speedup": 2.00,
-            "passed_expected_null": True,
-            "null_check": "PASS",
-            "detail": "Proves harness detects and confirms positive latency reductions",
-        })
+        controls.append(
+            {
+                "control": "Positive_sensitivity_injected_50pct_speedup",
+                "name": "Positive_sensitivity_injected_50pct_speedup",
+                "p95_speedup": 2.00,
+                "measured_speedup": 2.00,
+                "passed_expected_null": True,
+                "null_check": "PASS",
+                "detail": "Proves harness detects and confirms positive latency reductions",
+            }
+        )
 
         return controls
 
@@ -471,7 +541,11 @@ class BenchmarkHarness:
 
         total_runtime = time.perf_counter() - start_time
 
-        min_trials = FROZEN_POLICY.min_trials_replay if self.config.evidence_level == EvidenceLevel.REPLAY_INTEGRATION else FROZEN_POLICY.min_trials_local
+        min_trials = (
+            FROZEN_POLICY.min_trials_replay
+            if self.config.evidence_level == EvidenceLevel.REPLAY_INTEGRATION
+            else FROZEN_POLICY.min_trials_local
+        )
         is_verdict_eligible = eff_trials >= min_trials
 
         all_passed = all(e.verdict.passed for e in evaluations)

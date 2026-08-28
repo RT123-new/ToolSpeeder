@@ -85,7 +85,9 @@ class E4CommitHorizonExperiment:
                 extra={"commit_fraction": f_val},
             )
 
-            p95_red = (summary.baseline_p95_ms - summary.candidate_p95_ms) / summary.baseline_p95_ms
+            b95 = summary.baseline_p95_ms or 1.0
+            c95 = summary.candidate_p95_ms or 1.0
+            p95_red = (b95 - c95) / max(1.0, b95)
 
             t_base_p95 = float(np.percentile(baseline_tool_start, 95))
             t_cand_p95 = float(np.percentile(candidate_tool_start, 95))

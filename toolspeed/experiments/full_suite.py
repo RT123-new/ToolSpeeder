@@ -36,16 +36,16 @@ class WorkloadBenchmarkResult:
     name: str
     description: str
     primary_mechanisms: list[str]
-    baseline_p50_ms: float
-    candidate_p50_ms: float
-    p50_speedup: float
-    baseline_p95_ms: float
-    candidate_p95_ms: float
-    p95_speedup: float
-    p95_reduction_pct: float
-    success_rate: float
-    cost_multiplier: float
-    central_hypothesis_passed: bool
+    baseline_p50_ms: float | None = None
+    candidate_p50_ms: float | None = None
+    p50_speedup: float | None = None
+    baseline_p95_ms: float | None = None
+    candidate_p95_ms: float | None = None
+    p95_speedup: float | None = None
+    p95_reduction_pct: float | None = None
+    success_rate: float | None = None
+    cost_multiplier: float | None = None
+    central_hypothesis_passed: bool = False
     evidence_level: EvidenceLevel = EvidenceLevel.SYNTHETIC
 
     def to_dict(self) -> dict[str, Any]:
@@ -202,7 +202,9 @@ class SuiteRunner:
         w1_base = dec1 + tools1.sum(axis=1) + fin1
         w1_cand = dec1 + tools1.max(axis=1) + fin1
         w1_s = compute_summary(w1_base, w1_cand)
-        w1_red = (w1_s.baseline_p95_ms - w1_s.candidate_p95_ms) / max(1.0, w1_s.baseline_p95_ms) * 100.0
+        b95_1 = w1_s.baseline_p95_ms or 1.0
+        c95_1 = w1_s.candidate_p95_ms or 1.0
+        w1_red = (b95_1 - c95_1) / max(1.0, b95_1) * 100.0
         results["W1"] = WorkloadBenchmarkResult(
             workload_id="W1",
             name=WorkloadFamily.W1_FANOUT.value,
@@ -230,7 +232,9 @@ class SuiteRunner:
         w2_base = decs2.sum(axis=1) + tools2.sum(axis=1) + fin2
         w2_cand = decs2[:, 0] + over2 + tools2.sum(axis=1) + fin2
         w2_s = compute_summary(w2_base, w2_cand)
-        w2_red = (w2_s.baseline_p95_ms - w2_s.candidate_p95_ms) / max(1.0, w2_s.baseline_p95_ms) * 100.0
+        b95_2 = w2_s.baseline_p95_ms or 1.0
+        c95_2 = w2_s.candidate_p95_ms or 1.0
+        w2_red = (b95_2 - c95_2) / max(1.0, b95_2) * 100.0
         results["W2"] = WorkloadBenchmarkResult(
             workload_id="W2",
             name=WorkloadFamily.W2_CHAINS.value,
@@ -260,7 +264,9 @@ class SuiteRunner:
         w3_base = dec3 + tool3 + fin3
         w3_cand = np.where(correct3, np.maximum(dec3, draft3 + tool3), dec3 + tool3) + fin3
         w3_s = compute_summary(w3_base, w3_cand)
-        w3_red = (w3_s.baseline_p95_ms - w3_s.candidate_p95_ms) / max(1.0, w3_s.baseline_p95_ms) * 100.0
+        b95_3 = w3_s.baseline_p95_ms or 1.0
+        c95_3 = w3_s.candidate_p95_ms or 1.0
+        w3_red = (b95_3 - c95_3) / max(1.0, b95_3) * 100.0
         results["W3"] = WorkloadBenchmarkResult(
             workload_id="W3",
             name=WorkloadFamily.W3_BRANCHING.value,
@@ -288,7 +294,9 @@ class SuiteRunner:
         cache_hit_latency = 8.0
         w4_cand = cache_hit_latency + tools4.sum(axis=1) + fin4
         w4_s = compute_summary(w4_base, w4_cand)
-        w4_red = (w4_s.baseline_p95_ms - w4_s.candidate_p95_ms) / max(1.0, w4_s.baseline_p95_ms) * 100.0
+        b95_4 = w4_s.baseline_p95_ms or 1.0
+        c95_4 = w4_s.candidate_p95_ms or 1.0
+        w4_red = (b95_4 - c95_4) / max(1.0, b95_4) * 100.0
         results["W4"] = WorkloadBenchmarkResult(
             workload_id="W4",
             name=WorkloadFamily.W4_REPEATED.value,
@@ -316,7 +324,9 @@ class SuiteRunner:
         cand_gen5 = (0.4 * gen5) + (0.6 * gen5 / 3.5)
         w5_cand = np.maximum(cand_gen5, 0.4 * gen5 + tool5) + fin5
         w5_s = compute_summary(w5_base, w5_cand)
-        w5_red = (w5_s.baseline_p95_ms - w5_s.candidate_p95_ms) / max(1.0, w5_s.baseline_p95_ms) * 100.0
+        b95_5 = w5_s.baseline_p95_ms or 1.0
+        c95_5 = w5_s.candidate_p95_ms or 1.0
+        w5_red = (b95_5 - c95_5) / max(1.0, b95_5) * 100.0
         results["W5"] = WorkloadBenchmarkResult(
             workload_id="W5",
             name=WorkloadFamily.W5_LARGE_PAYLOADS.value,
@@ -345,7 +355,9 @@ class SuiteRunner:
         w6_base = dec6 + cold_start6 + tool6 + fin6
         w6_cand = dec6 + warm_start6 + tool6 + fin6
         w6_s = compute_summary(w6_base, w6_cand)
-        w6_red = (w6_s.baseline_p95_ms - w6_s.candidate_p95_ms) / max(1.0, w6_s.baseline_p95_ms) * 100.0
+        b95_6 = w6_s.baseline_p95_ms or 1.0
+        c95_6 = w6_s.candidate_p95_ms or 1.0
+        w6_red = (b95_6 - c95_6) / max(1.0, b95_6) * 100.0
         results["W6"] = WorkloadBenchmarkResult(
             workload_id="W6",
             name=WorkloadFamily.W6_SANDBOX_COLDSTART.value,
@@ -372,7 +384,9 @@ class SuiteRunner:
         w7_base = dec7 + tool7 + fin7
         w7_cand = np.maximum(dec7, 0.45 * dec7 + tool7) + fin7
         w7_s = compute_summary(w7_base, w7_cand)
-        w7_red = (w7_s.baseline_p95_ms - w7_s.candidate_p95_ms) / max(1.0, w7_s.baseline_p95_ms) * 100.0
+        b95_7 = w7_s.baseline_p95_ms or 1.0
+        c95_7 = w7_s.candidate_p95_ms or 1.0
+        w7_red = (b95_7 - c95_7) / max(1.0, b95_7) * 100.0
         results["W7"] = WorkloadBenchmarkResult(
             workload_id="W7",
             name=WorkloadFamily.W7_SIDE_EFFECTS.value,

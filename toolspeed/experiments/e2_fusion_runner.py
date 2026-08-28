@@ -101,16 +101,20 @@ class E2FusionExperiment:
                 extra={"steps": steps, "nominal_deopt_prob": nominal_deopt_prob},
             )
 
-            p95_red = (summary.baseline_p95_ms - summary.candidate_p95_ms) / summary.baseline_p95_ms
+            b95 = summary.baseline_p95_ms or 1.0
+            c95 = summary.candidate_p95_ms or 1.0
+            p95_red = (b95 - c95) / max(1.0, b95)
             p95_reductions.append(p95_red)
-            token_reductions.append(summary.token_reduction_pct)
-            measured_deopt_rates.append(summary.deopt_rate)
+            if summary.token_reduction_pct is not None:
+                token_reductions.append(summary.token_reduction_pct)
+            if summary.deopt_rate is not None:
+                measured_deopt_rates.append(summary.deopt_rate)
 
             row_data = {
                 "dependent_steps": steps,
-                "deopt_rate": float(summary.deopt_rate),
+                "deopt_rate": float(summary.deopt_rate or 0.0),
                 "p95_reduction_pct": float(p95_red * 100.0),
-                "input_token_reduction_pct": float(summary.token_reduction_pct),
+                "input_token_reduction_pct": float(summary.token_reduction_pct or 0.0),
             }
             row_data.update(summary.to_dict())
             rows.append(row_data)
@@ -155,15 +159,17 @@ class E2FusionExperiment:
                 deopt_events=is_deopt.astype(float),
                 extra={"steps": steps, "deopt_prob_sweep": deopt_p},
             )
-            d_p95_red = (d_summary.baseline_p95_ms - d_summary.candidate_p95_ms) / d_summary.baseline_p95_ms
-            row_data = {
+            d_b95 = d_summary.baseline_p95_ms or 1.0
+            d_c95 = d_summary.candidate_p95_ms or 1.0
+            d_p95_red = (d_b95 - d_c95) / max(1.0, d_b95)
+            d_row_data: dict[str, Any] = {
                 "dependent_steps": f"4 (deopt_sweep_{int(deopt_p * 100)}%)",
-                "deopt_rate": float(d_summary.deopt_rate),
+                "deopt_rate": float(d_summary.deopt_rate or 0.0),
                 "p95_reduction_pct": float(d_p95_red * 100.0),
-                "input_token_reduction_pct": float(d_summary.token_reduction_pct),
+                "input_token_reduction_pct": float(d_summary.token_reduction_pct or 0.0),
             }
-            row_data.update(d_summary.to_dict())
-            rows.append(row_data)
+            d_row_data.update(d_summary.to_dict())
+            rows.append(d_row_data)
 
         # Falsification Checks
         # 1. >=25% lower P95 CCL on chained steps (steps >= 4)

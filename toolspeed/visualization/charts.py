@@ -41,7 +41,7 @@ def generate_speedup_line_chart(
     title: str,
     x_label: str,
     y_label: str,
-    series: dict[str, Sequence[tuple[float, float]]],
+    series: dict[str, Any] | Any,
     width: int = 800,
     height: int = 480,
     show_baseline_ref: bool = True,

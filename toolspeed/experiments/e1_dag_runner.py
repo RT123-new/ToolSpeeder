@@ -101,9 +101,12 @@ class E1DAGExperiment:
                 extra={"calls": calls, "concurrency_limit": concurrency_limit},
             )
 
-            p95_reduction = (summary.baseline_p95_ms - summary.candidate_p95_ms) / summary.baseline_p95_ms
+            b95 = summary.baseline_p95_ms or 1.0
+            c95 = summary.candidate_p95_ms or 1.0
+            p95_reduction = (b95 - c95) / max(1.0, b95)
             p95_improvements.append(p95_reduction)
-            success_deltas.append(summary.success_rate_delta)
+            if summary.success_rate_delta is not None:
+                success_deltas.append(summary.success_rate_delta)
             rl_increase = float(np.mean(candidate_rl_errors) - np.mean(baseline_rl_errors))
             rl_increases.append(rl_increase)
 
@@ -139,12 +142,12 @@ class E1DAGExperiment:
                 candidate_success=np.ones(self.trials, dtype=bool),
                 extra={"workload": "W3_Branching_FalseIndependenceGuarded"},
             )
+            b95_fi = fi_summary.baseline_p95_ms or 1.0
+            c95_fi = fi_summary.candidate_p95_ms or 1.0
             fi_row = {
                 "independent_calls": "4_with_hidden_dep",
                 "concurrency_limit": "DAG_ordered",
-                "p95_reduction_pct": float(
-                    (fi_summary.baseline_p95_ms - fi_summary.candidate_p95_ms) / fi_summary.baseline_p95_ms * 100.0
-                ),
+                "p95_reduction_pct": float((b95_fi - c95_fi) / max(1.0, b95_fi) * 100.0),
                 "rate_limit_increase_pp": 0.0,
             }
             fi_row.update(fi_summary.to_dict())

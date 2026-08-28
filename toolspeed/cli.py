@@ -19,13 +19,13 @@ from pathlib import Path
 from typing import Any
 
 from toolspeed.benchmarks.harness import BenchmarkConfig, BenchmarkHarness
-from toolspeed.core.types import EvidenceLevel, VerdictState
+from toolspeed.core.types import EvidenceLevel, VerdictState, compute_file_sha256
 from toolspeed.experiments.e1_dag_runner import E1DAGExperiment
 from toolspeed.experiments.e2_fusion_runner import E2FusionExperiment
 from toolspeed.experiments.e3_spec_runner import E3SpeculationExperiment
 from toolspeed.experiments.e4_commit_runner import E4CommitHorizonExperiment
 from toolspeed.experiments.e5_bytecode_runner import E5BytecodeExperiment
-from toolspeed.experiments.full_suite import SuiteRunner
+from toolspeed.experiments.full_suite import SuiteResult, SuiteRunner
 from toolspeed.experiments.runner import LatencyProfile
 from toolspeed.visualization.charts import ascii_bar_chart, ascii_table
 from toolspeed.visualization.report import (
@@ -39,12 +39,14 @@ from toolspeed.visualization.report import (
 def _load_bundle_data(bundle_path_str: str) -> tuple[dict[str, Any], Path]:
     p = Path(bundle_path_str)
     if p.is_dir():
-        if (p / "benchmark_result.json").exists():
+        if (p / "result.json").exists():
+            target = p / "result.json"
+        elif (p / "benchmark_result.json").exists():
             target = p / "benchmark_result.json"
         elif (p / "summary_report.json").exists():
             target = p / "summary_report.json"
         else:
-            raise FileNotFoundError(f"No benchmark_result.json or summary_report.json found in directory: {p}")
+            raise FileNotFoundError(f"No result.json or benchmark_result.json found in directory: {p}")
     else:
         target = p
 
@@ -78,7 +80,7 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     elif exp_name in ("e5", "e5_bytecode"):
         res = E5BytecodeExperiment(profile=profile, trials=args.trials, seed=args.seed).run()
     elif exp_name == "all":
-        suite = SuiteRunner(
+        suite: SuiteResult = SuiteRunner(
             profile=profile, trials=args.trials, seed=args.seed, evidence_level=EvidenceLevel.SYNTHETIC
         ).run()
         artifacts = save_all_reports(suite, out_dir)
@@ -236,7 +238,14 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_falsify(args: argparse.Namespace) -> int:
-    """Evaluate hypothesis falsification status from an existing benchmark bundle."""
+    """Evaluate hypothesis falsification status from an existing benchmark bundle.
+
+    Exit codes:
+      0 = PASSED (all hypotheses met under verdict-eligible empirical evidence)
+      1 = FALSIFIED (one or more hypotheses failed efficacy or safety thresholds)
+      2 = INCONCLUSIVE (synthetic simulation, underpowered smoke trial, or missing metrics)
+      3 = ERROR / MALFORMED (bundle missing, invalid json, hash mismatch)
+    """
     print("\n🔬 ToolSpeed Scientific Falsification Evaluator")
     print("================================================\n")
 
@@ -247,8 +256,8 @@ def cmd_falsify(args: argparse.Namespace) -> int:
 
     try:
         data, _ = _load_bundle_data(input_path)
-    except FileNotFoundError as e:
-        print(f"❌ Error: {e}")
+    except Exception as e:
+        print(f"❌ Error loading bundle: {e}")
         return 3
 
     ev_level = data.get("evidence_level", "synthetic")
@@ -278,22 +287,29 @@ def cmd_falsify(args: argparse.Namespace) -> int:
         return 3
 
     all_passed = True
+    any_falsified = False
     rows = []
-    for e in evaluations:
-        wl = e.get("workload_id", "")
-        comp = f"{e.get('candidate_name', '')} vs {e.get('baseline_name', '')}"
-        summ = e.get("summary", {})
-        verd = e.get("verdict", {})
+    for ev in evaluations:
+        wl = ev.get("workload_id", "")
+        comp = f"{ev.get('candidate_name', '')} vs {ev.get('baseline_name', '')}"
+        summ = ev.get("summary", {})
+        verd = ev.get("verdict", {})
         is_pass = verd.get("passed", False)
+        is_falsified = verd.get("falsified", False)
+
         if not is_pass:
             all_passed = False
+        if is_falsified:
+            any_falsified = True
+
         sp = f"{summ.get('p95_speedup', 0.0):.2f}x" if summ.get("p95_speedup") is not None else "null"
         succ = (
             f"{summ.get('candidate_success_rate', 0.0):.1%}"
             if summ.get("candidate_success_rate") is not None
             else "null"
         )
-        rows.append([wl, comp, sp, succ, "✅ PASS" if is_pass else "❌ FAIL"])
+        status_label = "✅ PASS" if is_pass else ("❌ FAIL" if is_falsified else "⚠️ INCONCLUSIVE")
+        rows.append([wl, comp, sp, succ, status_label])
 
     print(
         ascii_table(
@@ -306,9 +322,12 @@ def cmd_falsify(args: argparse.Namespace) -> int:
     if all_passed:
         print(f"\n✅ Result: ALL HYPOTHESES PASSED under evidence level '{ev_level}'.")
         return 0
-    else:
+    elif any_falsified:
         print(f"\n❌ Result: ONE OR MORE HYPOTHESES FALSIFIED under evidence level '{ev_level}'.")
         return 1
+    else:
+        print(f"\n⚠️ Result: INCONCLUSIVE under evidence level '{ev_level}'.")
+        return 2
 
 
 def cmd_validate_bundle(args: argparse.Namespace) -> int:
@@ -322,8 +341,8 @@ def cmd_validate_bundle(args: argparse.Namespace) -> int:
 
     try:
         data, parent_dir = _load_bundle_data(input_path)
-    except FileNotFoundError as e:
-        print(f"❌ Error: {e}")
+    except Exception as e:
+        print(f"❌ Error loading bundle: {e}")
         return 1
 
     checks_passed = True
@@ -357,10 +376,9 @@ def cmd_validate_bundle(args: argparse.Namespace) -> int:
         checks_passed = False
     else:
         print(f"✅ PASS: Found {len(evaluations)} paired workload evaluations.")
-        for idx, e in enumerate(evaluations):
-            wl = e.get("workload_id", f"idx_{idx}")
-            summ = e.get("summary", {})
-            # Check for required metrics non-null
+        for idx, ev in enumerate(evaluations):
+            wl = ev.get("workload_id", f"idx_{idx}")
+            summ = ev.get("summary", {})
             if summ.get("candidate_p95_ms") is None or summ.get("baseline_p95_ms") is None:
                 print(f"❌ FAILED [{wl}]: Required P95 CCL latency is null.")
                 checks_passed = False
@@ -372,20 +390,19 @@ def cmd_validate_bundle(args: argparse.Namespace) -> int:
                 checks_passed = False
 
     # 3. Guardrail safety checks
-    for e in evaluations:
-        summ = e.get("summary", {})
+    for ev in evaluations:
+        summ = ev.get("summary", {})
         side_effects = summ.get("unapproved_side_effects", 0)
         if side_effects > 0:
-            print(f"❌ FAILED [{e.get('workload_id')}]: Found {side_effects} unapproved side-effects!")
+            print(f"❌ FAILED [{ev.get('workload_id')}]: Found {side_effects} unapproved side-effects!")
             checks_passed = False
 
     # 4. File byte SHA-256 hash provenance verification
     file_hashes = manifest.get("file_hashes", {}) if manifest else {}
     if file_hashes and parent_dir.is_dir():
-        from toolspeed.core.types import compute_file_sha256
         print("🔐 Verifying bundle file SHA-256 byte hashes...")
         for fname, expected_hash in file_hashes.items():
-            if fname == "manifest.json":
+            if fname in ("manifest.json", "bundle.sha256"):
                 continue
             fpath = parent_dir / fname
             if not fpath.exists():

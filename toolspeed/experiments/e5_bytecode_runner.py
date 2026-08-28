@@ -93,7 +93,9 @@ class E5BytecodeExperiment:
                     },
                 )
 
-                p95_red = (summary.baseline_p95_ms - summary.candidate_p95_ms) / summary.baseline_p95_ms
+                b95 = summary.baseline_p95_ms or 1.0
+                c95 = summary.candidate_p95_ms or 1.0
+                p95_red = (b95 - c95) / max(1.0, b95)
                 p95_red_pct = float(p95_red * 100.0)
 
                 if share_val >= 0.50 and factor_val >= 2.0:
