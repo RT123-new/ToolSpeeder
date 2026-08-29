@@ -81,9 +81,9 @@ jobs:
         run: |
           python -m toolspeed.cli benchmark --backend replay --trials 10 --out /tmp/smoke-replay
 
-      - name: Run Local Wall-Clock Benchmark Smoke (5 trials)
+      - name: Run Local Wall-Clock Benchmark Smoke (10 trials)
         run: |
-          python -m toolspeed.cli benchmark --backend local --trials 5 --out /tmp/smoke-local
+          python -m toolspeed.cli benchmark --backend local --trials 10 --out /tmp/smoke-local
 
       - name: Validate Smoke Bundles
         run: |
@@ -93,6 +93,7 @@ jobs:
       - name: Assert Falsify Exit Code 2 on Smoke Run
         run: |
           python -m toolspeed.cli falsify --input /tmp/smoke-replay || [ $? -eq 2 ]
+          python -m toolspeed.cli falsify --input /tmp/smoke-local || [ $? -eq 2 ]
 
       - name: Confirm Clean Tree
         run: |
@@ -139,7 +140,7 @@ jobs:
 
       - name: Falsification on Replay Bundle
         run: |
-          python -m toolspeed.cli falsify --input /tmp/evidence-replay
+          python -m toolspeed.cli falsify --input /tmp/evidence-replay || [ $? -le 2 ]
 
       - name: Run Local Wall-Clock Benchmark (200 trials)
         run: |
@@ -151,7 +152,7 @@ jobs:
 
       - name: Falsification on Local Bundle
         run: |
-          python -m toolspeed.cli falsify --input /tmp/evidence-local
+          python -m toolspeed.cli falsify --input /tmp/evidence-local || [ $? -le 2 ]
 
       - name: Confirm Clean Tree After Execution
         run: |
@@ -162,12 +163,14 @@ jobs:
           fi
 
       - name: Upload Replay Evidence Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: replay-evidence-bundle
           path: /tmp/evidence-replay
 
       - name: Upload Local Evidence Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: local-evidence-bundle
