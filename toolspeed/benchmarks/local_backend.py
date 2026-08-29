@@ -38,12 +38,17 @@ from toolspeed.core.types import (
 )
 
 
+class ThreadingLocalTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 class LocalHTTPServer:
-    """Embedded lightweight HTTP server for local network loopback benchmarking."""
+    """Embedded lightweight multithreaded HTTP server for local network loopback benchmarking."""
 
     def __init__(self, port: int = 0) -> None:
         self.port = port
-        self.server: socketserver.TCPServer | None = None
+        self.server: ThreadingLocalTCPServer | None = None
         self.thread: threading.Thread | None = None
         self._started = threading.Event()
 
@@ -72,7 +77,7 @@ class LocalHTTPServer:
             def log_message(self, format: str, *args: Any) -> None:
                 pass
 
-        self.server = socketserver.TCPServer(("127.0.0.1", self.port), ShardHandler)
+        self.server = ThreadingLocalTCPServer(("127.0.0.1", self.port), ShardHandler)
         self.port = self.server.server_address[1]
 
         def _run() -> None:
@@ -546,6 +551,17 @@ class LocalWallClockBackend:
         elif workload_id == "W7":
 
             class LocalFundTransferTool(BaseToolAdapter):
+                def __init__(self) -> None:
+                    super().__init__(
+                        ToolSpec(
+                            name="execute_fund_transfer",
+                            is_read_only=False,
+                            side_effects=True,
+                            requires_approval=True,
+                            is_idempotent=True,
+                        )
+                    )
+
                 @property
                 def name(self) -> str:
                     return "execute_fund_transfer"
