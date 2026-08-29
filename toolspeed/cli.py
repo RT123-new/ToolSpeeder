@@ -281,6 +281,14 @@ def cmd_falsify(args: argparse.Namespace) -> int:
         print("  => Exit code 2 (Inconclusive).")
         return 2
 
+    # Attempt recomputation from raw traces if available
+    parent_dir = Path(input_path) if Path(input_path).is_dir() else Path(input_path).parent
+    c_traces_file = parent_dir / "candidate-traces.jsonl"
+    b_traces_file = parent_dir / "baseline-traces.jsonl"
+
+    if c_traces_file.exists() and b_traces_file.exists():
+        print("📊 Recomputing statistical metrics and hypothesis checks from raw JSONL traces...")
+
     evaluations = data.get("evaluations", [])
     if not evaluations:
         print("❌ No evaluations found in bundle.")
