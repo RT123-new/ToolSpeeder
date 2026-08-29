@@ -1,30 +1,70 @@
-# ToolSpeed Benchmark Methodology
+# ToolSpeed Benchmark Methodology (Protocol `tool-speed-v1.1`)
 
-This document defines the scientific benchmarking methodology, statistical criteria, and paired evaluation protocol used across ToolSpeed.
+This document defines the authoritative scientific benchmarking methodology, statistical criteria, paired evaluation protocol, and hypothesis falsification rules used across ToolSpeed under frozen protocol [`tool-speed-v1.1.json`](file:///Users/regtroka/Downloads/ToolSpeed/benchmark-plans/tool-speed-v1.1.json).
 
-## Core Principles
+---
 
-1. **Paired Comparisons**: Every candidate scheduler is evaluated on the exact same task instance, tool fixture, and model response as its baseline scheduler.
-2. **Correct Completion Latency (CCL)**: Latency metrics (P50, P90, P95, P99) are computed strictly on trials where the task completed successfully and passed semantic validation. Failed trials are accounted for in the Success Rate metric and must not artificially depress measured latency.
-3. **Execution Order Counterbalancing**: On real wall-clock backends, trial execution order alternates (Trial 0: Baseline then Candidate; Trial 1: Candidate then Baseline) to eliminate thermal throttling and cache sequence bias.
-4. **Paired Bootstrap Resampling**: All speedup confidence intervals are computed via paired bootstrap resampling ($B = 1000$ iterations) over paired trial indices.
-5. **Negative Control Verification**: The benchmark suite includes negative controls (e.g., candidate with optimization disabled) to prove that the measurement harness produces ~1.00x speedup when no optimization is active.
+## 1. Core Principles & Evaluation Architecture
 
-## Workload Families (W1 – W7)
+1. **Prospectively Frozen Protocol**: All comparisons, thresholds, sample sizes, seeds, and aggregation rules are defined in `benchmark-plans/tool-speed-v1.1.json` prior to evidence collection.
+2. **Dual-Baseline Architecture**:
+   - **Primary Attribution Baseline**: Isolates mechanism efficacy by evaluating an identical scheduler architecture with only the specific optimization disabled (ablation baseline).
+   - **Practical Baseline**: Evaluates performance gains against standard sequential ReAct (`SyncReActScheduler`) or handwritten workflows.
+3. **Correct Completion Latency (CCL)**: Latency metrics ($P_{50}, P_{90}, P_{95}, P_{99}$) are calculated strictly on trials where the task completed successfully and satisfied all oracle correctness and state invariants. Failed trials are accounted for in the Success Rate metric and do not artificially deflate measured latency.
+4. **Oracle Separation Boundary**: The model/agent receives strictly an immutable `AgentTask` containing whitelisted model-visible metadata. Ground-truth expectations, approval grants, and validation functions reside exclusively in `BenchmarkCase` on the evaluation side.
+5. **Execution Order Counterbalancing**: On real wall-clock backends, trial execution order alternates (Trial 0: Baseline then Candidate; Trial 1: Candidate then Baseline) to eliminate thermal throttling, cache warmth, and sequence bias.
+6. **Paired Bootstrap Resampling**: All speedup confidence intervals are computed via paired bootstrap resampling ($B = 2000$ iterations, 95% CI) over paired trial indices.
+7. **Negative & Sensitivity Controls**:
+   - **Negative Controls**: Paired identical arms evaluating disabled optimizations to confirm the null equivalence region $[0.95\times, 1.05\times]$.
+   - **Positive Sensitivity Control**: Real execution with an injected 50% tool execution delay to verify that the measurement harness accurately detects positive speedups within $[1.80\times, 2.20\times]$.
+8. **Missing Data Policy**: Any missing or null metric in a required workload yields an immediate `null_inconclusive` status.
 
-| ID | Family | Description | Baseline | Candidate |
-|---|---|---|---|---|
-| **W1** | Independent Fanout Reads | 5 independent shard reads dispatched concurrently | `SyncReActScheduler` | `DAGScheduler` (E1) |
-| **W2** | Deterministic Dependent Chains | Two-step user $\to$ orders query pipeline | `SyncReActScheduler` | `JITFusionScheduler` (E2) |
-| **W3** | Branching with Speculative Read | Speculative read-only query during model reasoning | `SyncReActScheduler` | `SpeculativeReadScheduler` (E3) |
-| **W4** | Repeated Workflows (Locality) | Repeated read queries across sequence with Zipfian locality | `SyncReActScheduler` | `CacheScheduler` |
-| **W5** | Large Payloads & Early Commit | Incremental streaming with early commit horizon dispatch | `SyncReActScheduler` | `CommitHorizonScheduler` (E4) |
-| **W6** | Sandbox Cold-Start | Sandbox execution with cold-start initialization | `SyncReActScheduler` (Cold) | `CompositeScheduler` (Prewarmed) |
-| **W7** | Side-Effects & Idempotency | Mutative fund transfer requiring approval and idempotency | `SyncReActScheduler` | `CompositeScheduler` |
-| **E5a** | Action Bytecode Codec | Binary transport packet serialization vs JSON | `SyncReActScheduler` | `ActionBytecodeScheduler` |
+---
 
-## Statistical Metrics & Falsification Criteria
+## 2. Frozen Workload Matrix & Pairings
 
-- **P95 Speedup**: $\text{Speedup}_{P95} = \frac{\text{Baseline } P95}{\text{Candidate } P95}$
-- **Target Threshold**: $\text{Speedup}_{P95} \ge 1.05\times$ and $\text{Candidate Success Rate} \ge 95.0\%$.
-- **Null Check**: Negative controls must satisfy $|\text{Speedup}_{P95} - 1.00| \le 0.25$.
+| Workload ID | Name / Mechanism | Candidate | Primary Attribution Baseline | Practical Baseline | Efficacy Threshold |
+|---|---|---|---|---|---|
+| **W1** | Dynamic DAG Scheduling (E1) | `DAGScheduler` | `DAGScheduler_serial_ablation` | `NativeParallelScheduler` | $P_{95} \ge 1.20\times$, Success $\ge 95\%$ |
+| **W2** | Declarative JIT Fusion (E2) | `JITFusionScheduler` | `JITFusionScheduler_fusion_disabled` | `HandwrittenWorkflowScheduler` | $P_{95} \ge 1.20\times$, Success $\ge 95\%$ |
+| **W3** | Speculative Reads (E3) | `SpeculativeReadScheduler` | `SpeculativeReadScheduler_spec_disabled` | `SyncReActScheduler` | $P_{95} \ge 1.11\times$, Success $\ge 95\%$ |
+| **W4** | Locality & Domain Caching | `CacheScheduler` | `CacheScheduler_cache_disabled` | `SyncReActScheduler` | $P_{95} \ge 1.11\times$, Success $\ge 95\%$ |
+| **W5** | Streaming Commit Horizon (E4) | `CommitHorizonScheduler` | `CommitHorizonScheduler_early_dispatch_disabled` | `SyncReActScheduler` | $P_{95} \ge 1.10\times$, Success $\ge 95\%$ |
+| **W6** | Persistent Pool Prewarming | `PersistentPrewarmedPool` | `PersistentColdPool` | `SyncReActScheduler` | $P_{95} \ge 1.10\times$, Success $\ge 95\%$ |
+| **W7_SAFETY** | Side-Effect Safety & Idempotency Gate | `CompositeScheduler` | `IdenticalAuthorizedExecutionPath` | `SyncReActScheduler` | Unapproved $= 0$, Duplicates $= 0$, Success $= 100\%$ |
+| **W7_LATENCY** | Side-Effect Latency Overhead | `CompositeScheduler` | `IdenticalAuthorizedExecutionPath` | `SyncReActScheduler` | $P_{95} \ge 1.00\times$, $P_{99} \ge 0.95\times$ |
+| **E5a** | Action Bytecode Transport Codec | `ActionBytecodeCodec` | `JSONCodec` | `JSONCodec` | $P_{95} \ge 1.05\times$, Roundtrip Loss $= 0$ |
+| **E5b** | Direct Action-Token Generation | *Unimplemented* | — | — | `INCONCLUSIVE` |
+
+---
+
+## 3. Evidence Levels & Verdict Eligibility
+
+- **`replay_integration`**: Minimum 1,000 trials per condition across pre-registered seeds `[20260825, 20260826, 20260827]`. Deterministic replay timing.
+- **`local_wall_clock`**: Minimum 200 trials per condition across pre-registered seeds. Real local OS loopback and subprocess primitives.
+- **Smoke Runs** ($n < 1000$ replay or $n < 200$ local): Marked `SMOKE — NOT VERDICT-ELIGIBLE` (Falsify exit code `2`).
+- **Hypothesis Status**:
+  - `PASSED`: All primary mechanisms meet or exceed pre-registered speedup targets and safety gates.
+  - `FALSIFIED`: One or more primary mechanisms fail speedup thresholds or violate safety invariants (Falsify exit code `1`).
+  - `INCONCLUSIVE`: Insufficient sample size or missing data (Falsify exit code `2`).
+
+---
+
+## 4. Atomic Bundle Format & Hashing
+
+Canonical evidence bundles are atomically staged and sealed with standard provenance manifests:
+```
+<bundle_dir>/
+├── manifest.json              # Provenance metadata and payload SHA-256 byte hashes
+├── protocol.json              # Copy of frozen protocol specification (v1.1)
+├── cases.jsonl                # BenchmarkCase items with model-isolated tasks and oracle targets
+├── baseline-traces.jsonl      # Raw baseline execution traces
+├── candidate-traces.jsonl     # Raw candidate execution traces
+├── controls-traces.jsonl      # Raw negative and positive control execution traces
+├── falsification.json         # Recomputed falsification verdicts and summaries
+├── result.json                # Canonical result payload
+├── report.md                  # Markdown evaluation report
+├── report.html                # Interactive HTML dashboard
+└── bundle.sha256              # SHA-256 checksums of all bundle artifacts
+```
+Manifest verification is performed via `toolspeed validate-bundle --input <bundle_dir>`, verifying exact byte hashes, schema fields, and non-null metric policies.
