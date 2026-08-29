@@ -102,7 +102,7 @@ class ToolResultCache:
     ) -> None:
         ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl_seconds
         now = self._now_s()
-        
+
         # Enforce max_entries LRU capacity
         if len(self._exact_store) >= self.max_entries:
             oldest_key = min(self._exact_store.keys(), key=lambda k: self._exact_store[k].created_at)
@@ -140,13 +140,20 @@ class ToolResultCache:
         entity = mutation_tool
         for p in prefixes:
             if mutation_tool.startswith(p):
-                entity = mutation_tool[len(p):]
+                entity = mutation_tool[len(p) :]
                 break
 
         to_del_exact = []
         for k, v in self._exact_store.items():
             t_name = v.tool_name
-            if t_name == mutation_tool or t_name.endswith(f"_{entity}") or t_name.startswith(f"get_{entity}") or t_name.startswith(f"fetch_{entity}") or t_name.startswith(f"list_{entity}") or entity in t_name.split("_"):
+            if (
+                t_name == mutation_tool
+                or t_name.endswith(f"_{entity}")
+                or t_name.startswith(f"get_{entity}")
+                or t_name.startswith(f"fetch_{entity}")
+                or t_name.startswith(f"list_{entity}")
+                or entity in t_name.split("_")
+            ):
                 to_del_exact.append(k)
 
         for k in to_del_exact:
@@ -155,7 +162,14 @@ class ToolResultCache:
         to_del_sem = []
         for k, v in self._semantic_store.items():
             t_name = v.tool_name
-            if t_name == mutation_tool or t_name.endswith(f"_{entity}") or t_name.startswith(f"get_{entity}") or t_name.startswith(f"fetch_{entity}") or t_name.startswith(f"list_{entity}") or entity in t_name.split("_"):
+            if (
+                t_name == mutation_tool
+                or t_name.endswith(f"_{entity}")
+                or t_name.startswith(f"get_{entity}")
+                or t_name.startswith(f"fetch_{entity}")
+                or t_name.startswith(f"list_{entity}")
+                or entity in t_name.split("_")
+            ):
                 to_del_sem.append(k)
 
         for k in to_del_sem:

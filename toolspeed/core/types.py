@@ -167,9 +167,9 @@ def filter_model_visible_metadata(metadata: Mapping[str, Any] | None) -> dict[st
         # Never expose ApprovalGrant or ExpectedOutcome objects
         if hasattr(v, "approval_id") or hasattr(v, "expected_final_value") or hasattr(v, "oracle_canary"):
             continue
-        if k in MODEL_VISIBLE_METADATA_WHITELIST:
-            result[k] = v
-        elif not any(p in str(v).lower() for p in PROHIBITED_METADATA_SUBSTRINGS):
+        if k in MODEL_VISIBLE_METADATA_WHITELIST or not any(
+            p in str(v).lower() for p in PROHIBITED_METADATA_SUBSTRINGS
+        ):
             result[k] = v
     return result
 
@@ -486,32 +486,37 @@ class BenchmarkCase:
                     return False, f"Tool execution failed: {err_msg}", details
 
         # 4. Check max allowed calls
-        if trace is not None and getattr(trace, "tool_calls", None):
-            if len(trace.tool_calls) > self.expected_outcome.max_allowed_calls:
-                details["errors"].append(
-                    f"Tool call count {len(trace.tool_calls)} exceeded max {self.expected_outcome.max_allowed_calls}"
-                )
-                return False, "Exceeded maximum allowed tool calls", details
+        if (
+            trace is not None
+            and getattr(trace, "tool_calls", None)
+            and len(trace.tool_calls) > self.expected_outcome.max_allowed_calls
+        ):
+            details["errors"].append(
+                f"Tool call count {len(trace.tool_calls)} exceeded max {self.expected_outcome.max_allowed_calls}"
+            )
+            return False, "Exceeded maximum allowed tool calls", details
 
         # 5. Check expected final value
-        if self.expected_outcome.expected_final_value is not None:
-            if final_output != self.expected_outcome.expected_final_value:
-                if isinstance(final_output, dict) and isinstance(self.expected_outcome.expected_final_value, dict):
-                    match = True
-                    for k, v in self.expected_outcome.expected_final_value.items():
-                        if final_output.get(k) != v:
-                            match = False
-                            break
-                    if not match:
-                        details["errors"].append(
-                            f"Output mismatch: expected {self.expected_outcome.expected_final_value}, got {final_output}"
-                        )
-                        return False, "Final output did not match expected outcome", details
-                else:
+        if (
+            self.expected_outcome.expected_final_value is not None
+            and final_output != self.expected_outcome.expected_final_value
+        ):
+            if isinstance(final_output, dict) and isinstance(self.expected_outcome.expected_final_value, dict):
+                match = True
+                for k, v in self.expected_outcome.expected_final_value.items():
+                    if final_output.get(k) != v:
+                        match = False
+                        break
+                if not match:
                     details["errors"].append(
                         f"Output mismatch: expected {self.expected_outcome.expected_final_value}, got {final_output}"
                     )
                     return False, "Final output did not match expected outcome", details
+            else:
+                details["errors"].append(
+                    f"Output mismatch: expected {self.expected_outcome.expected_final_value}, got {final_output}"
+                )
+                return False, "Final output did not match expected outcome", details
 
         details["output_matched"] = True
         return True, "Validation successful", details
@@ -1402,25 +1407,6 @@ class FunctionValidator(TaskValidator):
             details = dict(res[2]) if len(res) > 2 and isinstance(res[2], dict) else {}
             return valid, msg, details
         return bool(res), "Passed" if res else "Failed", {}
-
-
-@dataclass(frozen=True)
-class BenchmarkCase:
-    """Rigorous benchmark test case structure separating input, state, traces, and oracle."""
-
-    case_id: str
-    agent_task: AgentTask
-    initial_state: StateSnapshot
-    oracle: ExpectedOutcome
-    validator: TaskValidator
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "case_id": self.case_id,
-            "agent_task": self.agent_task.to_dict(),
-            "initial_state": self.initial_state.to_dict(),
-            "oracle": self.oracle.to_dict(),
-        }
 
 
 @dataclass

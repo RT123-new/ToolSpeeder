@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from toolspeed.core.protocol import FROZEN_PROTOCOL, BenchmarkProtocol, HypothesisThresholds, load_frozen_protocol
+from toolspeed.core.protocol import FROZEN_PROTOCOL
 
 
 class HypothesisType(str, Enum):

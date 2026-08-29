@@ -205,8 +205,8 @@ class BaseScheduler(ABC):
                 grant = task.metadata["approval_grant"]
                 if isinstance(grant, ApprovalGrant):
                     authority_context = ExecutionAuthorityContext(grants=[grant])
-            elif hasattr(task, "authority_context") and getattr(task, "authority_context"):
-                authority_context = getattr(task, "authority_context")
+            elif hasattr(task, "authority_context") and task.authority_context:
+                authority_context = task.authority_context
 
         ctx = ExecutionContext(
             task=task,

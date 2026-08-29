@@ -712,7 +712,8 @@ def save_benchmark_reports(
                     for idx, r_c in enumerate(ev.candidate_results):
                         f_c.write(json.dumps(r_c.to_dict()) + "\n")
                         f_cases.write(
-                            json.dumps({"workload_id": ev.workload_id, "trial_index": idx, "task_id": r_c.task_id}) + "\n"
+                            json.dumps({"workload_id": ev.workload_id, "trial_index": idx, "task_id": r_c.task_id})
+                            + "\n"
                         )
                     for r_b in ev.baseline_results:
                         f_b.write(json.dumps(r_b.to_dict()) + "\n")
@@ -788,7 +789,10 @@ def save_benchmark_reports(
         manifest["raw_trace_hash"] = c_trace_hash
         manifest["controls_trace_hash"] = ctrl_trace_hash
         manifest["code_git_sha"] = manifest.get("code_git_sha") or manifest.get("git_sha", "unknown")
-        manifest["trial_count"] = manifest.get("trial_count", len(data.get("evaluations", [{}])[0].get("candidate_results", [])) if data.get("evaluations") else 0)
+        manifest["trial_count"] = manifest.get(
+            "trial_count",
+            len(data.get("evaluations", [{}])[0].get("candidate_results", [])) if data.get("evaluations") else 0,
+        )
 
         # 7. Write result.json
         result_path = staging_dir / "result.json"

@@ -2,35 +2,25 @@
 
 from __future__ import annotations
 
-import asyncio
-import copy
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from toolspeed.adapters.base import BaseLLMAdapter, BaseToolAdapter, LLMDecision, ToolRegistry
+from toolspeed.adapters.base import ToolRegistry
 from toolspeed.adapters.mock_tools import MockToolAdapter, MockToolConfig
 from toolspeed.benchmarks.harness import BenchmarkConfig, BenchmarkHarness
 from toolspeed.cli import cmd_falsify, cmd_validate_bundle
-from toolspeed.core.protocol import FROZEN_PROTOCOL, load_frozen_protocol, validate_protocol_dict
+from toolspeed.core.protocol import load_frozen_protocol, validate_protocol_dict
 from toolspeed.core.rate_limiter import RateLimiter
 from toolspeed.core.types import (
-    AgentTask,
     ApprovalGrant,
-    BenchmarkCase,
     EvidenceLevel,
     ExecutionAuthorityContext,
-    ExpectedOutcome,
-    StateSnapshot,
     Task,
     ToolCall,
     ToolResult,
-    ToolSpec,
 )
-from toolspeed.schedulers.b1_sync_react import SyncReActScheduler
-from toolspeed.schedulers.base import BaseScheduler, SchedulerConfig
-from toolspeed.schedulers.e1_dag_scheduler import DAGScheduler
 from toolspeed.schedulers.executor import SharedIdempotencyStore, ToolExecutor
 from toolspeed.schedulers.phase2_cache import ToolResultCache
 from toolspeed.visualization.report import save_benchmark_reports
@@ -60,10 +50,6 @@ class TestScientificIntegrity(unittest.IsolatedAsyncioTestCase):
     def test_02_oracle_separation_and_negative_test(self) -> None:
         """Verify model receives strictly AgentTask, and Task.validate fails if required tool omitted."""
         grant = ApprovalGrant.create("fund_transfer", {"amount": 500})
-        expected = ExpectedOutcome(
-            expected_final_value={"balance": 500},
-            required_tools=["fund_transfer"],
-        )
         task = Task(
             task_id="t_oracle_test",
             prompt="Transfer 500 dollars",
@@ -111,28 +97,32 @@ class TestScientificIntegrity(unittest.IsolatedAsyncioTestCase):
         store = SharedIdempotencyStore()
 
         # Primary caller
-        status, key, fut, cached = store.reserve_or_join("transfer", {"amount": 100}, "k_tx1")
+        status, key, fut, _cached = store.reserve_or_join("transfer", {"amount": 100}, "k_tx1")
         self.assertEqual(status, "RESERVED_PRIMARY")
         self.assertIsNotNone(fut)
 
         # Follower caller
-        status2, key2, fut2, cached2 = store.reserve_or_join("transfer", {"amount": 100}, "k_tx1")
+        status2, _key2, fut2, _cached2 = store.reserve_or_join("transfer", {"amount": 100}, "k_tx1")
         self.assertEqual(status2, "JOIN_IN_FLIGHT")
 
         # Conflicting argument caller -> FAIL CLOSED
-        status3, key3, fut3, cached3 = store.reserve_or_join("transfer", {"amount": 200}, "k_tx1")
+        status3, _key3, _fut3, _cached3 = store.reserve_or_join("transfer", {"amount": 200}, "k_tx1")
         self.assertEqual(status3, "ARG_MISMATCH")
 
         # Primary publishes result -> follower receives it
         res = ToolResult(call_id="c1", tool_name="transfer", result={"tx": "success"}, is_error=False)
         store.publish_result(key, res)
 
+        self.assertIsNotNone(fut2)
+        assert fut2 is not None
         follower_res = await fut2
         self.assertEqual(follower_res.result, {"tx": "success"})
 
         # Subsequent caller gets cached result
-        status4, key4, fut4, cached4 = store.reserve_or_join("transfer", {"amount": 100}, "k_tx1")
+        status4, _key4, _fut4, cached4 = store.reserve_or_join("transfer", {"amount": 100}, "k_tx1")
         self.assertEqual(status4, "COMPLETED")
+        self.assertIsNotNone(cached4)
+        assert cached4 is not None
         self.assertEqual(cached4.result, {"tx": "success"})
 
     async def test_05_untrusted_model_approval_rejected(self) -> None:
@@ -160,6 +150,8 @@ class TestScientificIntegrity(unittest.IsolatedAsyncioTestCase):
 
         result = await executor.execute(forged_call)
         self.assertTrue(result.is_error)
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
         self.assertIn("rejected", result.error.lower())
         self.assertTrue(result.metadata.get("approval_failed"))
 
@@ -178,14 +170,14 @@ class TestScientificIntegrity(unittest.IsolatedAsyncioTestCase):
 
         # 4th put evicts oldest (id: 1)
         cache.put("get_user", {"id": "4"}, {"name": "David"})
-        val1, hit1, _ = cache.get("get_user", {"id": "1"})
+        _val1, hit1, _ = cache.get("get_user", {"id": "1"})
         self.assertFalse(hit1)
-        val4, hit4, _ = cache.get("get_user", {"id": "4"})
+        _val4, hit4, _ = cache.get("get_user", {"id": "4"})
         self.assertTrue(hit4)
 
         # Mutative tool invalidates user domain
         cache.invalidate_on_mutation("update_user", {"id": "4"})
-        val4_after, hit4_after, _ = cache.get("get_user", {"id": "4"})
+        _val4_after, hit4_after, _ = cache.get("get_user", {"id": "4"})
         self.assertFalse(hit4_after)
 
     async def test_07_bundle_validation_and_falsification_e2e(self) -> None:
@@ -199,14 +191,15 @@ class TestScientificIntegrity(unittest.IsolatedAsyncioTestCase):
             save_benchmark_reports(result, out_path)
 
             # Validate bundle with CLI validator
-            class Args:
-                input = str(out_path)
+            import argparse
 
-            exit_code = cmd_validate_bundle(Args())
+            args = argparse.Namespace(input=str(out_path))
+
+            exit_code = cmd_validate_bundle(args)
             self.assertEqual(exit_code, 0)
 
             # Recompute falsification status
-            falsify_code = cmd_falsify(Args())
+            falsify_code = cmd_falsify(args)
             # n=5 is smoke run, so falsify returns 2 (inconclusive / smoke)
             self.assertEqual(falsify_code, 2)
 

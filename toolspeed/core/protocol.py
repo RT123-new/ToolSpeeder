@@ -110,7 +110,9 @@ def validate_protocol_dict(data: dict[str, Any]) -> list[str]:
     if "controls" in data and isinstance(data["controls"], dict):
         if "negative_controls" not in data["controls"] or not isinstance(data["controls"]["negative_controls"], list):
             errors.append("Missing 'controls.negative_controls' array")
-        if "positive_sensitivity_control" not in data["controls"] or not isinstance(data["controls"]["positive_sensitivity_control"], dict):
+        if "positive_sensitivity_control" not in data["controls"] or not isinstance(
+            data["controls"]["positive_sensitivity_control"], dict
+        ):
             errors.append("Missing 'controls.positive_sensitivity_control' object")
 
     return errors
