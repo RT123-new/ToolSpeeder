@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "toolspeed"
-version = "2.0.0"
+version = "0.1.0"
 description = "High-performance execution runtime and benchmarking framework for agentic tool use."
 readme = "README.md"
 authors = [
-    { name = "ToolSpeed Maintainers", email = "maintainers@toolspeed.org" }
+    { name = "ToolSpeeder Contributors" }
 ]
-license = "Apache-2.0"
+license = { text = "MIT" }
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

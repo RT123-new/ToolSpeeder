@@ -32,37 +32,14 @@ ToolSpeed strictly classifies experimental data and claims under four discrete e
 
 ---
 
-## 📊 Verified Empirical Benchmark Results
+## 📋 Current Status
 
-### 1. Deterministic Trace Replay (`replay_integration` — 1,000 Trials / Condition)
-| Workload ID | Optimization Strategy | Baseline ($P_{95}$) | Candidate ($P_{95}$) | Measured Speedup | Success Rate | Status |
-|:---|:---|:---:|:---:|:---:|:---:|:---:|
-| **W1** | Dynamic DAG Scheduling (E1) | 150.0 ms | 70.0 ms | **2.14x** | 100.0% | `PASS` |
-| **W2** | Declarative JIT Fusion (E2) | 115.0 ms | 40.0 ms | **2.88x** | 100.0% | `PASS` |
-| **W3** | Speculative Reads (E3) | 75.0 ms | 75.0 ms | **1.00x** | 100.0% | `FAIL` (Falsified) |
-| **W4** | Locality & Domain Caching | 75.0 ms | 75.0 ms | **1.00x** | 100.0% | `FAIL` (Falsified) |
-| **W5** | Incremental Commit Horizon (E4) | 100.0 ms | 82.5 ms | **1.21x** | 100.0% | `PASS` |
-| **W6** | Adaptive Composite Pipeline | 75.0 ms | 75.0 ms | **1.00x** | 100.0% | `FAIL` (Falsified) |
-| **W7** | Side-Effects & Idempotency Gate | 75.0 ms | 75.0 ms | **1.00x** | 100.0% | `PASS` (Safety Invariant) |
-| **E5a** | Action Bytecode Codec | 70.0 ms | 70.0 ms | **1.00x** | 100.0% | `FAIL` (Falsified) |
-
-*Negative Controls (E1-E4 ablated, Cache ablated): 1.00x (PASS). Positive Sensitivity Control: 2.00x (PASS).*
-
----
-
-### 2. Local OS Wall-Clock Primitives (`local_wall_clock` — 200 Trials / Condition)
-| Workload ID | Optimization Strategy | Baseline ($P_{95}$) | Candidate ($P_{95}$) | Measured Speedup | Success Rate | Status |
-|:---|:---|:---:|:---:|:---:|:---:|:---:|
-| **W1** | Dynamic DAG Scheduling (E1) | 5.8 ms | 5.4 ms | **1.07x** | 100.0% | `FAIL` (Below 1.20x target) |
-| **W2** | Declarative JIT Fusion (E2) | 6.2 ms | 7.5 ms | **0.83x** | 100.0% | `FAIL` (Overhead dominated) |
-| **W3** | Speculative Reads (E3) | 5.6 ms | 5.9 ms | **0.95x** | 100.0% | `FAIL` |
-| **W4** | Locality & Domain Caching | 5.9 ms | 5.8 ms | **1.02x** | 100.0% | `FAIL` |
-| **W5** | Incremental Commit Horizon (E4) | 5.5 ms | 5.5 ms | **0.99x** | 100.0% | `FAIL` |
-| **W6** | Adaptive Composite Pipeline | 6.9 ms | 7.1 ms | **0.97x** | 100.0% | `FAIL` |
-| **W7** | Side-Effects & Idempotency Gate | 5.3 ms | 6.5 ms | **0.81x** | 100.0% | `FAIL` |
-| **E5a** | Action Bytecode Codec | 4.3 ms | 4.6 ms | **0.94x** | 100.0% | `FAIL` |
-
-*Note: In local microsecond/sub-millisecond execution, scheduler instrumentation and coordination overhead exceeds savings. Hypotheses require network-bound / LLM-bound latencies (>20ms) to yield net latency reductions.*
+> **Status:** benchmark-integrity repair in progress.  
+> Compatibility tests pass at the referenced head.  
+> Current benchmark smoke is failing bundle validation.  
+> No current-head canonical replay or local evidence bundle exists.  
+> Live evidence has not been collected.  
+> Historical numerical outputs are noncanonical and must not be used for claims.
 
 ---
 
