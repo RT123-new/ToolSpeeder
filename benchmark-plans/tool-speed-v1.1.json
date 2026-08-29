@@ -1,0 +1,269 @@
+{
+  "plan_id": "tool-speed-v1.1",
+  "plan_version": "1.1.0",
+  "status": "prospectively_frozen",
+  "description": "Prospectively frozen authoritative benchmark protocol specification for canonical ToolSpeed evidence runs.",
+  "workload_fixture_version": "1.1.0",
+  "required_metric_policy_version": "2.1.0",
+  "evidence_levels": [
+    "replay_integration",
+    "local_wall_clock"
+  ],
+  "seeds": [
+    20260825,
+    20260826,
+    20260827
+  ],
+  "trials_per_seed_replay": 1000,
+  "trials_per_seed_local": 200,
+  "smoke_trials": 10,
+  "bootstrap_resamples": 2000,
+  "bootstrap_ci": 0.95,
+  "warmup_policy": {
+    "trials": 5,
+    "symmetric": true,
+    "isolated": true,
+    "excluded_from_evidence": true
+  },
+  "missing_data_policy": "null_inconclusive",
+  "central_hypothesis": {
+    "name": "ToolSpeeder Mechanism Attribution and Latency Efficacy",
+    "description": "Every candidate mechanism improves P95 CCL over its pre-registered fair primary attribution baseline without safety regression or unbounded cost.",
+    "aggregation_rule": "conjunction_all_primary_mechanisms"
+  },
+  "amendment_ledger": [
+    {
+      "version": "1.1.0",
+      "date": "2026-08-29",
+      "changes": [
+        "Established explicit dual-comparison structure: primary attribution baseline (isolating isolated mechanism ablation) and practical baseline (comparing candidate against standard agent / scheduler).",
+        "Split W7 into W7_SAFETY (mandatory safety gate: zero unapproved side-effects, zero duplicate mutations, 100% success rate) and W7_LATENCY (measuring preparation overlap latency vs identical reference path).",
+        "Defined negative controls as true identity controls with identical baseline and candidate arms evaluating the null effect region [0.95x, 1.05x].",
+        "Replaced hardcoded positive sensitivity control with genuine delayed runtime tool execution (injected 50% delay, expected ~2.00x speedup in range [1.80x, 2.20x]).",
+        "Bound E5a codec transport evaluation directly to JSON codec comparison and marked E5b action token generation as UNIMPLEMENTED / INCONCLUSIVE.",
+        "Enforced strict JSON schema validation and canonical artifact bundle hashing (manifest.json, protocol.json, protocol-amendments.json, cases.jsonl, baseline-traces.jsonl, candidate-traces.jsonl, control-traces.jsonl, statistics.json, verdict.json, result.json, report.md, report.html, bundle.sha256)."
+      ]
+    }
+  ],
+  "mechanisms": {
+    "W1": {
+      "name": "Dynamic DAG Scheduling (E1)",
+      "candidate": "DAGScheduler",
+      "primary_attribution_baseline": "DAGScheduler_serial_ablation",
+      "practical_baseline": "NativeParallelScheduler",
+      "informational_baselines": [
+        "SyncReActScheduler"
+      ],
+      "evaluates_hypothesis": "primary_attribution",
+      "hypotheses": {
+        "p95_speedup_target": 1.2,
+        "min_success_rate": 0.95,
+        "max_success_drop": 0.0,
+        "min_p99_speedup": 0.95,
+        "max_cost_multiplier": 1.05,
+        "max_unapproved_side_effects": 0
+      }
+    },
+    "W2": {
+      "name": "Declarative JIT Fusion (E2)",
+      "candidate": "JITFusionScheduler",
+      "primary_attribution_baseline": "JITFusionScheduler_fusion_disabled",
+      "practical_baseline": "HandwrittenWorkflowScheduler",
+      "informational_baselines": [
+        "SyncReActScheduler"
+      ],
+      "evaluates_hypothesis": "primary_attribution",
+      "hypotheses": {
+        "p95_speedup_target": 1.2,
+        "min_success_rate": 0.95,
+        "max_success_drop": 0.0,
+        "min_p99_speedup": 0.95,
+        "max_cost_multiplier": 1.05,
+        "max_unapproved_side_effects": 0
+      }
+    },
+    "W3": {
+      "name": "Speculative Reads (E3)",
+      "candidate": "SpeculativeReadScheduler",
+      "primary_attribution_baseline": "SpeculativeReadScheduler_spec_disabled",
+      "practical_baseline": "SyncReActScheduler",
+      "informational_baselines": [
+        "SyncReActScheduler"
+      ],
+      "evaluates_hypothesis": "primary_attribution",
+      "hypotheses": {
+        "p95_speedup_target": 1.11,
+        "min_success_rate": 0.95,
+        "max_success_drop": 0.0,
+        "min_p99_speedup": 0.95,
+        "max_cost_multiplier": 1.15,
+        "max_unapproved_side_effects": 0
+      }
+    },
+    "W4": {
+      "name": "Locality and Domain Caching",
+      "candidate": "CacheScheduler",
+      "primary_attribution_baseline": "CacheScheduler_cache_disabled",
+      "practical_baseline": "SyncReActScheduler",
+      "informational_baselines": [
+        "SyncReActScheduler"
+      ],
+      "evaluates_hypothesis": "primary_attribution",
+      "hypotheses": {
+        "p95_speedup_target": 1.11,
+        "min_success_rate": 0.95,
+        "max_success_drop": 0.0,
+        "min_p99_speedup": 0.95,
+        "max_cost_multiplier": 1.05,
+        "max_unapproved_side_effects": 0
+      }
+    },
+    "W5": {
+      "name": "Streaming Commit Horizon (E4)",
+      "candidate": "CommitHorizonScheduler",
+      "primary_attribution_baseline": "CommitHorizonScheduler_early_dispatch_disabled",
+      "practical_baseline": "SyncReActScheduler",
+      "informational_baselines": [
+        "SyncReActScheduler"
+      ],
+      "evaluates_hypothesis": "primary_attribution",
+      "hypotheses": {
+        "p95_speedup_target": 1.1,
+        "min_success_rate": 0.95,
+        "max_success_drop": 0.0,
+        "min_p99_speedup": 0.95,
+        "max_cost_multiplier": 1.05,
+        "max_unapproved_side_effects": 0
+      }
+    },
+    "W6": {
+      "name": "Persistent Pool Prewarming",
+      "candidate": "PersistentPrewarmedPool",
+      "primary_attribution_baseline": "PersistentColdPool",
+      "practical_baseline": "SyncReActScheduler",
+      "informational_baselines": [
+        "SyncReActScheduler"
+      ],
+      "evaluates_hypothesis": "primary_attribution",
+      "hypotheses": {
+        "p95_speedup_target": 1.1,
+        "min_success_rate": 0.95,
+        "max_success_drop": 0.0,
+        "min_p99_speedup": 0.95,
+        "max_cost_multiplier": 1.05,
+        "max_unapproved_side_effects": 0
+      }
+    },
+    "W7_SAFETY": {
+      "name": "Side-Effect Safety and Idempotency Gate (W7-SAFETY)",
+      "candidate": "CompositeScheduler",
+      "primary_attribution_baseline": "IdenticalAuthorizedExecutionPath",
+      "practical_baseline": "SyncReActScheduler",
+      "informational_baselines": [
+        "SyncReActScheduler"
+      ],
+      "evaluates_hypothesis": "safety_gate",
+      "hypotheses": {
+        "max_unapproved_side_effects": 0,
+        "max_duplicate_mutations": 0,
+        "min_success_rate": 1.0,
+        "max_success_drop": 0.0,
+        "max_cost_multiplier": 1.05
+      }
+    },
+    "W7_LATENCY": {
+      "name": "Side-Effect Latency Overhead (W7-LATENCY)",
+      "candidate": "CompositeScheduler",
+      "primary_attribution_baseline": "IdenticalAuthorizedExecutionPath",
+      "practical_baseline": "SyncReActScheduler",
+      "informational_baselines": [
+        "SyncReActScheduler"
+      ],
+      "evaluates_hypothesis": "latency_overhead",
+      "hypotheses": {
+        "p95_speedup_target": 1.0,
+        "min_p99_speedup": 0.95,
+        "min_success_rate": 0.95,
+        "max_success_drop": 0.0,
+        "max_cost_multiplier": 1.05,
+        "max_unapproved_side_effects": 0
+      }
+    },
+    "E5a": {
+      "name": "Action Bytecode Transport Codec (E5a)",
+      "candidate": "ActionBytecodeCodec",
+      "primary_attribution_baseline": "JSONCodec",
+      "practical_baseline": "JSONCodec",
+      "informational_baselines": [
+        "JSONCodec"
+      ],
+      "evaluates_hypothesis": "primary_attribution",
+      "hypotheses": {
+        "p95_speedup_target": 1.05,
+        "min_success_rate": 0.95,
+        "max_success_drop": 0.0,
+        "min_p99_speedup": 0.95,
+        "max_cost_multiplier": 1.05,
+        "max_unapproved_side_effects": 0
+      }
+    },
+    "E5b": {
+      "name": "Direct Model Action-Token Generation (E5b)",
+      "status": "UNIMPLEMENTED",
+      "verdict": "INCONCLUSIVE"
+    }
+  },
+  "controls": {
+    "negative_controls": [
+      {
+        "id": "W1_identity_null_control",
+        "description": "Proves paired identical execution of DAGScheduler against itself produces null speedup (~1.0x)",
+        "expected_p95_speedup_range": [
+          0.95,
+          1.05
+        ]
+      },
+      {
+        "id": "W2_identity_null_control",
+        "description": "Proves paired identical execution of JITFusionScheduler against itself produces null speedup (~1.0x)",
+        "expected_p95_speedup_range": [
+          0.95,
+          1.05
+        ]
+      },
+      {
+        "id": "W3_identity_null_control",
+        "description": "Proves paired identical execution of SpeculativeReadScheduler against itself produces null speedup (~1.0x)",
+        "expected_p95_speedup_range": [
+          0.95,
+          1.05
+        ]
+      },
+      {
+        "id": "W4_identity_null_control",
+        "description": "Proves paired identical execution of CacheScheduler against itself produces null speedup (~1.0x)",
+        "expected_p95_speedup_range": [
+          0.95,
+          1.05
+        ]
+      },
+      {
+        "id": "W5_identity_null_control",
+        "description": "Proves paired identical execution of CommitHorizonScheduler against itself produces null speedup (~1.0x)",
+        "expected_p95_speedup_range": [
+          0.95,
+          1.05
+        ]
+      }
+    ],
+    "positive_sensitivity_control": {
+      "id": "Positive_sensitivity_injected_50pct_speedup",
+      "description": "Proves harness reliably measures and verifies positive latency reductions through real trace execution",
+      "injected_speedup": 2.0,
+      "expected_p95_speedup_range": [
+        1.8,
+        2.2
+      ]
+    }
+  }
+}

@@ -1,9 +1,11 @@
-"""Frozen Scientific Hypotheses, Baselines, and Threshold Specification Policy (Version 2.0.0)."""
+"""Frozen Scientific Hypotheses, Baselines, and Threshold Specification Policy (Version 2.1.0)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+
+from toolspeed.core.protocol import FROZEN_PROTOCOL, BenchmarkProtocol, HypothesisThresholds, load_frozen_protocol
 
 
 class HypothesisType(str, Enum):
@@ -20,8 +22,8 @@ class HypothesisType(str, Enum):
 class BenchmarkHypothesisPolicy:
     """Frozen policy governing verdict eligibility, statistical criteria, and baseline comparisons."""
 
-    policy_version: str = "2.0.0"
-    policy_date: str = "2026-08-28"
+    policy_version: str = "2.1.0"
+    policy_date: str = "2026-08-29"
 
     # Latency: Central hypothesis requires >= 10% P95 CCL reduction (speedup >= 1.11x)
     min_p95_speedup_efficacy: float = 1.11
@@ -49,61 +51,23 @@ class BenchmarkHypothesisPolicy:
     # Sample Size Gates
     min_trials_replay: int = 1000
     min_trials_local: int = 200
-    bootstrap_samples: int = 1000
+    bootstrap_samples: int = 2000
     confidence_level: float = 0.95
 
 
-FROZEN_POLICY = BenchmarkHypothesisPolicy()
+FROZEN_POLICY = BenchmarkHypothesisPolicy(
+    min_trials_replay=FROZEN_PROTOCOL.trials_per_seed_replay,
+    min_trials_local=FROZEN_PROTOCOL.trials_per_seed_local,
+    bootstrap_samples=FROZEN_PROTOCOL.bootstrap_resamples,
+    confidence_level=FROZEN_PROTOCOL.bootstrap_ci,
+)
 
-
-# Authoritative baseline comparison matrix isolating individual mechanisms
 WORKLOAD_BASELINES: dict[str, dict[str, str]] = {
-    "W1": {
-        "candidate": "DAGScheduler",
-        "primary_baseline": "DAGScheduler_serial_ablation",
-        "practical_baseline": "SyncReActScheduler",
-        "mechanism": "E1 Dynamic DAG Parallelism",
-    },
-    "W2": {
-        "candidate": "JITFusionScheduler",
-        "primary_baseline": "JITFusionScheduler_fusion_disabled",
-        "practical_baseline": "SyncReActScheduler",
-        "mechanism": "E2 JIT Workflow Fusion",
-    },
-    "W3": {
-        "candidate": "SpeculativeReadScheduler",
-        "primary_baseline": "SpeculativeReadScheduler_spec_disabled",
-        "practical_baseline": "SyncReActScheduler",
-        "mechanism": "E3 Speculative Read Execution",
-    },
-    "W4": {
-        "candidate": "CacheScheduler",
-        "primary_baseline": "CacheScheduler_cache_disabled",
-        "practical_baseline": "SyncReActScheduler",
-        "mechanism": "Plan & Subresult Caching",
-    },
-    "W5": {
-        "candidate": "CommitHorizonScheduler",
-        "primary_baseline": "CommitHorizonScheduler_early_dispatch_disabled",
-        "practical_baseline": "SyncReActScheduler",
-        "mechanism": "E4 Commit-Horizon Early Dispatch",
-    },
-    "W6": {
-        "candidate": "CompositeScheduler_prewarmed",
-        "primary_baseline": "CompositeScheduler_cold_start",
-        "practical_baseline": "SyncReActScheduler",
-        "mechanism": "Sandbox Initialization Prewarming",
-    },
-    "W7": {
-        "candidate": "CompositeScheduler",
-        "primary_baseline": "SyncReActScheduler",
-        "practical_baseline": "SyncReActScheduler",
-        "mechanism": "Side-Effect Safety and Idempotency Gate (Safety Workload)",
-    },
-    "E5a": {
-        "candidate": "ActionBytecodeCodec",
-        "primary_baseline": "JSONCodec",
-        "practical_baseline": "JSONCodec",
-        "mechanism": "E5a Compact Binary Transport Codec",
-    },
+    wl_id: {
+        "candidate": m.candidate,
+        "primary_baseline": m.primary_attribution_baseline,
+        "practical_baseline": m.practical_baseline,
+        "mechanism": m.name,
+    }
+    for wl_id, m in FROZEN_PROTOCOL.mechanisms.items()
 }
