@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from typing_extensions import Self
@@ -283,20 +283,25 @@ class RateLimitLease:
     limiter: RateLimiter
     queue_delay_ms: float
     _released: bool = False
+    _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def release(self) -> None:
-        """Release concurrency slot and mark lease as released safely."""
-        if self._released:
-            return
-        self._released = True
+        """Release concurrency slot and mark lease as released safely (idempotent)."""
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
         if self.concurrency_acquired:
             self.limiter.concurrency_limiter.release()
 
     def refund(self) -> None:
-        """Refund tokens and release concurrency slot safely."""
-        if self._released:
-            return
-        self.release()
+        """Refund tokens and release concurrency slot safely (idempotent)."""
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        if self.concurrency_acquired:
+            self.limiter.concurrency_limiter.release()
         if self.tokens_acquired > 0:
             self.limiter.token_bucket.refund(tokens=self.tokens_acquired)
 
@@ -395,17 +400,15 @@ class RateLimiter:
                 limiter=self,
                 queue_delay_ms=total_delay,
             )
-            try:
-                yield lease_obj
-            finally:
-                lease_obj.release()
-
         except (Exception, asyncio.CancelledError):
-            if concurrency_acquired:
-                self.concurrency_limiter.release()
-            else:
+            if not concurrency_acquired:
                 self.token_bucket.refund(tokens=tokens)
             raise
+
+        try:
+            yield lease_obj
+        finally:
+            lease_obj.release()
 
     async def acquire(self, tokens: int = 1, timeout: float | None = None) -> float:
         """Acquires tokens and concurrency slot."""
