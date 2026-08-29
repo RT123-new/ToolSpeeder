@@ -43,7 +43,7 @@ class WorkflowInvariant:
         if root_key != "context" and root_key not in ledger:
             return True
 
-        val: Any = context.get(root_key) if root_key == "context" else ledger.get(root_key)
+        val: Any = context if root_key == "context" else ledger.get(root_key)
 
         for part in parts[1:]:
             if val is None or not isinstance(val, dict):

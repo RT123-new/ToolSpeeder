@@ -101,11 +101,21 @@ class ToolResultCache:
         freshness_contract: str = "strict",
     ) -> None:
         ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl_seconds
+        now = self._now_s()
+        
+        # Enforce max_entries LRU capacity
+        if len(self._exact_store) >= self.max_entries:
+            oldest_key = min(self._exact_store.keys(), key=lambda k: self._exact_store[k].created_at)
+            self._exact_store.pop(oldest_key, None)
+        if len(self._semantic_store) >= self.max_entries:
+            oldest_sem_key = min(self._semantic_store.keys(), key=lambda k: self._semantic_store[k].created_at)
+            self._semantic_store.pop(oldest_sem_key, None)
+
         entry = CacheEntry(
             tool_name=tool_name,
             arguments=copy.deepcopy(arguments),
             output=copy.deepcopy(output),
-            created_at=self._now_s(),
+            created_at=now,
             ttl_seconds=ttl,
             freshness_contract=freshness_contract,
         )
@@ -126,23 +136,31 @@ class ToolResultCache:
 
     def invalidate_on_mutation(self, mutation_tool: str, arguments: dict[str, Any] | None = None) -> int:
         """Invalidates related cache entries when a mutation tool executes."""
-        domain = (
-            mutation_tool.replace("update_", "")
-            .replace("create_", "")
-            .replace("delete_", "")
-            .replace("set_", "")
-            .replace("modify_", "")
-        )
-        to_del_exact = [
-            k for k, v in self._exact_store.items() if domain in v.tool_name or v.tool_name in mutation_tool
-        ]
+        prefixes = ("create_", "update_", "delete_", "modify_", "set_", "write_", "add_", "remove_")
+        entity = mutation_tool
+        for p in prefixes:
+            if mutation_tool.startswith(p):
+                entity = mutation_tool[len(p):]
+                break
+
+        to_del_exact = []
+        for k, v in self._exact_store.items():
+            t_name = v.tool_name
+            if t_name == mutation_tool or t_name.endswith(f"_{entity}") or t_name.startswith(f"get_{entity}") or t_name.startswith(f"fetch_{entity}") or t_name.startswith(f"list_{entity}") or entity in t_name.split("_"):
+                to_del_exact.append(k)
+
         for k in to_del_exact:
             self._exact_store.pop(k, None)
-        to_del_sem = [
-            k for k, v in self._semantic_store.items() if domain in v.tool_name or v.tool_name in mutation_tool
-        ]
+
+        to_del_sem = []
+        for k, v in self._semantic_store.items():
+            t_name = v.tool_name
+            if t_name == mutation_tool or t_name.endswith(f"_{entity}") or t_name.startswith(f"get_{entity}") or t_name.startswith(f"fetch_{entity}") or t_name.startswith(f"list_{entity}") or entity in t_name.split("_"):
+                to_del_sem.append(k)
+
         for k in to_del_sem:
             self._semantic_store.pop(k, None)
+
         return len(to_del_exact)
 
     def clear(self) -> None:
