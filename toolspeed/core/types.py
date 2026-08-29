@@ -129,6 +129,51 @@ def compute_file_sha256(file_path: Any) -> str:
     return h.hexdigest()
 
 
+MODEL_VISIBLE_METADATA_WHITELIST: set[str] = {
+    "workload_id",
+    "workload_family",
+    "trial_index",
+    "fan_out_width",
+    "user_id",
+    "server_count",
+    "customer_id",
+    "sku",
+    "dataset_id",
+    "operation",
+    "workflow_id",
+}
+
+PROHIBITED_METADATA_SUBSTRINGS: list[str] = [
+    "approval",
+    "grant",
+    "expected",
+    "oracle",
+    "secret",
+    "validator",
+    "ground_truth",
+    "canary",
+]
+
+
+def filter_model_visible_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Filters metadata to only include whitelisted model-visible fields (no oracle, grants, or targets)."""
+    if not metadata:
+        return {}
+    result: dict[str, Any] = {}
+    for k, v in metadata.items():
+        k_lower = str(k).lower()
+        if any(p in k_lower for p in PROHIBITED_METADATA_SUBSTRINGS):
+            continue
+        # Never expose ApprovalGrant or ExpectedOutcome objects
+        if hasattr(v, "approval_id") or hasattr(v, "expected_final_value") or hasattr(v, "oracle_canary"):
+            continue
+        if k in MODEL_VISIBLE_METADATA_WHITELIST:
+            result[k] = v
+        elif not any(p in str(v).lower() for p in PROHIBITED_METADATA_SUBSTRINGS):
+            result[k] = v
+    return result
+
+
 @dataclass(frozen=True)
 class AgentTask:
     """Task input presented strictly to the agent/model (NO oracle or expected outputs)."""
@@ -341,6 +386,135 @@ class ExecutionAuthorityContext:
                     self.consumed_grant_ids.add(grant.approval_id)
                 return True
         return False
+
+
+@dataclass(frozen=True)
+class BenchmarkCase:
+    """Immutable paired benchmark case separating model inputs from oracle verification."""
+
+    case_id: str
+    workload_id: str
+    agent_task: AgentTask
+    expected_outcome: ExpectedOutcome
+    authority_context: ExecutionAuthorityContext = field(default_factory=ExecutionAuthorityContext)
+    initial_state: StateSnapshot = field(default_factory=lambda: StateSnapshot(state_id="init_state"))
+    fixture: Mapping[str, Any] = field(default_factory=dict)
+    seed: int = 0
+    trial_index: int = 0
+    parameters: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "workload_id": self.workload_id,
+            "agent_task": self.agent_task.to_dict(),
+            "expected_outcome": self.expected_outcome.to_dict(),
+            "initial_state": self.initial_state.to_dict() if self.initial_state else {},
+            "fixture": dict(self.fixture),
+            "seed": self.seed,
+            "trial_index": self.trial_index,
+            "parameters": dict(self.parameters),
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BenchmarkCase:
+        return cls(
+            case_id=data["case_id"],
+            workload_id=data.get("workload_id", ""),
+            agent_task=AgentTask.from_dict(data["agent_task"]),
+            expected_outcome=ExpectedOutcome.from_dict(data.get("expected_outcome", {})),
+            authority_context=ExecutionAuthorityContext(),
+            initial_state=StateSnapshot.from_dict(data.get("initial_state", {})),
+            fixture=dict(data.get("fixture", {})),
+            seed=int(data.get("seed", 0)),
+            trial_index=int(data.get("trial_index", 0)),
+            parameters=dict(data.get("parameters", {})),
+            metadata=dict(data.get("metadata", {})),
+        )
+
+    def validate_execution(
+        self,
+        final_output: Any,
+        trace: Any = None,
+        final_state: StateSnapshot | None = None,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        """Oracle validation: checks final output, required tool calls, dependencies, prohibited calls, side-effects."""
+        details: dict[str, Any] = {
+            "output_matched": False,
+            "required_tools_present": True,
+            "no_disallowed_tools": True,
+            "tool_calls_count": 0,
+            "errors": [],
+        }
+
+        # 1. Check required tools executed in trace
+        if self.expected_outcome.required_tools:
+            if trace is None or not getattr(trace, "tool_calls", None):
+                details["required_tools_present"] = False
+                details["errors"].append("Trace missing tool calls for required tools")
+                return False, "Required tools were not executed", details
+
+            executed_tool_names = [getattr(c, "name", None) or getattr(c, "tool_name", "") for c in trace.tool_calls]
+            for req in self.expected_outcome.required_tools:
+                if req not in executed_tool_names:
+                    details["required_tools_present"] = False
+                    details["errors"].append(f"Required tool '{req}' was not executed")
+                    return False, f"Required tool '{req}' was omitted", details
+
+        # 2. Check disallowed tools not executed
+        if self.expected_outcome.disallowed_tools and trace is not None and getattr(trace, "tool_calls", None):
+            executed_tool_names = [getattr(c, "name", None) or getattr(c, "tool_name", "") for c in trace.tool_calls]
+            for dis in self.expected_outcome.disallowed_tools:
+                if dis in executed_tool_names:
+                    details["no_disallowed_tools"] = False
+                    details["errors"].append(f"Disallowed tool '{dis}' was executed")
+                    return False, f"Disallowed tool '{dis}' was executed", details
+
+        # 3. Check tool result errors
+        if trace is not None and getattr(trace, "tool_results", None):
+            details["tool_calls_count"] = len(trace.tool_calls)
+            for r in trace.tool_results:
+                is_err = getattr(r, "is_error", False)
+                err_msg = getattr(r, "error", None)
+                is_canc = getattr(r, "cancelled", False)
+                is_spec = getattr(r, "speculated", False)
+                if (is_err or err_msg is not None) and not is_canc and not is_spec:
+                    t_name = getattr(r, "tool_name", "") or getattr(r, "name", "")
+                    details["errors"].append(f"Tool execution error on {t_name}: {err_msg}")
+                    return False, f"Tool execution failed: {err_msg}", details
+
+        # 4. Check max allowed calls
+        if trace is not None and getattr(trace, "tool_calls", None):
+            if len(trace.tool_calls) > self.expected_outcome.max_allowed_calls:
+                details["errors"].append(
+                    f"Tool call count {len(trace.tool_calls)} exceeded max {self.expected_outcome.max_allowed_calls}"
+                )
+                return False, "Exceeded maximum allowed tool calls", details
+
+        # 5. Check expected final value
+        if self.expected_outcome.expected_final_value is not None:
+            if final_output != self.expected_outcome.expected_final_value:
+                if isinstance(final_output, dict) and isinstance(self.expected_outcome.expected_final_value, dict):
+                    match = True
+                    for k, v in self.expected_outcome.expected_final_value.items():
+                        if final_output.get(k) != v:
+                            match = False
+                            break
+                    if not match:
+                        details["errors"].append(
+                            f"Output mismatch: expected {self.expected_outcome.expected_final_value}, got {final_output}"
+                        )
+                        return False, "Final output did not match expected outcome", details
+                else:
+                    details["errors"].append(
+                        f"Output mismatch: expected {self.expected_outcome.expected_final_value}, got {final_output}"
+                    )
+                    return False, "Final output did not match expected outcome", details
+
+        details["output_matched"] = True
+        return True, "Validation successful", details
 
 
 @dataclass(frozen=True)
@@ -887,13 +1061,14 @@ class TaskInstance:
             self.workload_id = self.workload_family
 
     def to_agent_task(self) -> AgentTask:
+        filtered_meta = filter_model_visible_metadata(self.metadata)
         return AgentTask(
             task_id=self.task_id,
             prompt=self.prompt,
             workload_family=self.workload_family,
-            context=dict(self.context),
-            parameters=dict(self.parameters),
-            metadata=dict(self.metadata),
+            context=copy.deepcopy(dict(self.context)),
+            parameters=copy.deepcopy(dict(self.parameters)),
+            metadata=filtered_meta,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -937,13 +1112,14 @@ class Task:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_agent_task(self) -> AgentTask:
+        filtered_meta = filter_model_visible_metadata(self.metadata)
         return AgentTask(
             task_id=self.task_id,
             prompt=self.prompt,
             workload_family=self.metadata.get("workload_family", "default"),
-            context=dict(self.context),
-            parameters=dict(self.metadata.get("parameters", self.parameters)),
-            metadata=dict(self.metadata),
+            context=copy.deepcopy(dict(self.context)),
+            parameters=copy.deepcopy(dict(self.metadata.get("parameters", self.parameters))),
+            metadata=filtered_meta,
         )
 
     def validate(
@@ -976,6 +1152,16 @@ class Task:
                         return bool(self.validator(self.expected_output, actual_output))
             except Exception:
                 return False
+
+        # If required tools are specified, they MUST have been executed in trace
+        req_tools = self.metadata.get("required_tools") or self.metadata.get("expected_tools")
+        if req_tools:
+            if trace is None or not trace.tool_calls:
+                return False
+            executed = {c.name or c.tool_name for c in trace.tool_calls}
+            for req in req_tools:
+                if req not in executed:
+                    return False
 
         if trace is not None:
             for r in trace.tool_results:
