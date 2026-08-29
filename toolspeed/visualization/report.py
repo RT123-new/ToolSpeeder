@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -685,122 +687,163 @@ def save_benchmark_reports(
     result: BenchmarkRunResult | dict[str, Any] | Any,
     out_dir: str | Path,
 ) -> dict[str, Path]:
-    """Save benchmark result bundle reports, paired traces, compute file byte SHA-256 hashes, and write bundle.sha256."""
-    p_out = Path(out_dir)
-    p_out.mkdir(parents=True, exist_ok=True)
+    """Atomically generate, hash, and persist canonical benchmark suite bundle with single manifest."""
+    final_out = Path(out_dir).resolve()
+    final_out.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = final_out.parent / f"{final_out.name}.staging_{uuid.uuid4().hex[:8]}"
+    staging_dir.mkdir(parents=True, exist_ok=True)
 
-    data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+    try:
+        data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
 
-    # 1. report.md
-    md_path = p_out / "report.md"
-    md_content = generate_benchmark_markdown_report(result)
-    md_path.write_text(md_content, encoding="utf-8")
+        # 1. Traces JSONL files & Cases
+        baseline_traces_path = staging_dir / "baseline-traces.jsonl"
+        candidate_traces_path = staging_dir / "candidate-traces.jsonl"
+        controls_traces_path = staging_dir / "controls-traces.jsonl"
+        cases_path = staging_dir / "cases.jsonl"
 
-    # 2. report.html
-    html_path = p_out / "report.html"
-    html_content = generate_benchmark_html_dashboard(result)
-    html_path.write_text(html_content, encoding="utf-8")
+        with (
+            open(baseline_traces_path, "w", encoding="utf-8") as f_b,
+            open(candidate_traces_path, "w", encoding="utf-8") as f_c,
+            open(cases_path, "w", encoding="utf-8") as f_cases,
+        ):
+            if hasattr(result, "evaluations") and result.evaluations:
+                for ev in result.evaluations:
+                    for idx, r_c in enumerate(ev.candidate_results):
+                        f_c.write(json.dumps(r_c.to_dict()) + "\n")
+                        f_cases.write(
+                            json.dumps({"workload_id": ev.workload_id, "trial_index": idx, "task_id": r_c.task_id}) + "\n"
+                        )
+                    for r_b in ev.baseline_results:
+                        f_b.write(json.dumps(r_b.to_dict()) + "\n")
+            else:
+                f_b.write(json.dumps({"info": "baseline_traces"}) + "\n")
+                f_c.write(json.dumps({"info": "candidate_traces"}) + "\n")
+                f_cases.write(json.dumps({"info": "cases"}) + "\n")
 
-    # 3. Paired Traces JSONL files
-    baseline_traces_path = p_out / "baseline-traces.jsonl"
-    candidate_traces_path = p_out / "candidate-traces.jsonl"
-    controls_traces_path = p_out / "controls-traces.jsonl"
-    cases_path = p_out / "cases.jsonl"
+        with open(controls_traces_path, "w", encoding="utf-8") as f_ctrl:
+            if hasattr(result, "negative_controls") and result.negative_controls:
+                for nc in result.negative_controls:
+                    f_ctrl.write(json.dumps(nc) + "\n")
+            else:
+                f_ctrl.write(json.dumps({"info": "controls"}) + "\n")
 
-    with (
-        open(baseline_traces_path, "w", encoding="utf-8") as f_b,
-        open(candidate_traces_path, "w", encoding="utf-8") as f_c,
-        open(cases_path, "w", encoding="utf-8") as f_cases,
-    ):
-        if hasattr(result, "evaluations"):
-            for ev in result.evaluations:
-                for idx, r_c in enumerate(ev.candidate_results):
-                    f_c.write(json.dumps(r_c.to_dict()) + "\n")
-                    f_cases.write(
-                        json.dumps({"workload_id": ev.workload_id, "trial_index": idx, "task_id": r_c.task_id}) + "\n"
-                    )
-                for r_b in ev.baseline_results:
-                    f_b.write(json.dumps(r_b.to_dict()) + "\n")
+        # 2. Frozen protocol copies
+        protocol_path = staging_dir / "protocol.json"
+        bm_plan_path = staging_dir / "benchmark-plan.json"
+        repo_protocol = Path("benchmark-plans/tool-speed-v1.1.json")
+        if not repo_protocol.exists():
+            repo_protocol = Path("benchmark-plans/tool-speed-v1.json")
+        if repo_protocol.exists():
+            proto_content = repo_protocol.read_text(encoding="utf-8")
         else:
-            f_b.write(json.dumps({"info": "baseline_traces"}) + "\n")
-            f_c.write(json.dumps({"info": "candidate_traces"}) + "\n")
-            f_cases.write(json.dumps({"info": "cases"}) + "\n")
+            proto_content = json.dumps({"plan_id": "tool-speed-v1.1", "version": "1.1.0"}, indent=2)
+        protocol_path.write_text(proto_content, encoding="utf-8")
+        bm_plan_path.write_text(proto_content, encoding="utf-8")
 
-    with open(controls_traces_path, "w", encoding="utf-8") as f_ctrl:
-        if hasattr(result, "negative_controls") and result.negative_controls:
-            for nc in result.negative_controls:
-                f_ctrl.write(json.dumps(nc) + "\n")
-        else:
-            f_ctrl.write(json.dumps({"info": "controls"}) + "\n")
+        # 3. Compute early payload hashes
+        proto_hash = compute_file_sha256(protocol_path)
+        cases_hash = compute_file_sha256(cases_path)
+        c_trace_hash = compute_file_sha256(candidate_traces_path)
+        b_trace_hash = compute_file_sha256(baseline_traces_path)
+        ctrl_trace_hash = compute_file_sha256(controls_traces_path)
 
-    # 4. Copy pre-registered benchmark plan if available
-    plan_path = p_out / "benchmark-plan.json"
-    repo_plan = Path("benchmark-plans/tool-speed-v1.json")
-    if repo_plan.exists():
-        plan_path.write_text(repo_plan.read_text(encoding="utf-8"), encoding="utf-8")
-    else:
-        plan_path.write_text(json.dumps({"plan_id": "tool-speed-v1", "version": "1.0.0"}, indent=2), encoding="utf-8")
+        # 4. Reports (MD and HTML)
+        md_path = staging_dir / "report.md"
+        md_content = generate_benchmark_markdown_report(result)
+        md_path.write_text(md_content, encoding="utf-8")
 
-    # 5. Falsification Verdict JSON
-    falsification_path = p_out / "falsification.json"
-    falsification_data = {
-        "title": data.get("title"),
-        "evidence_level": data.get("evidence_level"),
-        "overall_verdict": data.get("overall_verdict"),
-        "total_runtime_s": data.get("total_runtime_s"),
-        "verdicts": [
-            {
-                "workload_id": e.get("workload_id"),
-                "comparison": f"{e.get('candidate_name')} vs {e.get('baseline_name')}",
-                "verdict": e.get("verdict"),
-                "summary": e.get("summary"),
-            }
-            for e in data.get("evaluations", [])
-        ],
-    }
-    falsification_path.write_text(strict_json_dumps(falsification_data, indent=2), encoding="utf-8")
+        html_path = staging_dir / "report.html"
+        html_content = generate_benchmark_html_dashboard(result)
+        html_path.write_text(html_content, encoding="utf-8")
 
-    # 6. Result JSON (both benchmark_result.json and result.json)
-    result_path = p_out / "result.json"
-    result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
+        # 5. Falsification Verdict JSON
+        falsification_path = staging_dir / "falsification.json"
+        falsification_data = {
+            "title": data.get("title"),
+            "evidence_level": data.get("evidence_level"),
+            "overall_verdict": data.get("overall_verdict"),
+            "total_runtime_s": data.get("total_runtime_s"),
+            "verdicts": [
+                {
+                    "workload_id": e.get("workload_id"),
+                    "comparison": f"{e.get('candidate_name')} vs {e.get('baseline_name')}",
+                    "verdict": e.get("verdict"),
+                    "summary": e.get("summary"),
+                }
+                for e in data.get("evaluations", [])
+            ],
+        }
+        falsification_path.write_text(strict_json_dumps(falsification_data, indent=2), encoding="utf-8")
 
-    bm_result_path = p_out / "benchmark_result.json"
-    bm_result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
+        # 6. Update manifest with payload hashes
+        manifest = data.get("manifest") or {}
+        manifest["benchmark_plan_hash"] = proto_hash
+        manifest["benchmark_config_hash"] = proto_hash
+        manifest["workload_fixture_hash"] = cases_hash
+        manifest["cases_hash"] = cases_hash
+        manifest["fixture_manifest_hash"] = cases_hash
+        manifest["candidate_trace_hash"] = c_trace_hash
+        manifest["baseline_trace_hash"] = b_trace_hash
+        manifest["raw_trace_hash"] = c_trace_hash
+        manifest["controls_trace_hash"] = ctrl_trace_hash
+        manifest["code_git_sha"] = manifest.get("code_git_sha") or manifest.get("git_sha", "unknown")
+        manifest["trial_count"] = manifest.get("trial_count", len(data.get("evaluations", [{}])[0].get("candidate_results", [])) if data.get("evaluations") else 0)
 
-    # 7. Compute SHA-256 over exact file bytes
-    file_hashes: dict[str, str] = {
-        "report.md": compute_file_sha256(md_path),
-        "report.html": compute_file_sha256(html_path),
-        "baseline-traces.jsonl": compute_file_sha256(baseline_traces_path),
-        "candidate-traces.jsonl": compute_file_sha256(candidate_traces_path),
-        "controls-traces.jsonl": compute_file_sha256(controls_traces_path),
-        "cases.jsonl": compute_file_sha256(cases_path),
-        "benchmark-plan.json": compute_file_sha256(plan_path),
-        "falsification.json": compute_file_sha256(falsification_path),
-        "result.json": compute_file_sha256(result_path),
-        "benchmark_result.json": compute_file_sha256(bm_result_path),
-    }
+        # 7. Write result.json
+        result_path = staging_dir / "result.json"
+        result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
+        res_hash = compute_file_sha256(result_path)
+        manifest["result_hash"] = res_hash
 
-    # 8. Manifest JSON
-    manifest = data.get("manifest") or {}
-    manifest["file_hashes"] = file_hashes
-    manifest_path = p_out / "manifest.json"
-    manifest_path.write_text(strict_json_dumps(manifest, indent=2), encoding="utf-8")
+        data["manifest"] = manifest
+        result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
+        bm_result_path = staging_dir / "benchmark_result.json"
+        bm_result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
 
-    file_hashes["manifest.json"] = compute_file_sha256(manifest_path)
+        # 8. File hashes for all bundle artifacts (excluding manifest.json and bundle.sha256)
+        file_hashes: dict[str, str] = {
+            "report.md": compute_file_sha256(md_path),
+            "report.html": compute_file_sha256(html_path),
+            "baseline-traces.jsonl": b_trace_hash,
+            "candidate-traces.jsonl": c_trace_hash,
+            "controls-traces.jsonl": ctrl_trace_hash,
+            "cases.jsonl": cases_hash,
+            "protocol.json": proto_hash,
+            "benchmark-plan.json": proto_hash,
+            "falsification.json": compute_file_sha256(falsification_path),
+            "result.json": compute_file_sha256(result_path),
+            "benchmark_result.json": compute_file_sha256(bm_result_path),
+        }
+        manifest["file_hashes"] = file_hashes
 
-    # 9. bundle.sha256 checksum file
-    bundle_sha_path = p_out / "bundle.sha256"
-    checksum_lines = [f"{hash_val}  {fname}" for fname, hash_val in sorted(file_hashes.items())]
-    bundle_sha_path.write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
+        # 9. Manifest JSON
+        manifest_path = staging_dir / "manifest.json"
+        manifest_path.write_text(strict_json_dumps(manifest, indent=2), encoding="utf-8")
 
-    return {
-        "json": result_path,
-        "markdown": md_path,
-        "html": html_path,
-        "manifest": manifest_path,
-        "bundle_sha": bundle_sha_path,
-    }
+        # 10. Checksum bundle.sha256 file
+        all_checksums = dict(file_hashes)
+        all_checksums["manifest.json"] = compute_file_sha256(manifest_path)
+        bundle_sha_path = staging_dir / "bundle.sha256"
+        checksum_lines = [f"{hash_val}  {fname}" for fname, hash_val in sorted(all_checksums.items())]
+        bundle_sha_path.write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
+
+        # 11. Atomic swap / move staging dir to final destination
+        if final_out.exists():
+            shutil.rmtree(final_out)
+        staging_dir.rename(final_out)
+
+        return {
+            "json": final_out / "result.json",
+            "markdown": final_out / "report.md",
+            "html": final_out / "report.html",
+            "manifest": final_out / "manifest.json",
+            "bundle_sha": final_out / "bundle.sha256",
+        }
+    except Exception:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
 
 
 def save_all_reports(

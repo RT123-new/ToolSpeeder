@@ -570,10 +570,13 @@ class ArtifactManifest:
     hardware_info: dict[str, Any] = field(default_factory=dict)
     dependency_versions: dict[str, str] = field(default_factory=dict)
     benchmark_plan_hash: str = ""
+    benchmark_config_hash: str = ""
     fixture_manifest_hash: str = ""
+    workload_fixture_hash: str = ""
     cases_hash: str = ""
     baseline_trace_hash: str = ""
     candidate_trace_hash: str = ""
+    raw_trace_hash: str = ""
     controls_trace_hash: str = ""
     result_hash: str = ""
     falsification_hash: str = ""
@@ -613,10 +616,13 @@ class ArtifactManifest:
             "hardware_info": self.hardware_info,
             "dependency_versions": self.dependency_versions,
             "benchmark_plan_hash": self.benchmark_plan_hash,
-            "fixture_manifest_hash": self.fixture_manifest_hash,
+            "benchmark_config_hash": self.benchmark_plan_hash,
+            "fixture_manifest_hash": self.fixture_manifest_hash or self.cases_hash,
+            "workload_fixture_hash": self.workload_fixture_hash or self.fixture_manifest_hash or self.cases_hash,
             "cases_hash": self.cases_hash,
             "baseline_trace_hash": self.baseline_trace_hash,
             "candidate_trace_hash": self.candidate_trace_hash,
+            "raw_trace_hash": self.candidate_trace_hash or self.baseline_trace_hash,
             "controls_trace_hash": self.controls_trace_hash,
             "result_hash": self.result_hash,
             "falsification_hash": self.falsification_hash,
