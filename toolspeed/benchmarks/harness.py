@@ -13,8 +13,10 @@ from toolspeed.benchmarks.local_backend import LocalWallClockBackend
 from toolspeed.benchmarks.replay_backend import ReplayBackend
 from toolspeed.core.hypotheses import FROZEN_POLICY
 from toolspeed.core.types import (
+    ApprovalGrant,
     ArtifactManifest,
     EvidenceLevel,
+    ExecutionAuthorityContext,
     Task,
     TaskResult,
     VerdictState,
@@ -132,18 +134,40 @@ class BenchmarkHarness:
 
         # Symmetrical warmup
         for w in range(self.config.warmup_trials):
-            task_w = task_factory(w)
+            task_w_b = task_factory(w)
+            task_w_c = task_factory(w)
+            auth_w_b = ExecutionAuthorityContext()
+            auth_w_c = ExecutionAuthorityContext()
+            if isinstance(task_w_b, Task) and "approval_grant" in task_w_b.metadata:
+                grant_b = task_w_b.metadata["approval_grant"]
+                if isinstance(grant_b, ApprovalGrant):
+                    auth_w_b.add_grant(grant_b)
+            if isinstance(task_w_c, Task) and "approval_grant" in task_w_c.metadata:
+                grant_c = task_w_c.metadata["approval_grant"]
+                if isinstance(grant_c, ApprovalGrant):
+                    auth_w_c.add_grant(grant_c)
+
             tools_w_b, model_w_b = self.backend.create_workload_environment(workload_id, trial_index=w)
             sched_w_b = baseline_cls(SchedulerConfig(concurrency_limit=self.config.concurrency_limit), **b_kw)
-            await sched_w_b.execute(task_w, model_w_b, tools_w_b)
+            await sched_w_b.execute(task_w_b, model_w_b, tools_w_b, authority_context=auth_w_b)
 
             tools_w_c, model_w_c = self.backend.create_workload_environment(workload_id, trial_index=w)
             sched_w_c = candidate_cls(SchedulerConfig(concurrency_limit=self.config.concurrency_limit))
-            await sched_w_c.execute(task_w, model_w_c, tools_w_c)
+            await sched_w_c.execute(task_w_c, model_w_c, tools_w_c, authority_context=auth_w_c)
 
         for i in range(trials):
             task_b = task_factory(i)
             task_c = task_factory(i)
+            auth_ctx_b = ExecutionAuthorityContext()
+            auth_ctx_c = ExecutionAuthorityContext()
+            if isinstance(task_b, Task) and "approval_grant" in task_b.metadata:
+                grant_b = task_b.metadata["approval_grant"]
+                if isinstance(grant_b, ApprovalGrant):
+                    auth_ctx_b.add_grant(grant_b)
+            if isinstance(task_c, Task) and "approval_grant" in task_c.metadata:
+                grant_c = task_c.metadata["approval_grant"]
+                if isinstance(grant_c, ApprovalGrant):
+                    auth_ctx_c.add_grant(grant_c)
 
             tools_b, model_b = self.backend.create_workload_environment(workload_id, trial_index=i)
             tools_c, model_c = self.backend.create_workload_environment(workload_id, trial_index=i)
@@ -172,12 +196,12 @@ class BenchmarkHarness:
             run_candidate_first = i % 2 == 1
             if run_candidate_first:
                 execution_order.append("candidate_first")
-                res_c = await c_sched.execute(task_c, model_c, tools_c)
-                res_b = await b_sched.execute(task_b, model_b, tools_b)
+                res_c = await c_sched.execute(task_c, model_c, tools_c, authority_context=auth_ctx_c)
+                res_b = await b_sched.execute(task_b, model_b, tools_b, authority_context=auth_ctx_b)
             else:
                 execution_order.append("baseline_first")
-                res_b = await b_sched.execute(task_b, model_b, tools_b)
-                res_c = await c_sched.execute(task_c, model_c, tools_c)
+                res_b = await b_sched.execute(task_b, model_b, tools_b, authority_context=auth_ctx_b)
+                res_c = await c_sched.execute(task_c, model_c, tools_c, authority_context=auth_ctx_c)
 
             baseline_results.append(res_b)
             candidate_results.append(res_c)
