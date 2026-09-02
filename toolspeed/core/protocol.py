@@ -28,6 +28,9 @@ class HypothesisThresholds:
     min_compression_ratio: float | None = None
     max_decode_error_rate: float | None = None
 
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
     @classmethod
     def from_dict(cls, data: dict[str, Any], mechanism_type: str = "general") -> HypothesisThresholds:
         # Strict validation: require explicit thresholds
@@ -79,6 +82,10 @@ class MechanismDefinition:
     evaluates_hypothesis: str = "primary_attribution"
     hypotheses: HypothesisThresholds | None = None
     status: str = "ACTIVE"
+
+    @property
+    def thresholds(self) -> HypothesisThresholds | None:
+        return self.hypotheses
 
 
 @dataclass(frozen=True)

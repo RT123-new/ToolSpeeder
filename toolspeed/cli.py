@@ -16,7 +16,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Any
+import numpy as np
 
 from toolspeed.benchmarks.harness import BenchmarkConfig, BenchmarkHarness
 from toolspeed.core.types import EvidenceLevel, VerdictState, compute_file_sha256
@@ -26,7 +26,7 @@ from toolspeed.experiments.e3_spec_runner import E3SpeculationExperiment
 from toolspeed.experiments.e4_commit_runner import E4CommitHorizonExperiment
 from toolspeed.experiments.e5_bytecode_runner import E5BytecodeExperiment
 from toolspeed.experiments.full_suite import SuiteResult, SuiteRunner
-from toolspeed.experiments.runner import LatencyProfile
+from toolspeed.experiments.runner import LatencyProfile, compute_summary
 from toolspeed.visualization.charts import ascii_bar_chart, ascii_table
 from toolspeed.visualization.report import (
     generate_benchmark_html_dashboard,
@@ -216,6 +216,12 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"❌ Error: {e}")
         return 1
 
+    manifest_file = parent_dir / "manifest.json"
+    sha_file = parent_dir / "bundle.sha256"
+    if not manifest_file.exists() and not sha_file.exists():
+        print(f"❌ Error: Bundle at {parent_dir} is unsealed and unsigned (missing manifest.json / bundle.sha256).")
+        return 1
+
     out_dir = Path(args.out or parent_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -269,6 +275,51 @@ def cmd_falsify(args: argparse.Namespace) -> int:
         print("  => Exit code 2 (Inconclusive for empirical claims).")
         return 2
 
+    # Attempt recomputation from raw traces if available
+    parent_dir = Path(input_path) if Path(input_path).is_dir() else Path(input_path).parent
+    c_traces_file = parent_dir / "candidate-traces.jsonl"
+    b_traces_file = parent_dir / "baseline-traces.jsonl"
+
+    if c_traces_file.exists() and b_traces_file.exists():
+        print("📊 Recomputing statistical metrics and hypothesis checks from raw JSONL traces...")
+        c_lines = [json.loads(line) for line in c_traces_file.read_text().splitlines() if line.strip()]
+        b_lines = [json.loads(line) for line in b_traces_file.read_text().splitlines() if line.strip()]
+
+        c_by_wl: dict[str, list[dict[str, Any]]] = {}
+        for t in c_lines:
+            wl = t.get("workload_id", "W1")
+            c_by_wl.setdefault(wl, []).append(t)
+        b_by_wl: dict[str, list[dict[str, Any]]] = {}
+        for t in b_lines:
+            wl = t.get("workload_id", "W1")
+            b_by_wl.setdefault(wl, []).append(t)
+
+        any_raw_falsified = False
+        for wl, c_list in c_by_wl.items():
+            b_list = b_by_wl.get(wl, [])
+            c_lat = [float(x.get("ccl_ms", x.get("total_duration_ms", 100.0))) for x in c_list]
+            b_lat = [float(x.get("ccl_ms", x.get("total_duration_ms", 100.0))) for x in b_list] or [100.0] * len(c_lat)
+            c_succ = [bool(x.get("success", False)) for x in c_list]
+            b_succ = [bool(x.get("success", True)) for x in b_list] or [True] * len(c_succ)
+
+            raw_summary = compute_summary(
+                baseline=np.array(b_lat, dtype=np.float64),
+                candidate=np.array(c_lat, dtype=np.float64),
+                baseline_success=np.array(b_succ, dtype=bool),
+                candidate_success=np.array(c_succ, dtype=bool),
+            )
+
+            p95_sp = raw_summary.p95_speedup if raw_summary.p95_speedup is not None else 0.0
+            cand_s = raw_summary.candidate_success_rate if raw_summary.candidate_success_rate is not None else 0.0
+
+            if cand_s < 0.95 or p95_sp < 1.0:
+                print(f"❌ Raw traces falsified workload '{wl}': success={cand_s:.1%}, p95_speedup={p95_sp:.2f}x")
+                any_raw_falsified = True
+
+        if any_raw_falsified:
+            print("❌ Result: ONE OR MORE HYPOTHESES FALSIFIED based on recomputation from raw traces.")
+            return 1
+
     manifest = data.get("manifest") or {}
     is_eligible = manifest.get("is_verdict_eligible", True)
     trial_count = manifest.get("trial_count", 0)
@@ -280,14 +331,6 @@ def cmd_falsify(args: argparse.Namespace) -> int:
         )
         print("  => Exit code 2 (Inconclusive).")
         return 2
-
-    # Attempt recomputation from raw traces if available
-    parent_dir = Path(input_path) if Path(input_path).is_dir() else Path(input_path).parent
-    c_traces_file = parent_dir / "candidate-traces.jsonl"
-    b_traces_file = parent_dir / "baseline-traces.jsonl"
-
-    if c_traces_file.exists() and b_traces_file.exists():
-        print("📊 Recomputing statistical metrics and hypothesis checks from raw JSONL traces...")
 
     evaluations = data.get("evaluations", [])
     if not evaluations:
@@ -376,6 +419,10 @@ def cmd_validate_bundle(args: argparse.Namespace) -> int:
                 checks_passed = False
             else:
                 print(f"  • {f}: {manifest[f]}")
+
+        if "file_hashes" not in manifest or not isinstance(manifest.get("file_hashes"), dict):
+            print("❌ FAILED: Manifest missing required 'file_hashes' mapping.")
+            checks_passed = False
 
     # 2. Evaluations verification
     evaluations = data.get("evaluations", [])

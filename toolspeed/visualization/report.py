@@ -794,18 +794,7 @@ def save_benchmark_reports(
             len(data.get("evaluations", [{}])[0].get("candidate_results", [])) if data.get("evaluations") else 0,
         )
 
-        # 7. Write result.json
-        result_path = staging_dir / "result.json"
-        result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
-        res_hash = compute_file_sha256(result_path)
-        manifest["result_hash"] = res_hash
-
-        data["manifest"] = manifest
-        result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
-        bm_result_path = staging_dir / "benchmark_result.json"
-        bm_result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
-
-        # 8. File hashes for all bundle artifacts (excluding manifest.json and bundle.sha256)
+        # 7. File hashes for all supporting bundle artifacts
         file_hashes: dict[str, str] = {
             "report.md": compute_file_sha256(md_path),
             "report.html": compute_file_sha256(html_path),
@@ -816,17 +805,28 @@ def save_benchmark_reports(
             "protocol.json": proto_hash,
             "benchmark-plan.json": proto_hash,
             "falsification.json": compute_file_sha256(falsification_path),
-            "result.json": compute_file_sha256(result_path),
-            "benchmark_result.json": compute_file_sha256(bm_result_path),
         }
-        manifest["file_hashes"] = file_hashes
+        manifest["file_hashes"] = dict(file_hashes)
+        data["manifest"] = dict(manifest)
 
-        # 9. Manifest JSON
+        # 8. Write result.json and benchmark_result.json once
+        result_path = staging_dir / "result.json"
+        result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
+        res_hash = compute_file_sha256(result_path)
+
+        bm_result_path = staging_dir / "benchmark_result.json"
+        bm_result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
+        bm_res_hash = compute_file_sha256(bm_result_path)
+
+        # 9. Set result_hash on external manifest and write manifest.json
+        manifest["result_hash"] = res_hash
         manifest_path = staging_dir / "manifest.json"
         manifest_path.write_text(strict_json_dumps(manifest, indent=2), encoding="utf-8")
 
         # 10. Checksum bundle.sha256 file
         all_checksums = dict(file_hashes)
+        all_checksums["result.json"] = res_hash
+        all_checksums["benchmark_result.json"] = bm_res_hash
         all_checksums["manifest.json"] = compute_file_sha256(manifest_path)
         bundle_sha_path = staging_dir / "bundle.sha256"
         checksum_lines = [f"{hash_val}  {fname}" for fname, hash_val in sorted(all_checksums.items())]

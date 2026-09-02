@@ -201,12 +201,10 @@ class BaseScheduler(ABC):
         """Executes a task under this scheduler policy with full lifecycle instrumentation."""
         clock = getattr(model, "clock", None) or getattr(tools, "clock", None)
         if authority_context is None:
-            if isinstance(task, Task) and "approval_grant" in task.metadata:
-                grant = task.metadata["approval_grant"]
-                if isinstance(grant, ApprovalGrant):
-                    authority_context = ExecutionAuthorityContext(grants=[grant])
-            elif hasattr(task, "authority_context") and task.authority_context:
+            if hasattr(task, "authority_context") and task.authority_context:
                 authority_context = task.authority_context
+            else:
+                authority_context = ExecutionAuthorityContext()
 
         ctx = ExecutionContext(
             task=task,

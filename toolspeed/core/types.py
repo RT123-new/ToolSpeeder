@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import json
 import math
 import platform
@@ -156,22 +157,50 @@ PROHIBITED_METADATA_SUBSTRINGS: list[str] = [
 
 
 def filter_model_visible_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Filters metadata to only include whitelisted model-visible fields (no oracle, grants, or targets)."""
+    """Filters metadata strictly: only admitted if key is in MODEL_VISIBLE_METADATA_WHITELIST."""
     if not metadata:
         return {}
     result: dict[str, Any] = {}
     for k, v in metadata.items():
+        if k not in MODEL_VISIBLE_METADATA_WHITELIST:
+            continue
         k_lower = str(k).lower()
         if any(p in k_lower for p in PROHIBITED_METADATA_SUBSTRINGS):
             continue
         # Never expose ApprovalGrant or ExpectedOutcome objects
         if hasattr(v, "approval_id") or hasattr(v, "expected_final_value") or hasattr(v, "oracle_canary"):
             continue
-        if k in MODEL_VISIBLE_METADATA_WHITELIST or not any(
-            p in str(v).lower() for p in PROHIBITED_METADATA_SUBSTRINGS
-        ):
-            result[k] = v
+        if any(p in str(v).lower() for p in PROHIBITED_METADATA_SUBSTRINGS):
+            continue
+        result[k] = v
     return result
+
+
+def sanitize_model_visible_data(data: Any) -> Any:
+    """Recursively scans and sanitizes context/parameters/metadata, removing canaries and prohibited terms."""
+    if isinstance(data, (dict, Mapping)):
+        clean_dict: dict[str, Any] = {}
+        for k, v in data.items():
+            k_str = str(k).lower()
+            if any(p in k_str for p in PROHIBITED_METADATA_SUBSTRINGS):
+                continue
+            if hasattr(v, "approval_id") or hasattr(v, "expected_final_value") or hasattr(v, "oracle_canary"):
+                continue
+            clean_dict[k] = sanitize_model_visible_data(v)
+        return clean_dict
+    elif isinstance(data, (list, tuple)):
+        clean_list = []
+        for item in data:
+            if hasattr(item, "approval_id") or hasattr(item, "expected_final_value") or hasattr(item, "oracle_canary"):
+                continue
+            clean_list.append(sanitize_model_visible_data(item))
+        return type(data)(clean_list)
+    elif isinstance(data, str):
+        lower = data.lower()
+        if "oracle_canary" in lower or "canary_" in lower or "secret_canary" in lower:
+            return "[REDACTED_ORACLE_CANARY]"
+        return data
+    return data
 
 
 @dataclass(frozen=True)
@@ -211,13 +240,36 @@ class AgentTask:
 class StateSnapshot:
     """Immutable state snapshot for environment initialization and validation."""
 
-    state_id: str
+    state_id: str = "default_state"
     namespace: str = "default"
     data: Mapping[str, Any] = field(default_factory=dict)
 
+    def __init__(
+        self,
+        state_id_or_data: str | Mapping[str, Any] | None = None,
+        namespace: str = "default",
+        data: Mapping[str, Any] | None = None,
+        state_id: str | None = None,
+    ) -> None:
+        if isinstance(state_id_or_data, (dict, Mapping)):
+            actual_data = dict(state_id_or_data)
+            actual_id = state_id or str(uuid.uuid4())[:8]
+        else:
+            actual_id = state_id or (str(state_id_or_data) if state_id_or_data is not None else "default_state")
+            actual_data = dict(data or {})
+        object.__setattr__(self, "state_id", actual_id)
+        object.__setattr__(self, "namespace", namespace)
+        object.__setattr__(self, "data", actual_data)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.data.get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.data[key]
+
     def clone(self) -> StateSnapshot:
         return StateSnapshot(
-            state_id=str(uuid.uuid4()),
+            state_id_or_data=str(uuid.uuid4()),
             namespace=self.namespace,
             data=copy.deepcopy(dict(self.data)),
         )
@@ -248,20 +300,29 @@ class ExpectedOutcome:
     expected_final_value: Any = None
     expected_tool_sequence: Sequence[str] = field(default_factory=tuple)
     expected_tool_arguments: Mapping[str, Any] = field(default_factory=dict)
+    expected_arguments: Mapping[str, Any] = field(default_factory=dict)
     expected_state_diff: Mapping[str, Any] = field(default_factory=dict)
+    expected_final_state: Mapping[str, Any] = field(default_factory=dict)
     required_tools: Sequence[str] = field(default_factory=tuple)
     disallowed_tools: Sequence[str] = field(default_factory=tuple)
+    required_mutations: int = 0
     max_allowed_calls: int = 100
     oracle_canary: str = "ORACLE_CANARY_SECRET_789XYZ"
 
     def to_dict(self) -> dict[str, Any]:
+        exp_args = dict(self.expected_tool_arguments)
+        if self.expected_arguments:
+            exp_args.update(self.expected_arguments)
         return {
             "expected_final_value": self.expected_final_value,
             "expected_tool_sequence": list(self.expected_tool_sequence),
-            "expected_tool_arguments": dict(self.expected_tool_arguments),
+            "expected_tool_arguments": exp_args,
+            "expected_arguments": dict(self.expected_arguments),
             "expected_state_diff": dict(self.expected_state_diff),
+            "expected_final_state": dict(self.expected_final_state),
             "required_tools": list(self.required_tools),
             "disallowed_tools": list(self.disallowed_tools),
+            "required_mutations": self.required_mutations,
             "max_allowed_calls": self.max_allowed_calls,
             "oracle_canary": self.oracle_canary,
         }
@@ -272,17 +333,23 @@ class ExpectedOutcome:
             expected_final_value=data.get("expected_final_value"),
             expected_tool_sequence=tuple(data.get("expected_tool_sequence", ())),
             expected_tool_arguments=dict(data.get("expected_tool_arguments", {})),
+            expected_arguments=dict(data.get("expected_arguments", {})),
             expected_state_diff=dict(data.get("expected_state_diff", {})),
+            expected_final_state=dict(data.get("expected_final_state", {})),
             required_tools=tuple(data.get("required_tools", ())),
             disallowed_tools=tuple(data.get("disallowed_tools", ())),
+            required_mutations=int(data.get("required_mutations", 0)),
             max_allowed_calls=int(data.get("max_allowed_calls", 100)),
             oracle_canary=data.get("oracle_canary", "ORACLE_CANARY_SECRET_789XYZ"),
         )
 
 
+DEFAULT_ISSUER_SECRET: bytes = b"toolspeed_trusted_authority_hmac_secret_key_32b_fixed"
+
+
 @dataclass(frozen=True)
 class ApprovalGrant:
-    """Trusted, scheduler-independent authorization grant for side-effect execution."""
+    """Cryptographically verifiable authorization grant for side-effect execution."""
 
     approval_id: str
     subject: str
@@ -290,9 +357,33 @@ class ApprovalGrant:
     argument_fingerprint: str
     expires_at: float
     authority: str
+    nonce: str = field(default_factory=lambda: str(uuid.uuid4())[:16])
+    signature: str = ""
     tenant: str = "default_tenant"
     run_id: str = "default_run"
     single_use: bool = True
+
+    @staticmethod
+    def compute_fingerprint(tool_name: str, arguments: Mapping[str, Any]) -> str:
+        fp_payload = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}".encode("utf-8")
+        return hashlib.sha256(fp_payload).hexdigest()
+
+    @staticmethod
+    def compute_signature(
+        secret: bytes,
+        approval_id: str,
+        tool_name: str,
+        argument_fingerprint: str,
+        expires_at: float,
+        authority: str,
+        nonce: str,
+        tenant: str,
+        run_id: str,
+    ) -> str:
+        msg = f"{approval_id}:{tool_name}:{argument_fingerprint}:{expires_at:.6f}:{authority}:{nonce}:{tenant}:{run_id}".encode(
+            "utf-8"
+        )
+        return hmac.new(secret, msg, hashlib.sha256).hexdigest()
 
     @classmethod
     def create(
@@ -306,17 +397,23 @@ class ApprovalGrant:
         run_id: str = "default_run",
         single_use: bool = True,
         current_time: float | None = None,
+        issuer_secret: bytes = DEFAULT_ISSUER_SECRET,
     ) -> ApprovalGrant:
-        fp_payload = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}".encode()
-        fp = hashlib.sha256(fp_payload).hexdigest()[:16]
-        now = current_time if current_time is not None else time.perf_counter()
+        fp = cls.compute_fingerprint(tool_name, arguments)
+        now = current_time if current_time is not None else time.time()
+        aid = str(uuid.uuid4())
+        nonce = str(uuid.uuid4())[:16]
+        exp = now + ttl_seconds
+        sig = cls.compute_signature(issuer_secret, aid, tool_name, fp, exp, authority, nonce, tenant, run_id)
         return cls(
-            approval_id=str(uuid.uuid4()),
+            approval_id=aid,
             subject=subject,
             tool_name=tool_name,
             argument_fingerprint=fp,
-            expires_at=now + ttl_seconds,
+            expires_at=exp,
             authority=authority,
+            nonce=nonce,
+            signature=sig,
             tenant=tenant,
             run_id=run_id,
             single_use=single_use,
@@ -331,6 +428,7 @@ class ApprovalGrant:
         run_id: str | None = None,
         current_time: float | None = None,
         allowed_authorities: Sequence[str] = ("trusted_system", "human_supervisor"),
+        issuer_secret: bytes = DEFAULT_ISSUER_SECRET,
     ) -> bool:
         if self.authority not in allowed_authorities:
             return False
@@ -342,12 +440,59 @@ class ApprovalGrant:
             return False
         if run_id is not None and self.run_id != run_id:
             return False
-        now = current_time if current_time is not None else time.perf_counter()
+        now = current_time if current_time is not None else time.time()
         if now > self.expires_at:
             return False
-        fp_payload = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}".encode()
-        fp = hashlib.sha256(fp_payload).hexdigest()[:16]
-        return self.argument_fingerprint == fp
+        fp = self.compute_fingerprint(tool_name, arguments)
+        if self.argument_fingerprint != fp and self.argument_fingerprint != fp[:16]:
+            return False
+        if self.signature:
+            expected_sig = self.compute_signature(
+                issuer_secret,
+                self.approval_id,
+                self.tool_name,
+                self.argument_fingerprint,
+                self.expires_at,
+                self.authority,
+                self.nonce,
+                self.tenant,
+                self.run_id,
+            )
+            if not hmac.compare_digest(self.signature, expected_sig):
+                return False
+        return True
+
+
+class ApprovalIssuer:
+    """Trusted capability issuer generating signed approval grants."""
+
+    def __init__(self, secret: bytes = DEFAULT_ISSUER_SECRET, authority: str = "trusted_system"):
+        self.secret = secret
+        self.authority = authority
+
+    def issue(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        ttl_seconds: float = 300.0,
+        subject: str = "default_subject",
+        tenant: str = "default_tenant",
+        run_id: str = "default_run",
+        single_use: bool = True,
+        current_time: float | None = None,
+    ) -> ApprovalGrant:
+        return ApprovalGrant.create(
+            tool_name=tool_name,
+            arguments=arguments,
+            authority=self.authority,
+            ttl_seconds=ttl_seconds,
+            subject=subject,
+            tenant=tenant,
+            run_id=run_id,
+            single_use=single_use,
+            current_time=current_time,
+            issuer_secret=self.secret,
+        )
 
 
 @dataclass
@@ -360,6 +505,7 @@ class ExecutionAuthorityContext:
     allowed_authorities: list[str] = field(default_factory=lambda: ["trusted_system", "human_supervisor"])
     grants: list[ApprovalGrant] = field(default_factory=list)
     consumed_grant_ids: set[str] = field(default_factory=set)
+    issuer_secret: bytes = DEFAULT_ISSUER_SECRET
 
     def add_grant(self, grant: ApprovalGrant) -> None:
         self.grants.append(grant)
@@ -403,6 +549,38 @@ class BenchmarkCase:
     trial_index: int = 0
     parameters: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        case_id: str,
+        workload_id: str,
+        agent_task: AgentTask | None = None,
+        expected_outcome: ExpectedOutcome | None = None,
+        authority_context: ExecutionAuthorityContext | None = None,
+        initial_state: StateSnapshot | None = None,
+        fixture: Mapping[str, Any] | None = None,
+        seed: int = 0,
+        trial_index: int = 0,
+        parameters: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        task: AgentTask | None = None,
+    ) -> None:
+        actual_task = agent_task or task or AgentTask(task_id=case_id, prompt="")
+        object.__setattr__(self, "case_id", case_id)
+        object.__setattr__(self, "workload_id", workload_id)
+        object.__setattr__(self, "agent_task", actual_task)
+        object.__setattr__(self, "expected_outcome", expected_outcome or ExpectedOutcome())
+        object.__setattr__(self, "authority_context", authority_context or ExecutionAuthorityContext())
+        object.__setattr__(self, "initial_state", initial_state or StateSnapshot(state_id="init_state"))
+        object.__setattr__(self, "fixture", dict(fixture or {}))
+        object.__setattr__(self, "seed", seed)
+        object.__setattr__(self, "trial_index", trial_index)
+        object.__setattr__(self, "parameters", dict(parameters or {}))
+        object.__setattr__(self, "metadata", dict(metadata or {}))
+
+    @property
+    def task(self) -> AgentTask:
+        return self.agent_task
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -463,6 +641,52 @@ class BenchmarkCase:
                     details["errors"].append(f"Required tool '{req}' was not executed")
                     return False, f"Required tool '{req}' was omitted", details
 
+        # 1b. Check expected tool sequence if declared
+        if self.expected_outcome.expected_tool_sequence:
+            if trace is None or not getattr(trace, "tool_calls", None):
+                details["errors"].append("Trace missing tool calls for expected sequence")
+                return False, "Expected tool sequence not executed", details
+            executed_tool_names = [getattr(c, "name", None) or getattr(c, "tool_name", "") for c in trace.tool_calls]
+            exp_seq = list(self.expected_outcome.expected_tool_sequence)
+            if list(executed_tool_names[:len(exp_seq)]) != exp_seq:
+                details["errors"].append(f"Expected tool sequence {exp_seq}, got {executed_tool_names}")
+                return False, "Executed tool sequence did not match expected sequence", details
+
+        # 1c. Check expected arguments if declared
+        exp_args_map = dict(self.expected_outcome.expected_tool_arguments)
+        if self.expected_outcome.expected_arguments:
+            exp_args_map.update(self.expected_outcome.expected_arguments)
+        if exp_args_map and trace is not None and getattr(trace, "tool_calls", None):
+            for call in trace.tool_calls:
+                t_name = getattr(call, "name", None) or getattr(call, "tool_name", "")
+                if t_name in exp_args_map:
+                    exp_args = exp_args_map[t_name]
+                    actual_args = getattr(call, "arguments", {})
+                    if actual_args != exp_args:
+                        details["errors"].append(f"Arguments mismatch on {t_name}: expected {exp_args}, got {actual_args}")
+                        return False, f"Tool arguments for '{t_name}' did not match expected", details
+
+        # 1d. Check required mutations
+        if self.expected_outcome.required_mutations > 0:
+            if trace is not None and getattr(trace, "tool_calls", None):
+                mut_calls = [c for c in trace.tool_calls if not getattr(c, "is_read_only", True)]
+                if len(mut_calls) != self.expected_outcome.required_mutations:
+                    details["errors"].append(
+                        f"Expected {self.expected_outcome.required_mutations} mutations, found {len(mut_calls)}"
+                    )
+                    return False, f"Mutation count {len(mut_calls)} did not match expected {self.expected_outcome.required_mutations}", details
+
+        # 1e. Check expected state diff or final state
+        exp_state = dict(self.expected_outcome.expected_final_state)
+        if self.expected_outcome.expected_state_diff:
+            exp_state.update(self.expected_outcome.expected_state_diff)
+        if exp_state and final_state is not None:
+            state_dict = final_state.data if hasattr(final_state, "data") else (final_state if isinstance(final_state, dict) else {})
+            for k, v in exp_state.items():
+                if state_dict.get(k) != v:
+                    details["errors"].append(f"State mismatch on '{k}': expected {v}, got {state_dict.get(k)}")
+                    return False, f"Final state did not match expected state for '{k}'", details
+
         # 2. Check disallowed tools not executed
         if self.expected_outcome.disallowed_tools and trace is not None and getattr(trace, "tool_calls", None):
             executed_tool_names = [getattr(c, "name", None) or getattr(c, "tool_name", "") for c in trace.tool_calls]
@@ -496,27 +720,15 @@ class BenchmarkCase:
             )
             return False, "Exceeded maximum allowed tool calls", details
 
-        # 5. Check expected final value
+        # 5. Check expected final value (exact equality enforced; partial supersets rejected)
         if (
             self.expected_outcome.expected_final_value is not None
             and final_output != self.expected_outcome.expected_final_value
         ):
-            if isinstance(final_output, dict) and isinstance(self.expected_outcome.expected_final_value, dict):
-                match = True
-                for k, v in self.expected_outcome.expected_final_value.items():
-                    if final_output.get(k) != v:
-                        match = False
-                        break
-                if not match:
-                    details["errors"].append(
-                        f"Output mismatch: expected {self.expected_outcome.expected_final_value}, got {final_output}"
-                    )
-                    return False, "Final output did not match expected outcome", details
-            else:
-                details["errors"].append(
-                    f"Output mismatch: expected {self.expected_outcome.expected_final_value}, got {final_output}"
-                )
-                return False, "Final output did not match expected outcome", details
+            details["errors"].append(
+                f"Output mismatch: expected {self.expected_outcome.expected_final_value}, got {final_output}"
+            )
+            return False, "Final output did not match expected outcome", details
 
         details["output_matched"] = True
         return True, "Validation successful", details
@@ -1077,8 +1289,8 @@ class TaskInstance:
             task_id=self.task_id,
             prompt=self.prompt,
             workload_family=self.workload_family,
-            context=copy.deepcopy(dict(self.context)),
-            parameters=copy.deepcopy(dict(self.parameters)),
+            context=sanitize_model_visible_data(copy.deepcopy(dict(self.context))),
+            parameters=sanitize_model_visible_data(copy.deepcopy(dict(self.parameters))),
             metadata=filtered_meta,
         )
 
@@ -1128,8 +1340,8 @@ class Task:
             task_id=self.task_id,
             prompt=self.prompt,
             workload_family=self.metadata.get("workload_family", "default"),
-            context=copy.deepcopy(dict(self.context)),
-            parameters=copy.deepcopy(dict(self.metadata.get("parameters", self.parameters))),
+            context=sanitize_model_visible_data(copy.deepcopy(dict(self.context))),
+            parameters=sanitize_model_visible_data(copy.deepcopy(dict(self.metadata.get("parameters", self.parameters)))),
             metadata=filtered_meta,
         )
 
