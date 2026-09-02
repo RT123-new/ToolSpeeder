@@ -1,24 +1,32 @@
 # Changelog
- 
- All notable changes to ToolSpeed are documented in this file.
- 
+
+All notable changes to ToolSpeed are documented in this file.
+
+## [Unreleased] - Integrity Repair Phase
+
+### Corrected & Retracted
+- **Claim Retraction**: Retracted `INTEGRITY REPAIR COMPLETED — EVIDENCE READY` claim from PR #1 body. Set authoritative verdict to `INTEGRITY REPAIR INCOMPLETE`.
+- **Documentation Alignment**: Updated `README.md`, `SECURITY.md`, `docs/PR1_REPAIR_STATUS.md`, and `docs/KNOWN_LIMITATIONS.md` with required status language:
+  - Current status: integrity repair in progress.
+  - Current CI status: compatibility and smoke checks pass on `e3c974be61d58df0c2870a098099f1371a161c10`.
+  - Current confirmatory evidence: not yet collected under a valid frozen protocol.
+  - Replay/local smoke outputs: operational tests only, not verdict-eligible.
+  - Live evidence: absent.
+- **Security Claim Normalization**: Removed claims of OS-level memory caps, SIGKILL process tree termination, and mathematically prohibited speculation from `SECURITY.md`.
+- **Regression Suite**: Added `tests/test_review_findings.py` with failing regression tests reproducing findings A through O.
+
 ## [0.2.0] - 2026-08-28
- 
- ### Added
- - **Formal Evidence Taxonomy**: Introduced explicit `EvidenceLevel` tags (`SYNTHETIC`, `REPLAY_INTEGRATION`, `LOCAL_WALL_CLOCK`, `LIVE_PRODUCTION`) across all reports, CLI outputs, and JSON manifests.
- - **Statistical Sample Size Enforcement**: Required minimum sample sizes ($\ge 1,000$ for Replay, $\ge 200$ for Local Wall-Clock) before verdict eligibility. Smoke runs are explicitly labeled `SMOKE — NOT VERDICT-ELIGIBLE` producing `INCONCLUSIVE`.
- - **Deterministic Virtual-Time Discrete-Event Replay Backend**: High-precision discrete event simulation computing non-blocking virtual timelines in seconds without wall-clock sleep overhead.
- - **Real Local Wall-Clock Backend**: Run-level service lifecycle management (zero-leak HTTP server, SQLite threadpool execution, sandboxed file I/O, subprocess sandboxes) with paired state isolation and alternating execution order counterbalancing.
- - **Ablation & Sensitivity Controls**: Wired 5 ablation flags (`parallelism_enabled`, `fusion_enabled`, `speculation_enabled`, `early_dispatch_enabled`, `cache_enabled`) and 6 negative/sensitivity controls into the benchmark harness.
- - **CLI `validate-bundle` Subcommand**: Validates artifact manifest, SHA-256 provenance hashes (`benchmark_config_hash`, `workload_fixture_hash`, `raw_trace_hash`), trial sample sizes, and disk artifacts.
- - **114+ Adversarial and Unit Tests**: 100% green test suite verifying topological cycle recovery, side-effect safety, rate-limiter token refunds, bytecode corrupt transport recovery, and cache invalidation.
- 
- ### Fixed & Hardened
- - **Task Correctness Independence**: Fully decoupled `AgentTask`, `ExpectedOutcome`, `StateSnapshot`, and `BenchmarkCase` from model fixtures.
- - **Rate Limiter Concurrency Bug**: Fixed double-release vulnerability in `AsyncConcurrencyLimiter` and hardened token refunds upon cancellation.
- - **E1 DAG Scheduler**: Replaced single-pass regex with two-pass dependency resolution and DFS cycle detection failing closed on unresolved references.
- - **E2 JIT Fusion**: Replaced arbitrary executable lambdas with declarative AST (`DeclarativeWorkflow`, `WorkflowNode`, `WorkflowInvariant`) and safe deoptimization ledger.
- - **E3 Speculation**: Concurrent draft prediction during model reasoning, multi-call matching, and leak-free background task cancellation.
- - **E4 Commit Horizon**: Introduced `IncrementalCommitParser`, syntax closure gating, unresolved variable reference checks, and restricted early dispatch to read-only tools.
- - **E5 Action Bytecode**: Replaced 8-bit opcode binary protocol with 16-bit big-endian transport codec (`>H`) supporting up to 65,535 tools with strict payload validation.
- - **Report Generator**: Added prominent evidence badges, git commit SHA, OS platform, and benchmark artifact hashes.
+
+### Added
+- **Formal Evidence Taxonomy**: Introduced explicit `EvidenceLevel` tags (`SYNTHETIC`, `REPLAY_INTEGRATION`, `LOCAL_WALL_CLOCK`, `LIVE_PRODUCTION`).
+- **Statistical Sample Size Rules**: Required minimum sample sizes ($\ge 1,000$ for Replay, $\ge 200$ for Local Wall-Clock) before verdict eligibility.
+- **Ablation & Control Framework**: Wired ablation flags and negative/sensitivity controls into the benchmark harness.
+- **CLI Subcommands**: Added `benchmark`, `validate-bundle`, `falsify`, and `report` subcommands.
+
+### Fixed & Hardened
+- **Rate Limiter**: Fixed double-release in `AsyncConcurrencyLimiter` and hardened token refunds upon cancellation.
+- **E1 DAG Scheduler**: Two-pass dependency resolution and DFS cycle detection failing closed on unresolved references.
+- **E2 JIT Fusion**: Declarative AST (`DeclarativeWorkflow`, `WorkflowNode`, `WorkflowInvariant`) with deoptimization ledger.
+- **E3 Speculation**: Concurrent draft prediction during model reasoning with cancellation handling.
+- **E4 Commit Horizon**: Syntax closure gating and early dispatch restricted to read-only tools.
+- **E5 Action Bytecode**: 16-bit big-endian transport codec (`>H`) with payload validation.

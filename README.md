@@ -9,69 +9,80 @@ ToolSpeed evaluates and optimizes the serial critical path latency (Correct Comp
 
 ---
 
+## 📋 Current Status & Integrity State
+
+> **Current status:** integrity repair in progress.  
+> **Current CI status:** compatibility and smoke checks pass on commit `e3c974be61d58df0c2870a098099f1371a161c10`.  
+> **Current confirmatory evidence:** not yet collected under a valid frozen protocol.  
+> **Replay/local smoke outputs:** operational tests only, not verdict-eligible.  
+> **Live evidence:** absent.  
+> **Historical numerical outputs:** noncanonical legacy data and must not be used for scientific claims.
+
+### Claim Audit Table
+
+| Claim | Previous Location | Verified? | Exact Evidence | Corrected Wording |
+| :--- | :--- | :--- | :--- | :--- |
+| "INTEGRITY REPAIR COMPLETED — EVIDENCE READY" | PR #1 Body | **REFUTED** | Skipped CI full-evidence sweep; unaddressed architectural findings A–O. | Current status: integrity repair in progress. |
+| "Recomputed directly from raw traces" | PR #1 Body, `cli.py` | **REFUTED** | `cli.py:289-307` reads stored `evaluations` from `result.json`. | Evaluated from stored summaries; raw-trace recomputation pending implementation. |
+| "Full bundle validation pass" | PR #1 Body | **QUALIFIED** | Validated only on smoke runs; no canonical full-sweep bundle exists. | Compatibility and smoke checks pass; canonical evidence uncollected. |
+| "LRU capacity enforcement" | `phase2_cache.py`, README | **REFUTED** | `phase2_cache.py:108` evicts by creation timestamp (FIFO). | Bounded FIFO eviction with separate sub-store limits. |
+| "Safe Subprocess Sandbox with memory caps and SIGKILL" | `SECURITY.md`, README | **REFUTED** | `live_tools.py:198` uses `shell=True`, no memory cap, no process-tree kill. | Controlled local execution tool; not an isolated security sandbox. |
+| "Prospectively frozen protocol v1.1" | `tool-speed-v1.1.json` | **QUALIFIED** | Authored retrospectively after initial implementation exploration. | Retrospective repair protocol v1.1; draft v1.2 required. |
+
+---
+
 ## 🔬 Evidence Taxonomy & Scientific Hierarchy
 
 ToolSpeed strictly classifies experimental data and claims under four discrete evidence levels:
 
 1. **`SYNTHETIC`**: Mathematical simulation models evaluating theoretical limits and hypothesis boundaries. Real-world claims are marked **`INCONCLUSIVE`**.
 2. **`REPLAY_INTEGRATION`**: Real scheduler code executing deterministic virtual-delay adapters on canonical workload traces (W1–W7, E5a).
-3. **`LOCAL_WALL_CLOCK`**: Real scheduler code executing real local tools (SQLite databases, mock HTTP servers, sandboxed file I/O, and subprocess sandboxes).
+3. **`LOCAL_WALL_CLOCK`**: Real scheduler code executing local controlled tools (SQLite databases, mock HTTP servers, local file I/O, and local subprocess primitives).
 4. **`LIVE_PRODUCTION`**: Real schedulers connected to live cloud LLM APIs and third-party remote endpoints (scoped as future work).
 
 ---
 
 ## 🎯 Optimization Schedulers (E1 – E5)
 
-1. **E1 — Dynamic DAG Scheduler (`DAGScheduler`)**: Two-pass dependency discovery and DFS cycle detection; executes ready tool waves concurrently with dependency data binding.
-2. **E2 — Declarative JIT Fusion (`JITFusionScheduler`)**: Safe declarative AST (`DeclarativeWorkflow`, `WorkflowNode`, `WorkflowInvariant`) executed locally with side-effect tracking and safe fallback deoptimization.
+1. **E1 — Dynamic DAG Scheduler (`DAGScheduler`)**: Dependency discovery and cycle detection; executes ready tool waves concurrently with dependency data binding.
+2. **E2 — Declarative JIT Fusion (`JITFusionScheduler`)**: Declarative AST (`DeclarativeWorkflow`, `WorkflowNode`, `WorkflowInvariant`) executed locally with side-effect tracking and fallback deoptimization.
 3. **E3 — Speculative Reads (`SpeculativeReadScheduler`)**: Concurrent draft prediction during model reasoning, multi-call matching across decision steps, and cancellation-safe task lifecycles.
-4. **E4 — Commit-Horizon Streaming (`CommitHorizonScheduler`)**: Incremental streaming parser (`IncrementalCommitParser`) early-dispatching read-only tools upon argument immutability closure.
-5. **E5a — Action Bytecode Codec (`ActionBytecodeScheduler`)**: Compact binary transport codec (`ActionBytecodeCodec`) with strict length and duplicate key validation.
+4. **E4 — Commit-Horizon Streaming (`CommitHorizonScheduler`)**: Incremental streaming parser (`IncrementalCommitParser`) early-dispatching read-only tools upon argument closure.
+5. **E5a — Action Bytecode Codec (`ActionBytecodeScheduler`)**: Binary transport codec (`ActionBytecodeCodec`) for efficient tool payload serialization.
 6. **Phase 2 Caching (`CacheScheduler`)**: TTL-aware exact and normalized parameter caching with domain-level invalidation upon mutative actions.
-7. **Composite Pipeline (`CompositeScheduler`)**: Unified adaptive execution coordinating DAG scheduling, caching, speculation, and streaming commit horizons.
-
----
-
-## 📋 Current Status
-
-> **Status:** benchmark-integrity repair in progress.  
-> Compatibility tests pass at the referenced head.  
-> Current benchmark smoke is failing bundle validation.  
-> No current-head canonical replay or local evidence bundle exists.  
-> Live evidence has not been collected.  
-> Historical numerical outputs are noncanonical and must not be used for claims.
+7. **Composite Pipeline (`CompositeScheduler`)**: Unified execution coordinating DAG scheduling, caching, speculation, and streaming commit horizons.
 
 ---
 
 ## 🚀 CLI Commands & Workflows
 
-### 1. Run Real Paired Benchmark Suite
-Executes real schedulers on genuine backends (`replay` or `local`), produces immutable bundles with full provenance manifests, and computes paired bootstrap confidence intervals.
+### 1. Run Benchmark Suite
+Executes schedulers on backends (`replay` or `local`), produces bundles with provenance manifests, and computes paired bootstrap confidence intervals.
 ```bash
-# Trace Replay Backend (>= 1,000 trials required for verdict eligibility)
-toolspeed benchmark --backend replay --trials 1000 --out artifacts/replay
+# Trace Replay Backend (>= 1,000 trials per seed required for verdict eligibility)
+toolspeed benchmark --protocol benchmark-plans/tool-speed-v1.1.json --backend replay --mode smoke --out artifacts/replay
 
-# Local Wall-Clock Backend (>= 200 trials required for verdict eligibility)
-toolspeed benchmark --backend local --trials 200 --out artifacts/local
+# Local Wall-Clock Backend (>= 200 trials per seed required for verdict eligibility)
+toolspeed benchmark --protocol benchmark-plans/tool-speed-v1.1.json --backend local --mode smoke --out artifacts/local
 ```
 
 ### 2. Validate Benchmark Bundle
-Verifies structural schema, code git SHA, SHA256 integrity hashes, trial counts, and paired evaluations:
+Verifies structural schema, code git SHA, SHA-256 integrity hashes, trial counts, and paired evaluations:
 ```bash
 toolspeed validate-bundle --input artifacts/replay
 ```
 
 ### 3. Evaluate Hypothesis Falsification
-Evaluates an existing benchmark bundle against strict statistical falsification criteria:
+Evaluates an existing benchmark bundle against statistical falsification criteria:
 ```bash
 # Returns exit code 0 (passed), 1 (falsified), or 2 (inconclusive)
 toolspeed falsify --input artifacts/replay
 ```
 
-### 4. Generate Reports from Immutable Bundles
+### 4. Generate Reports from Bundles
 Renders Markdown and interactive HTML dashboards directly from existing bundles without rerunning simulations:
 ```bash
-toolspeed report --input artifacts/replay --out artifacts/replay
+toolspeed report --input artifacts/replay --out artifacts/replay-render
 ```
 
 ### 5. Run Synthetic Analytical Simulation
@@ -81,16 +92,15 @@ toolspeed simulate --experiment all --trials 1000 --out artifacts/synthetic
 
 ### 6. Run Test Suite
 ```bash
-# Run 114+ unit, scheduler, and adversarial scientific integrity tests
-python3 -m unittest discover -s tests -p "test_*.py"
+uv run coverage erase && uv run coverage run -m pytest -q
 ```
 
 ---
 
-## 🛡️ Runtime Safety & Security Boundaries
+## 🛡️ Runtime Safety & Operational Boundaries
 
-- **Centralized Execution Authority**: All schedulers route tool calls through `ToolExecutor`.
-- **Approval Gating**: Mutative tools (`is_read_only=False` or `side_effects=True`) require explicit approval (`is_approved=True`). Schedulers cannot manufacture approval.
-- **Shared Idempotency Store**: Prevents duplicate execution of side-effecting operations across task lifecycles.
-- **Resource Sandboxing**: Subprocess sandboxing enforces working directory containment, timeout enforcement, and SIGKILL process tree termination.
-- **Cancellation Safety**: All cancelled child tasks are cleanly awaited via `cancel_and_await` to prevent unhandled background coroutine exceptions across Python 3.10–3.13.
+- **Execution Routing**: Schedulers route tool calls through `ToolExecutor`.
+- **Approval Gating**: Mutative tools require explicit approval. Schedulers cannot self-authorize.
+- **Shared Idempotency Store**: Deduplicates execution of side-effecting operations across task lifecycles.
+- **Controlled Local Execution**: Local subprocess and file operations execute in temporary workspaces with timeout limits (controlled benchmark tools, not hardened multi-tenant sandboxes).
+- **Cancellation Safety**: Cancelled child tasks are caught and handled cleanly across Python 3.10–3.13.

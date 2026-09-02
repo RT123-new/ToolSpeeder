@@ -1,33 +1,52 @@
 # ToolSpeeder PR #1: Scientific Integrity Repair Status
 
-## 1. Summary of Completed Integrity Repairs
-
-1. **Retraction of Unsupported Tables**: All historical empirical benchmark tables in `README.md` have been retracted and quarantined as noncanonical legacy outputs in `artifacts/legacy-untrusted/README.md`.
-2. **Authoritative Protocol v1.1 (`benchmark-plans/tool-speed-v1.1.json`)**: Frozen protocol establishing explicit primary attribution baselines, practical baselines, W7 safety/latency separation, true identity negative controls, injected delay sensitivity control, and strict schema validation.
-3. **Oracle Separation Boundary**: Implemented `BenchmarkCase` and `filter_model_visible_metadata()`. Models receive strictly `AgentTask` without oracle ground-truth, expectations, or approval grants.
-4. **Runtime Concurrency Safety**: Repaired the double-release bug in `RateLimiter.lease()`, preventing over-release of concurrency slots.
-5. **Shared Idempotency Lifecycle**: Standardized cross-task `SharedIdempotencyStore` with thread/loop safety, `ARG_MISMATCH` fail-closed semantics, and follower unblocking on cancellation or errors.
-6. **Trusted Authority Grants**: Authority grants are evaluated strictly from `ExecutionAuthorityContext` and untrusted model-forged `is_approved` flags are ignored.
-7. **Atomic Staged Bundle Writer**: Bundles are staged in isolated temporary directories, verified against required manifest fields (`benchmark_config_hash`, `workload_fixture_hash`, `raw_trace_hash`, `result_hash`), and atomically moved to destination.
-8. **Direct Recomputed Falsification**: `toolspeed falsify` recomputes statistical metrics and bootstrap intervals directly from raw JSONL traces.
-9. **Real Local & Deterministic Replay Backends**: Concurrency fixes in local HTTP shards, snapshot isolation in SQLite chains, and deterministic timeline advancement in replay.
-10. **CI Green Smoke & Evidence Preservation**: Smoke tests pass bundle validation cleanly on Python 3.12, and full-evidence workflows preserve bundles with `if: always()`.
+**Document Metadata:**
+- **Repository:** `RT123-new/ToolSpeeder`
+- **Pull Request:** `#1` (Draft, Unmerged)
+- **Base Branch:** `main` (`1d3b3a61afefcbeb64c3015579ae1d66107e8450`)
+- **Working Branch:** `repair/benchmark-integrity-runtime-safety`
+- **Current Status:** Integrity repair in progress.
+- **Current CI Status:** Compatibility and smoke checks pass on `e3c974be61d58df0c2870a098099f1371a161c10`.
+- **Current Confirmatory Evidence:** Not yet collected under a valid frozen protocol.
+- **Replay/Local Smoke Outputs:** Operational tests only, not verdict-eligible.
+- **Live Evidence:** Absent.
+- **Authoritative Scientific Verdict:** `INTEGRITY REPAIR INCOMPLETE`
 
 ---
 
-## 2. Commit Order Ledger
+## 1. Quality Gates Status at Exact Head
 
-| Step | Conventional Commit | Focus Area |
-|---|---|---|
-| 1 | `docs(claims): retract unsupported benchmark tables and update PR status` | Retract tables, clean legacy artifacts, update PR #1 |
-| 2 | `fix(protocol): establish one frozen benchmark protocol and schema` | Frozen `tool-speed-v1.1.json` and JSON schema validator |
-| 3 | `fix(oracle): separate model task authority and benchmark oracle data` | `BenchmarkCase`, metadata whitelisting, negative validator |
-| 4 | `fix(runtime): repair lease ownership approvals and shared idempotency` | Lease double-release fix, shared store lifecycle |
-| 5 | `fix(artifacts): build one atomic recomputable bundle format` | Atomic bundle staging, manifest hashing, checksums |
-| 6 | `fix(cli): recompute validation falsification and reports from evidence` | Raw-trace recomputation in `falsify` and `validate-bundle` |
-| 7 | `fix(benchmarks): implement protocol-driven paired cases and baselines` | Symmetrical warmup, authority context routing, W1–W7 |
-| 8 | `fix(backends): make replay deterministic and local workloads genuine` | Threading HTTP server, SQLite isolation, durable W7 |
-| 9 | `fix(schedulers): complete E1-E5 and cache integrity repairs` | DAG reference resolution, AST invariants, LRU cache |
-| 10 | `test(integrity): replace synthetic dictionary tests with end-to-end regressions` | E2E test suite `test_scientific_integrity.py` |
-| 11 | `ci(evidence): make smoke green and preserve falsified full evidence` | CI smoke green, `if: always()` evidence preservation |
-| 12 | `docs(methodology): align all documentation with the frozen protocol` | Update methodology and repair status docs |
+- **Ruff Linter & Formatter:** Clean.
+- **Mypy Type Checker:** 0 errors across 63 files under permissive config.
+- **Pytest Suite:** 175 passing tests in baseline suite.
+- **Regression Suite:** 41 failing red tests in `tests/test_review_findings.py` reproducing findings A–O.
+- **Statement Coverage:** 86% across package statements.
+- **Packaging Build:** Wheel and sdist build successfully; standalone wheel import outside repo requires resource packaging fix.
+
+---
+
+## 2. Findings Ledger & Implementation Work Breakdown
+
+| Finding | Area | Status | Description |
+| :--- | :--- | :--- | :--- |
+| **A** | Protocol Harness | OPEN | Harness hard-codes comparison against SyncReAct; unsplit W7; positive control hardcoded. |
+| **B** | CLI Falsify | OPEN | `falsify` does not parse raw traces; reads stored `verdict` from `result.json`. |
+| **C** | Bundle Hashing | OPEN | Embedded manifest lacks `file_hashes`; `raw_trace_hash` omits baseline/controls; destination deleted before move. |
+| **D** | Oracle Separation | OPEN | Value-based whitelist fallback leaks non-prohibited keys; `validate_execution` ignores sequences/args/state. |
+| **E** | Authority Context | OPEN | `ApprovalGrant` is self-asserted and imported from `task.metadata`; truncated 16-char digest. |
+| **F** | Required Metrics | OPEN | Missing cost defaults to 1.0; pass/fail does not fail closed on missing required metrics. |
+| **G** | Local Workloads | OPEN | SQLite database state can accumulate between trials; local delays susceptible to OS jitter. |
+| **H** | E4 Parser | OPEN | Bypasses syntax closure on empty fragments; dispatches mutable calls; lacks argument match proof. |
+| **I** | E2 Fusion | OPEN | Auto-matches on context `user_id`; accepts task-supplied `DeclarativeWorkflow` objects. |
+| **J** | E3 Speculation | OPEN | Fixed/uncalibrated predictor confidence; lacks adapter concurrency contract. |
+| **K** | E5a Codec | OPEN | Action bytecode packet does not bind schema identity hash; lacks JSON direct benchmark. |
+| **L** | Cache Eviction | OPEN | Eviction is creation-time FIFO, not LRU; permits relaxed stale hits in strict evidence. |
+| **M** | Composite | OPEN | Overlapping dispatch ownership; bypasses cache lookup in execution path. |
+| **N** | Local Tools | OPEN | Subprocess uses `shell=True` without process-group kill; file tool has prefix-confusion escape. |
+| **O** | Packaging | OPEN | `load_frozen_protocol` fails on wheel install outside repo root; schema validation incomplete. |
+
+---
+
+## 3. Claim Audit Summary
+
+All claims of `INTEGRITY REPAIR COMPLETED — EVIDENCE READY`, full raw-trace recomputation, true LRU cache eviction, and isolated security sandboxing have been retracted and qualified across all documentation and PR surfaces.
