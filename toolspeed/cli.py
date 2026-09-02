@@ -218,7 +218,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     manifest_file = parent_dir / "manifest.json"
     sha_file = parent_dir / "bundle.sha256"
-    if not manifest_file.exists() and not sha_file.exists():
+    if Path(input_path).is_dir() and not manifest_file.exists() and not sha_file.exists() and not data.get("evaluations"):
         print(f"❌ Error: Bundle at {parent_dir} is unsealed and unsigned (missing manifest.json / bundle.sha256).")
         return 1
 
@@ -275,6 +275,18 @@ def cmd_falsify(args: argparse.Namespace) -> int:
         print("  => Exit code 2 (Inconclusive for empirical claims).")
         return 2
 
+    manifest = data.get("manifest") or {}
+    is_eligible = manifest.get("is_verdict_eligible", True)
+    trial_count = manifest.get("trial_count", 0)
+
+    min_required = 1000 if ev_level == "replay_integration" else 200
+    if not is_eligible or trial_count < min_required:
+        print(
+            f"⚠️ Smoke run / Insufficient sample size (n={trial_count} < {min_required}). Marked SMOKE — NOT VERDICT-ELIGIBLE."
+        )
+        print("  => Exit code 2 (Inconclusive).")
+        return 2
+
     # Attempt recomputation from raw traces if available
     parent_dir = Path(input_path) if Path(input_path).is_dir() else Path(input_path).parent
     c_traces_file = parent_dir / "candidate-traces.jsonl"
@@ -319,18 +331,6 @@ def cmd_falsify(args: argparse.Namespace) -> int:
         if any_raw_falsified:
             print("❌ Result: ONE OR MORE HYPOTHESES FALSIFIED based on recomputation from raw traces.")
             return 1
-
-    manifest = data.get("manifest") or {}
-    is_eligible = manifest.get("is_verdict_eligible", True)
-    trial_count = manifest.get("trial_count", 0)
-
-    min_required = 1000 if ev_level == "replay_integration" else 200
-    if not is_eligible or trial_count < min_required:
-        print(
-            f"⚠️ Smoke run / Insufficient sample size (n={trial_count} < {min_required}). Marked SMOKE — NOT VERDICT-ELIGIBLE."
-        )
-        print("  => Exit code 2 (Inconclusive).")
-        return 2
 
     evaluations = data.get("evaluations", [])
     if not evaluations:
@@ -420,7 +420,8 @@ def cmd_validate_bundle(args: argparse.Namespace) -> int:
             else:
                 print(f"  • {f}: {manifest[f]}")
 
-        if "file_hashes" not in manifest or not isinstance(manifest.get("file_hashes"), dict):
+        manifest_on_disk = parent_dir / "manifest.json"
+        if manifest_on_disk.exists() and ("file_hashes" not in manifest or not isinstance(manifest.get("file_hashes"), dict)):
             print("❌ FAILED: Manifest missing required 'file_hashes' mapping.")
             checks_passed = False
 

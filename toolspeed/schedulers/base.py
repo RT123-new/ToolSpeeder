@@ -104,8 +104,8 @@ class ExecutionContext:
     """Execution state tracked across a task run."""
 
     task: Task | AgentTask
-    config: SchedulerConfig
-    tools: ToolRegistry
+    config: SchedulerConfig = field(default_factory=SchedulerConfig)
+    tools: ToolRegistry = field(default_factory=ToolRegistry)
     clock: Any = None
     authority_context: ExecutionAuthorityContext | None = None
     initial_state: StateSnapshot | None = None

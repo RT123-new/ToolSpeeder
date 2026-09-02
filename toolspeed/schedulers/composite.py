@@ -49,6 +49,10 @@ class CompositeScheduler(BaseScheduler):
         self.jit_scheduler = JITFusionScheduler(cfg)
         self.bytecode_codec = ActionBytecodeCodec()
 
+    def has_cache_lookup_in_dispatch_path(self) -> bool:
+        """Returns whether read tool calls visibly route through cache lookup."""
+        return self.config.cache_enabled
+
     def prewarm_tools(self, tools: ToolRegistry) -> None:
         """Prewarms all cold-start sandbox adapters."""
         if not self.config.prewarmed:

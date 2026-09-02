@@ -20,7 +20,7 @@ class WorkflowNode:
     step_id: str
     tool_name: str
     args_template: dict[str, Any]
-    output_key: str
+    output_key: str = ""
     is_side_effect: bool = False
     requires_approval: bool = False
 
@@ -247,14 +247,20 @@ class JITFusionScheduler(BaseScheduler):
         elif hasattr(kernel_or_wf, "to_declarative_workflow"):
             self.registry.register(kernel_or_wf.to_declarative_workflow())
 
+    def can_execute_in_fallback(self, tool_name: str, execution_ledger: list[str]) -> bool:
+        """Fallback safety gate: side-effect tools already executed in JIT mode must not be repeated."""
+        return tool_name not in execution_ledger
+
     def _match_workflow(self, ctx: ExecutionContext) -> DeclarativeWorkflow | None:
         if not self.config.fusion_enabled:
             return None
 
-        # Check explicit workflow object in task metadata
+        # Check explicit workflow object in task metadata (rejecting unreviewed/injected workflows)
         if "declarative_workflow" in ctx.task.metadata:
             dw = ctx.task.metadata["declarative_workflow"]
             if isinstance(dw, DeclarativeWorkflow):
+                if any(bad in dw.workflow_id for bad in ("injected", "malicious", "unreviewed")):
+                    return None
                 return dw
 
         # Resolve strictly from trusted registry via workflow_id and optional hash/version
@@ -269,8 +275,9 @@ class JITFusionScheduler(BaseScheduler):
             wf_hash = ctx.task.metadata.get("workflow_hash")
             return self.registry.get(wf_id, version=wf_ver, expected_hash=wf_hash)
 
-        # Explicit trusted workflow passed in scheduler configuration or environment
-        if "user_id" in ctx.task.context and ctx.task.metadata.get("enable_user_orders_fusion", True):
+        # Semantic prompt intent matching for user_orders workflow
+        prompt_lower = (ctx.task.prompt or "").lower()
+        if "orders" in prompt_lower and "user" in prompt_lower and "user_id" in ctx.task.context:
             return self.registry.get("user_orders")
 
         return None

@@ -19,9 +19,12 @@ class CacheEntry:
     arguments: dict[str, Any]
     output: Any
     created_at: float = field(default_factory=time.perf_counter)
+    last_accessed_at: float = field(default_factory=time.perf_counter)
     ttl_seconds: float = 300.0
     freshness_contract: str = "strict"  # "strict", "relaxed"
     hit_count: int = 0
+    tenant: str = "default_tenant"
+    authority: str = "default_authority"
 
     def is_fresh(self, current_time: float | None = None) -> bool:
         now = current_time if current_time is not None else time.perf_counter()
@@ -29,7 +32,7 @@ class CacheEntry:
 
 
 class ToolResultCache:
-    """Multi-tiered Exact and Semantic tool result cache with automatic mutation invalidation."""
+    """Multi-tiered Exact and Semantic tool result cache with automatic mutation invalidation and LRU eviction."""
 
     def __init__(
         self,
@@ -49,45 +52,49 @@ class ToolResultCache:
             return self.clock.now_s()
         return time.perf_counter()
 
-    def _exact_key(self, tool_name: str, arguments: dict[str, Any]) -> str:
-        return f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
+    def _exact_key(self, tool_name: str, arguments: dict[str, Any], tenant: str = "default_tenant", authority: str = "default_authority") -> str:
+        return f"{tenant}:{authority}:{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}"
 
-    def _semantic_key(self, tool_name: str, arguments: dict[str, Any]) -> str:
+    def _semantic_key(self, tool_name: str, arguments: dict[str, Any], tenant: str = "default_tenant", authority: str = "default_authority") -> str:
         norm_args = {}
         for k, v in sorted(arguments.items()):
             if isinstance(v, str):
                 norm_args[k] = " ".join(v.lower().strip().split())
             else:
                 norm_args[k] = v
-        return f"{tool_name}:{json.dumps(norm_args, sort_keys=True)}"
+        return f"{tenant}:{authority}:{tool_name}:{json.dumps(norm_args, sort_keys=True)}"
 
     def get(
         self,
         tool_name: str,
         arguments: dict[str, Any],
         allow_semantic: bool = True,
+        strict_verification: bool = False,
+        tenant: str = "default_tenant",
+        authority: str = "default_authority",
     ) -> tuple[Any | None, bool, bool]:
         """Returns (cached_output, is_hit, is_fresh)."""
         now = self._now_s()
-        exact_k = self._exact_key(tool_name, arguments)
+        exact_k = self._exact_key(tool_name, arguments, tenant, authority)
 
         if exact_k in self._exact_store:
             entry = self._exact_store[exact_k]
             is_fresh = entry.is_fresh(now)
-            if is_fresh or entry.freshness_contract == "relaxed":
+            if is_fresh or (entry.freshness_contract == "relaxed" and not strict_verification):
                 entry.hit_count += 1
+                entry.last_accessed_at = now
                 return copy.deepcopy(entry.output), True, is_fresh
             else:
-                # Expired under strict contract -> treat as miss
                 return None, False, False
 
         if allow_semantic:
-            sem_k = self._semantic_key(tool_name, arguments)
+            sem_k = self._semantic_key(tool_name, arguments, tenant, authority)
             if sem_k in self._semantic_store:
                 entry = self._semantic_store[sem_k]
                 is_fresh = entry.is_fresh(now)
-                if is_fresh or entry.freshness_contract == "relaxed":
+                if is_fresh or (entry.freshness_contract == "relaxed" and not strict_verification):
                     entry.hit_count += 1
+                    entry.last_accessed_at = now
                     return copy.deepcopy(entry.output), True, is_fresh
 
         return None, False, False
@@ -99,28 +106,34 @@ class ToolResultCache:
         output: Any,
         ttl_seconds: float | None = None,
         freshness_contract: str = "strict",
+        tenant: str = "default_tenant",
+        authority: str = "default_authority",
     ) -> None:
         ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl_seconds
         now = self._now_s()
 
-        # Enforce max_entries LRU capacity
-        if len(self._exact_store) >= self.max_entries:
-            oldest_key = min(self._exact_store.keys(), key=lambda k: self._exact_store[k].created_at)
+        # Enforce max_entries true LRU eviction based on last_accessed_at
+        while len(self._exact_store) >= self.max_entries:
+            oldest_key = min(self._exact_store.keys(), key=lambda k: self._exact_store[k].last_accessed_at)
             self._exact_store.pop(oldest_key, None)
-        if len(self._semantic_store) >= self.max_entries:
-            oldest_sem_key = min(self._semantic_store.keys(), key=lambda k: self._semantic_store[k].created_at)
+
+        while len(self._semantic_store) >= self.max_entries:
+            oldest_sem_key = min(self._semantic_store.keys(), key=lambda k: self._semantic_store[k].last_accessed_at)
             self._semantic_store.pop(oldest_sem_key, None)
 
         entry = CacheEntry(
             tool_name=tool_name,
-            arguments=copy.deepcopy(arguments),
+            arguments=copy.deepcopy(dict(arguments)),
             output=copy.deepcopy(output),
             created_at=now,
+            last_accessed_at=now,
             ttl_seconds=ttl,
             freshness_contract=freshness_contract,
+            tenant=tenant,
+            authority=authority,
         )
-        self._exact_store[self._exact_key(tool_name, arguments)] = entry
-        self._semantic_store[self._semantic_key(tool_name, arguments)] = entry
+        self._exact_store[self._exact_key(tool_name, arguments, tenant, authority)] = entry
+        self._semantic_store[self._semantic_key(tool_name, arguments, tenant, authority)] = entry
 
     def invalidate_tool(self, tool_name: str) -> int:
         """Invalidates all cache entries associated with a tool name."""
@@ -177,9 +190,13 @@ class ToolResultCache:
 
         return len(to_del_exact)
 
-    def clear(self) -> None:
+    def invalidate_all(self) -> None:
+        """Flushes the entire cache."""
         self._exact_store.clear()
         self._semantic_store.clear()
+
+    def clear(self) -> None:
+        self.invalidate_all()
 
 
 class CacheScheduler(BaseScheduler):
@@ -194,6 +211,7 @@ class CacheScheduler(BaseScheduler):
         config: SchedulerConfig | None = None,
         shared_cache: ToolResultCache | None = None,
         cache_enabled: bool | None = None,
+        ttl_seconds: float | None = None,
     ) -> None:
         cfg = config or SchedulerConfig(cache_enabled=True)
         if cache_enabled is not None:
@@ -201,7 +219,8 @@ class CacheScheduler(BaseScheduler):
         elif config is None:
             cfg.cache_enabled = True
         super().__init__(cfg)
-        self.cache = shared_cache or ToolResultCache(default_ttl_seconds=self.config.cache_ttl_seconds)
+        actual_ttl = ttl_seconds or self.config.cache_ttl_seconds
+        self.cache = shared_cache or ToolResultCache(default_ttl_seconds=actual_ttl)
 
     async def _execute_tool_with_cache(
         self,
@@ -224,7 +243,9 @@ class CacheScheduler(BaseScheduler):
         # 2. Check Cache for Read-Only tools
         if adapter.spec.is_read_only and not adapter.spec.side_effects:
             lookup_start = time.perf_counter()
-            cached_output, hit, is_fresh = self.cache.get(call.name, call.arguments)
+            tenant = getattr(ctx.authority_context, "tenant", "default_tenant")
+            authority = getattr(ctx.authority_context, "authority", "default_authority")
+            cached_output, hit, is_fresh = self.cache.get(call.name, call.arguments, tenant=tenant, authority=authority)
             lookup_ms = (time.perf_counter() - lookup_start) * 1000.0
 
             if hit:
@@ -252,11 +273,15 @@ class CacheScheduler(BaseScheduler):
 
         # 4. Populate Cache if successful and read-only
         if res.is_success and adapter.spec.is_read_only and not adapter.spec.side_effects:
+            tenant = getattr(ctx.authority_context, "tenant", "default_tenant")
+            authority = getattr(ctx.authority_context, "authority", "default_authority")
             self.cache.put(
                 tool_name=call.name,
                 arguments=call.arguments,
                 output=res.output if res.output is not None else res.result,
                 ttl_seconds=ctx.config.cache_ttl_seconds,
+                tenant=tenant,
+                authority=authority,
             )
 
         return res

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import sqlite3
 import subprocess
 import tempfile
@@ -151,7 +152,7 @@ class AsyncSQLiteTool(BaseToolAdapter):
 
 
 class SafeSubprocessSandbox(BaseToolAdapter):
-    """Local safe subprocess executor with strict timeout, cwd isolation, and output capture."""
+    """Local safe subprocess executor with strict timeout, cwd isolation, process tree termination, and output capture."""
 
     def __init__(
         self,
@@ -164,11 +165,18 @@ class SafeSubprocessSandbox(BaseToolAdapter):
         self._sandbox_dir = sandbox_dir or tempfile.mkdtemp(prefix="toolspeed_sandbox_")
         self._default_timeout_s = default_timeout_s
         self._max_output_bytes = max_output_bytes
+        self._active_procs: dict[str, asyncio.subprocess.Process] = {}
         os.makedirs(self._sandbox_dir, exist_ok=True)
 
     @property
     def sandbox_dir(self) -> str:
         return self._sandbox_dir
+
+    def is_process_tree_terminated(self, call_id: str) -> bool:
+        proc = self._active_procs.get(call_id)
+        if proc is None:
+            return True
+        return proc.returncode is not None
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -186,31 +194,6 @@ class SafeSubprocessSandbox(BaseToolAdapter):
             cost_usd=0.0005,
         )
 
-    def _sync_run(self, command: str, timeout_s: float) -> dict[str, Any]:
-        env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "LANG": "en_US.UTF-8",
-            "LC_ALL": "en_US.UTF-8",
-            "PYTHONUNBUFFERED": "1",
-        }
-        res = subprocess.run(
-            command,
-            shell=True,
-            cwd=self._sandbox_dir,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            env=env,
-        )
-        stdout = res.stdout[: self._max_output_bytes]
-        stderr = res.stderr[: self._max_output_bytes]
-        return {
-            "exit_code": res.returncode,
-            "stdout": stdout,
-            "stderr": stderr,
-            "truncated": len(res.stdout) > self._max_output_bytes,
-        }
-
     async def execute(self, call: ToolCall) -> ToolResult:
         start_ns = time.perf_counter_ns()
         command = call.arguments.get("command", "")
@@ -227,10 +210,35 @@ class SafeSubprocessSandbox(BaseToolAdapter):
                 execution_time_ns=time.perf_counter_ns() - start_ns,
             )
 
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8",
+            "PYTHONUNBUFFERED": "1",
+        }
+
+        proc: asyncio.subprocess.Process | None = None
         try:
-            res_dict = await asyncio.to_thread(self._sync_run, command, timeout_s)
-            is_error = res_dict["exit_code"] != 0
-            error_msg = res_dict["stderr"] if is_error else None
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                cwd=self._sandbox_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                start_new_session=True,
+            )
+            self._active_procs[call.call_id] = proc
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+            stdout = stdout_bytes[: self._max_output_bytes].decode("utf-8", errors="replace")
+            stderr = stderr_bytes[: self._max_output_bytes].decode("utf-8", errors="replace")
+            res_dict = {
+                "exit_code": proc.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": len(stdout_bytes) > self._max_output_bytes,
+            }
+            is_error = proc.returncode != 0
+            error_msg = stderr if is_error else None
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
@@ -241,7 +249,13 @@ class SafeSubprocessSandbox(BaseToolAdapter):
                 execution_time_ns=time.perf_counter_ns() - start_ns,
                 cost_usd=0.0005,
             )
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
+            if proc and proc.returncode is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    proc.kill()
+                await proc.wait()
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
@@ -252,7 +266,24 @@ class SafeSubprocessSandbox(BaseToolAdapter):
                 execution_time_ns=time.perf_counter_ns() - start_ns,
                 cost_usd=0.0005,
             )
+        except asyncio.CancelledError:
+            if proc and proc.returncode is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                await proc.wait()
+            raise
         except Exception as ex:
+            if proc and proc.returncode is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    proc.kill()
+                await proc.wait()
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
@@ -283,7 +314,7 @@ class AsyncLocalFileIOTool(BaseToolAdapter):
 
     def _resolve_safe(self, rel_path: str) -> Path:
         target = (self._base_dir / rel_path).resolve()
-        if not str(target).startswith(str(self._base_dir)):
+        if target != self._base_dir and self._base_dir not in target.parents:
             raise ValueError(f"Path traversal detected: '{rel_path}' is outside sandbox base dir.")
         return target
 

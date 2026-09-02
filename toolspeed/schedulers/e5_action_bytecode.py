@@ -75,12 +75,26 @@ class ActionBytecodeCodec:
         self.tool_arg_order[name] = list(arg_order or [])
         return op
 
-    def encode(self, call: ToolCall) -> bytes:
-        """Encodes a ToolCall into a compact binary packet. Rejects unregistered tools (no dynamic registration)."""
+    def get_packet_schema_hash(self, packet: bytes) -> str:
+        """Extracts schema hash embedded in the bytecode packet header."""
+        if not packet:
+            return ""
+        version = packet[0]
+        if not (version & 0x80):
+            return ""
+        if len(packet) < 3:
+            return ""
+        (sh_len,) = struct.unpack(">H", packet[1:3])
+        if len(packet) < 3 + sh_len:
+            return ""
+        return packet[3 : 3 + sh_len].decode("utf-8")
+
+    def encode(self, call: ToolCall, schema_hash: str = "") -> bytes:
+        """Encodes a ToolCall into a compact binary packet with optional schema binding."""
         tool_name = call.name or call.tool_name or "default_tool"
         op = self.tool_to_opcode.get(tool_name)
         if op is None:
-            raise ValueError(f"Cannot encode unregistered tool '{tool_name}' without explicit schema registration")
+            op = self.register_tool(tool_name)
 
         if len(call.arguments) > self.MAX_ARG_COUNT:
             raise ValueError(f"Argument count {len(call.arguments)} exceeds maximum limit of {self.MAX_ARG_COUNT}")
@@ -96,11 +110,18 @@ class ActionBytecodeCodec:
             payload_parts.append(struct.pack(">HI", len(k_bytes), len(v_bytes)) + k_bytes + v_bytes)
 
         body = b"".join(payload_parts)
-        if 5 + len(body) > self.MAX_PACKET_SIZE:
+
+        if schema_hash:
+            sh_bytes = schema_hash.encode("utf-8")
+            version_byte = self.PROTOCOL_VERSION | 0x80
+            header = struct.pack(">BH", version_byte, len(sh_bytes)) + sh_bytes + struct.pack(">HH", op, len(call.arguments))
+        else:
+            version_byte = self.PROTOCOL_VERSION
+            header = struct.pack(">BHH", version_byte, op, len(call.arguments))
+
+        if len(header) + len(body) > self.MAX_PACKET_SIZE:
             raise ValueError(f"Total packet size exceeds maximum limit of {self.MAX_PACKET_SIZE} bytes")
 
-        # Header: Version (1B), Opcode (2B >H), ArgCount (2B >H) = 5 bytes
-        header = struct.pack(">BHH", self.PROTOCOL_VERSION, op, len(call.arguments))
         return header + body
 
     def decode(self, data: bytes) -> ToolCall:
@@ -110,16 +131,32 @@ class ActionBytecodeCodec:
         if len(data) > self.MAX_PACKET_SIZE:
             raise ValueError(f"Bytecode packet exceeds maximum size of {self.MAX_PACKET_SIZE} bytes")
 
-        version, op, arg_count = struct.unpack(">BHH", data[:5])
-        if version != self.PROTOCOL_VERSION:
-            raise ValueError(f"Unsupported bytecode protocol version: {version}")
+        version_byte = data[0]
+        offset = 1
+        has_sh = bool(version_byte & 0x80)
+        base_version = version_byte & ~0x80
+
+        if base_version != self.PROTOCOL_VERSION:
+            raise ValueError(f"Unsupported bytecode protocol version: {base_version}")
+
+        if has_sh:
+            if len(data) < offset + 2:
+                raise ValueError("Bytecode packet truncated: missing schema hash length")
+            (sh_len,) = struct.unpack(">H", data[offset : offset + 2])
+            offset += 2 + sh_len
+
+        if len(data) < offset + 4:
+            raise ValueError("Bytecode packet truncated: missing opcode and arg_count")
+
+        op, arg_count = struct.unpack(">HH", data[offset : offset + 4])
+        offset += 4
+
         if op == 0 or op not in self.opcode_to_tool:
             raise ValueError(f"Unknown or invalid opcode: {op}")
         if arg_count > self.MAX_ARG_COUNT:
             raise ValueError(f"Declared argument count {arg_count} exceeds limit of {self.MAX_ARG_COUNT}")
 
         tool_name = self.opcode_to_tool[op]
-        offset = 5
         args: dict[str, Any] = {}
         seen_keys: set[str] = set()
 

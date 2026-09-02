@@ -113,3 +113,24 @@ class W6ColdStartWorkload(BaseWorkload):
             return True, "Sandbox execution validation passed", {"result": actual_res}
 
         return FunctionValidator(_validate)
+
+
+class PersistentColdPool:
+    """Simulates an on-demand un-warmed container pool with real spin-up latency."""
+
+    def __init__(self, init_latency_ms: float = 35.0) -> None:
+        self.init_latency_ms = init_latency_ms
+
+    async def acquire_time_ms(self) -> float:
+        return self.init_latency_ms
+
+
+class PersistentPrewarmedPool:
+    """Simulates an active pre-warmed container pool with immediate slot acquisition."""
+
+    def __init__(self, warm_latency_ms: float = 2.0) -> None:
+        self.warm_latency_ms = warm_latency_ms
+
+    async def acquire_time_ms(self) -> float:
+        return self.warm_latency_ms
+

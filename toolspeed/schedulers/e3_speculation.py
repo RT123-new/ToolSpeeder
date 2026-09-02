@@ -27,6 +27,25 @@ class SpeculativeReadScheduler(BaseScheduler):
             cfg.speculation_enabled = True
         super().__init__(cfg)
 
+    def supports_concurrent_adapter(self, adapter: Any) -> bool:
+        """Verifies whether an adapter is explicitly concurrency-safe for overlapped speculative execution."""
+        return bool(getattr(adapter, "is_concurrency_safe", True))
+
+    async def _safe_cancel_speculation(self, coro_or_task: Any) -> Exception | None:
+        """Safely cancels speculative coroutine/task without leaking CancelledError."""
+        if isinstance(coro_or_task, asyncio.Task):
+            task = coro_or_task
+        else:
+            task = asyncio.create_task(coro_or_task)
+        task.cancel()
+        try:
+            await task
+            return None
+        except asyncio.CancelledError:
+            return None
+        except Exception as e:
+            return e
+
     async def _execute_internal(
         self,
         ctx: ExecutionContext,

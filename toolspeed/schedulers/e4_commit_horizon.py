@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, ToolRegistry
@@ -23,6 +24,14 @@ def _reject_duplicate_keys_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return res
 
 
+@dataclass
+class ReconciledCall:
+    call_id: str
+    original_call_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+
+
 class IncrementalCommitParser:
     """Incremental streaming parser and schema-aware commit validator.
 
@@ -37,6 +46,31 @@ class IncrementalCommitParser:
         self._buffer: str = ""
         self._token_index: int = 0
         self._byte_offset: int = 0
+        self._commits: dict[str, dict[str, Any]] = {}
+        self._semantic_index: dict[str, str] = {}
+
+    def register_commit(self, call_id: str, tool_name: str, arguments: dict[str, Any]) -> None:
+        self._commits[call_id] = {"tool_name": tool_name, "arguments": copy.deepcopy(arguments)}
+        fp = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}"
+        self._semantic_index[fp] = call_id
+
+    def can_reuse(self, call_id: str, tool_name: str, arguments: dict[str, Any]) -> bool:
+        if call_id not in self._commits:
+            return False
+        committed = self._commits[call_id]
+        if committed["tool_name"] != tool_name:
+            return False
+        return committed["arguments"] == arguments
+
+    def reconcile_call(self, call_id: str, tool_name: str, arguments: dict[str, Any]) -> ReconciledCall:
+        fp = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}"
+        orig_id = self._semantic_index.get(fp, call_id)
+        return ReconciledCall(
+            call_id=call_id,
+            original_call_id=orig_id,
+            tool_name=tool_name,
+            arguments=dict(arguments),
+        )
 
     def feed(self, delta_text: str) -> None:
         """Feed incremental character / token delta to parser buffer."""
@@ -125,16 +159,19 @@ class IncrementalCommitParser:
         ):
             return None
 
-        # Ensure syntax closure and duplicate key rejection if raw fragment is provided
-        if raw_fragment and raw_fragment.strip():
-            if not cls.is_syntax_closed(raw_fragment):
+        # Ensure raw_fragment is non-empty, syntactically closed, and matches raw_call.arguments
+        if not raw_fragment or not raw_fragment.strip():
+            return None
+        if not cls.is_syntax_closed(raw_fragment):
+            return None
+        try:
+            parsed = json.loads(raw_fragment, object_pairs_hook=_reject_duplicate_keys_hook)
+            if not isinstance(parsed, dict):
                 return None
-            try:
-                parsed = json.loads(raw_fragment, object_pairs_hook=_reject_duplicate_keys_hook)
-                if not isinstance(parsed, dict):
-                    return None
-            except (json.JSONDecodeError, ValueError):
+            if parsed != raw_call.arguments:
                 return None
+        except (json.JSONDecodeError, ValueError):
+            return None
 
         # Check required commit arguments are present and resolved
         commit_args = tool_spec.get_commit_args()
@@ -202,10 +239,14 @@ class CommitHorizonScheduler(BaseScheduler):
                             if adapter is None:
                                 continue
 
+                            frag = chunk.raw_json_fragment
+                            if not frag and early_call.committed_early:
+                                frag = json.dumps(early_call.arguments)
+
                             committed = IncrementalCommitParser.try_commit_call(
                                 tool_spec=adapter.spec,
                                 raw_call=early_call,
-                                raw_fragment=chunk.raw_json_fragment,
+                                raw_fragment=frag,
                                 token_index=chunk.token_index,
                                 byte_offset=parser.byte_offset,
                             )

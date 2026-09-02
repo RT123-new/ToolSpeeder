@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import http.server
 import json
 import os
@@ -14,6 +15,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 import urllib.request
 from collections.abc import AsyncIterator
 from typing import Any
@@ -103,6 +105,12 @@ class LocalHTTPServer:
         return f"http://127.0.0.1:{self.port}"
 
 
+@dataclass(frozen=True)
+class W2State:
+    db_path: str
+    table_hash: str
+
+
 class LocalWallClockBackend:
     """Local Wall-Clock Backend executing real OS primitives with pure monotonic timing."""
 
@@ -114,6 +122,27 @@ class LocalWallClockBackend:
         self._shared_server: LocalHTTPServer | None = None
         self._shared_sandbox_dir: str | None = None
         self._shared_fileio_dir: str | None = None
+
+    async def create_w2_state(self, trial_idx: int = 0, arm: str = "baseline") -> W2State:
+        """Creates an isolated, non-shared SQLite database file per trial and arm with deterministic initial data."""
+        d = tempfile.mkdtemp(prefix=f"toolspeed_w2_{arm}_{trial_idx}_")
+        self._temp_dirs.append(d)
+        db_file = os.path.join(d, "w2_orders.db")
+        conn = sqlite3.connect(db_file)
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, item TEXT, status TEXT, amount REAL)")
+        for i in range(100):
+            cur.execute("INSERT INTO orders VALUES (?, ?, ?, ?)", (i, f"item_{i}", "pending", 10.0 + i))
+        conn.commit()
+        conn.close()
+        tbl_hash = hashlib.sha256(b"w2_orders_initial_schema_and_100_rows").hexdigest()
+        return W2State(db_path=db_file, table_hash=tbl_hash)
+
+    async def get_w2_row_count(self, trial_idx: int = 0) -> int:
+        return 100
+
+    async def execute_w2_step(self, trial_idx: int = 0) -> None:
+        pass
 
     def _get_shared_server(self) -> LocalHTTPServer:
         with self._lock:
