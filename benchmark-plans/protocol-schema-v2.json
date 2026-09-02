@@ -1,0 +1,402 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ToolSpeedBenchmarkProtocolSchemaV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "plan_id",
+    "plan_version",
+    "status",
+    "is_frozen",
+    "description",
+    "workload_fixture_version",
+    "required_metric_policy_version",
+    "evidence_levels",
+    "seeds",
+    "trials_per_seed",
+    "smoke_trials_per_seed",
+    "timing_sources",
+    "warmup_policy",
+    "statistical_rules",
+    "missing_data_rule",
+    "failure_handling",
+    "cost_rule",
+    "safety_rule",
+    "stop_rule",
+    "amendment_process",
+    "central_hypothesis",
+    "mechanisms",
+    "controls"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "plan_id": {
+      "type": "string",
+      "minLength": 3
+    },
+    "plan_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[a-zA-Z0-9.]+)?$"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "retrospective_repair", "prospectively_frozen"]
+    },
+    "is_frozen": {
+      "type": "boolean"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 10
+    },
+    "workload_fixture_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "required_metric_policy_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "evidence_levels": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["synthetic", "replay_integration", "local_wall_clock", "live_production"]
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "seeds": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "trials_per_seed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replay_integration", "local_wall_clock"],
+      "properties": {
+        "replay_integration": {
+          "type": "integer",
+          "minimum": 100
+        },
+        "local_wall_clock": {
+          "type": "integer",
+          "minimum": 50
+        }
+      }
+    },
+    "smoke_trials_per_seed": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "timing_sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replay_integration", "local_wall_clock"],
+      "properties": {
+        "replay_integration": {
+          "type": "string",
+          "enum": ["virtual_clock"]
+        },
+        "local_wall_clock": {
+          "type": "string",
+          "enum": ["monotonic_wall_clock"]
+        }
+      }
+    },
+    "warmup_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trials", "symmetric", "isolated", "excluded_from_evidence"],
+      "properties": {
+        "trials": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "symmetric": {
+          "type": "boolean"
+        },
+        "isolated": {
+          "type": "boolean"
+        },
+        "excluded_from_evidence": {
+          "type": "boolean"
+        }
+      }
+    },
+    "statistical_rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bootstrap_resamples",
+        "bootstrap_ci",
+        "confidence_bound_rule",
+        "pairing_rule",
+        "multiplicity_policy"
+      ],
+      "properties": {
+        "bootstrap_resamples": {
+          "type": "integer",
+          "minimum": 500
+        },
+        "bootstrap_ci": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 0.999
+        },
+        "confidence_bound_rule": {
+          "type": "string",
+          "enum": ["one_sided_lower_bound_exceeds_threshold", "two_sided_interval_exceeds_threshold"]
+        },
+        "pairing_rule": {
+          "type": "string",
+          "enum": ["stratified_paired_index_bootstrap"]
+        },
+        "multiplicity_policy": {
+          "type": "string",
+          "enum": ["holm_bonferroni", "benjamini_hochberg", "none"]
+        }
+      }
+    },
+    "missing_data_rule": {
+      "type": "string",
+      "enum": ["strict_fail_closed_inconclusive", "penalized_timeout"]
+    },
+    "failure_handling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unsuccessful_trial_ccl_policy", "success_rate_difference_test"],
+      "properties": {
+        "unsuccessful_trial_ccl_policy": {
+          "type": "string",
+          "enum": ["conditional_on_both_success", "restricted_mean_survival_time"]
+        },
+        "success_rate_difference_test": {
+          "type": "string",
+          "enum": ["paired_difference_ci_lower_bound_non_inferior"]
+        }
+      }
+    },
+    "cost_rule": {
+      "type": "string"
+    },
+    "safety_rule": {
+      "type": "string"
+    },
+    "stop_rule": {
+      "type": "string"
+    },
+    "amendment_process": {
+      "type": "string"
+    },
+    "central_hypothesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "aggregation_rule"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 3
+        },
+        "description": {
+          "type": "string",
+          "minLength": 10
+        },
+        "aggregation_rule": {
+          "type": "string",
+          "enum": ["conjunction_all_primary_mechanisms"]
+        }
+      }
+    },
+    "amendment_ledger": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "date", "changes"],
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "mechanisms": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "mechanism_type",
+          "candidate",
+          "primary_attribution_baseline",
+          "practical_baseline",
+          "informational_baselines",
+          "status",
+          "thresholds"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "mechanism_type": {
+            "type": "string",
+            "enum": [
+              "parallel_execution",
+              "declarative_ast_fusion",
+              "speculative_read",
+              "result_caching",
+              "streaming_commit_horizon",
+              "persistent_pool_prewarm",
+              "safety_invariant_gate",
+              "preparation_latency",
+              "transport_codec",
+              "model_action_tokens"
+            ]
+          },
+          "candidate": {
+            "type": "string"
+          },
+          "primary_attribution_baseline": {
+            "type": "string"
+          },
+          "practical_baseline": {
+            "type": "string"
+          },
+          "informational_baselines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "type": "string",
+            "enum": ["ACTIVE", "UNIMPLEMENTED", "DEPRECATED"]
+          },
+          "thresholds": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "min_p95_speedup_efficacy": {
+                "type": "number",
+                "minimum": 0.5
+              },
+              "min_candidate_success_rate": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+              },
+              "max_allowable_success_drop": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+              },
+              "min_p99_speedup_non_regression": {
+                "type": "number",
+                "minimum": 0.5
+              },
+              "max_cost_multiplier": {
+                "type": "number",
+                "minimum": 0.5
+              },
+              "max_unapproved_side_effects": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_duplicate_commits": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "min_compression_ratio": {
+                "type": "number",
+                "minimum": 1.0
+              },
+              "max_decode_error_rate": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+              }
+            }
+          }
+        }
+      }
+    },
+    "controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["negative_controls", "positive_sensitivity_control"],
+      "properties": {
+        "negative_controls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "description", "expected_p95_speedup_range"],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "expected_p95_speedup_range": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          }
+        },
+        "positive_sensitivity_control": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "description",
+            "injected_delay_multiplier",
+            "expected_p95_speedup_range"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "injected_delay_multiplier": {
+              "type": "number",
+              "minimum": 1.0
+            },
+            "expected_p95_speedup_range": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          }
+        }
+      }
+    }
+  }
+}

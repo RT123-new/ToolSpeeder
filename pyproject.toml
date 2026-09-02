@@ -48,6 +48,9 @@ toolspeed = "toolspeed.cli:main"
 where = ["."]
 include = ["toolspeed*"]
 
+[tool.setuptools.package-data]
+"toolspeed" = ["resources/**/*", "py.typed"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

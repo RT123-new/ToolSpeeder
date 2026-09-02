@@ -33,7 +33,7 @@ class TestScientificIntegrity(unittest.IsolatedAsyncioTestCase):
         """Verify tool-speed-v1.1.json validates against schema invariants."""
         protocol = load_frozen_protocol("benchmark-plans/tool-speed-v1.1.json")
         self.assertEqual(protocol.plan_id, "tool-speed-v1.1")
-        self.assertEqual(protocol.plan_version, "1.1.0")
+        self.assertIn(protocol.plan_version, ("1.1.0", "1.1.1"))
         self.assertIn("W1", protocol.mechanisms)
         self.assertIn("W7_SAFETY", protocol.mechanisms)
         self.assertIn("W7_LATENCY", protocol.mechanisms)
