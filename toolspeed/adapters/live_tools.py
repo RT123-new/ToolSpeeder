@@ -7,7 +7,6 @@ import json
 import os
 import signal
 import sqlite3
-import subprocess
 import tempfile
 import threading
 import time

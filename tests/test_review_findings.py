@@ -7,69 +7,52 @@ findings identified in the exact-head review before implementation repairs.
 from __future__ import annotations
 
 import asyncio
-import copy
 import hashlib
 import json
-import os
-import shutil
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
-from toolspeed.adapters.base import BaseToolAdapter, ToolRegistry, ToolSchema
 from toolspeed.adapters.live_tools import AsyncLocalFileIOTool, SafeSubprocessSandbox
-from toolspeed.adapters.mock_tools import MockToolAdapter, MockToolConfig
 from toolspeed.benchmarks.harness import (
     BenchmarkConfig,
     BenchmarkHarness,
-    FROZEN_POLICY,
-    PairedWorkloadEvaluation,
 )
 from toolspeed.benchmarks.local_backend import LocalWallClockBackend
 from toolspeed.cli import cmd_falsify, cmd_validate_bundle
 from toolspeed.core.protocol import (
-    BenchmarkProtocol,
     load_frozen_protocol,
     validate_protocol_dict,
 )
 from toolspeed.core.types import (
-    MODEL_VISIBLE_METADATA_WHITELIST,
     AgentTask,
-    ApprovalGrant,
     BenchmarkCase,
-    CommittedCall,
     EvidenceLevel,
-    ExecutionAuthorityContext,
     ExpectedOutcome,
     StateSnapshot,
     Task,
-    TaskResult,
     ToolCall,
     ToolResult,
     ToolSpec,
     VerdictState,
     filter_model_visible_metadata,
 )
-from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
-from toolspeed.schedulers.e1_dag_scheduler import DAGScheduler
+from toolspeed.schedulers.base import ExecutionContext
 from toolspeed.schedulers.e2_jit_fusion import (
     DeclarativeWorkflow,
-    GLOBAL_WORKFLOW_REGISTRY,
     JITFusionScheduler,
     WorkflowNode,
 )
 from toolspeed.schedulers.e3_speculation import SpeculativeReadScheduler
 from toolspeed.schedulers.e4_commit_horizon import (
-    CommitHorizonScheduler,
     IncrementalCommitParser,
 )
 from toolspeed.schedulers.e5_action_bytecode import (
     ActionBytecodeCodec,
-    ActionBytecodeScheduler,
 )
-from toolspeed.schedulers.phase2_cache import CacheEntry, ToolResultCache
+from toolspeed.schedulers.phase2_cache import ToolResultCache
 from toolspeed.visualization.report import save_benchmark_reports
 
 
@@ -125,15 +108,17 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
                 expected_tool_sequence=["tool_a", "tool_b"],
             ),
         )
+
         # Trace with reversed sequence
         class DummyTrace:
-            tool_calls = [
-                ToolCall("c2", "tool_b", {}),
-                ToolCall("c1", "tool_a", {}),
-            ]
-            tool_results: list[Any] = []
+            def __init__(self) -> None:
+                self.tool_calls = [
+                    ToolCall("c2", "tool_b", {}),
+                    ToolCall("c1", "tool_a", {}),
+                ]
+                self.tool_results: list[Any] = []
 
-        valid, msg, _ = case.validate_execution(final_output="ok", trace=DummyTrace())
+        valid, _msg, _ = case.validate_execution(final_output="ok", trace=DummyTrace())
         self.assertFalse(valid, "ExpectedOutcome allowed out-of-order tool sequence to pass")
 
     def test_04_expected_exact_arguments_are_enforced(self) -> None:
@@ -147,14 +132,16 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
                 expected_arguments={"fund_transfer": {"amount": 500, "recipient": "alice"}},
             ),
         )
+
         # Trace with wrong arguments
         class DummyTrace:
-            tool_calls = [
-                ToolCall("c1", "fund_transfer", {"amount": 9999, "recipient": "attacker"}),
-            ]
-            tool_results: list[Any] = []
+            def __init__(self) -> None:
+                self.tool_calls = [
+                    ToolCall("c1", "fund_transfer", {"amount": 9999, "recipient": "attacker"}),
+                ]
+                self.tool_results: list[Any] = []
 
-        valid, msg, _ = case.validate_execution(final_output="ok", trace=DummyTrace())
+        valid, _msg, _ = case.validate_execution(final_output="ok", trace=DummyTrace())
         self.assertFalse(valid, "ExpectedOutcome allowed incorrect tool arguments to pass")
 
     def test_05_expected_state_diff_is_enforced(self) -> None:
@@ -168,9 +155,7 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         wrong_state = StateSnapshot({"balance": 9999})
-        valid, msg, _ = case.validate_execution(
-            final_output="ok", trace=None, final_state=wrong_state
-        )
+        valid, _msg, _ = case.validate_execution(final_output="ok", trace=None, final_state=wrong_state)
         self.assertFalse(valid, "ExpectedOutcome ignored invalid final state transition")
 
     def test_06_scripted_final_answer_fails_without_causal_tool_execution(self) -> None:
@@ -184,14 +169,14 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
                 required_tools=["compute_tool"],
             ),
         )
+
         # Final output matches exactly, but NO tools were executed (empty trace)
         class EmptyTrace:
-            tool_calls: list[Any] = []
-            tool_results: list[Any] = []
+            def __init__(self) -> None:
+                self.tool_calls: list[Any] = []
+                self.tool_results: list[Any] = []
 
-        valid, _, _ = case.validate_execution(
-            final_output={"result": 100}, trace=EmptyTrace()
-        )
+        valid, _, _ = case.validate_execution(final_output={"result": 100}, trace=EmptyTrace())
         self.assertFalse(valid, "Scripted final answer passed without executing required tools")
 
     # -------------------------------------------------------------------------
@@ -294,6 +279,7 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
             (bundle_dir / "result.json").write_text(json.dumps(forged_result))
 
             import argparse
+
             args = argparse.Namespace(input=str(bundle_dir))
             exit_code = cmd_falsify(args)
             self.assertNotEqual(
@@ -326,6 +312,7 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
             (bundle_dir / "result.json").write_text(json.dumps(data))
 
             import argparse
+
             args = argparse.Namespace(input=str(bundle_dir))
             exit_code = cmd_falsify(args)
             self.assertEqual(exit_code, 1, "falsify did not falsify when raw traces contradicted result.json")
@@ -339,8 +326,10 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
             bundle_dir = Path(tmpdir)
             (bundle_dir / "result.json").write_text(json.dumps({"evaluations": []}))
             # No manifest.json or bundle.sha256
-            from toolspeed.cli import cmd_report
             import argparse
+
+            from toolspeed.cli import cmd_report
+
             args = argparse.Namespace(input=str(bundle_dir), out=str(bundle_dir / "out"))
             code = cmd_report(args)
             self.assertNotEqual(code, 0, "report accepted an unsealed, unsigned bundle")
@@ -356,6 +345,7 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
             }
             (bundle_dir / "manifest.json").write_text(json.dumps(manifest))
             import argparse
+
             args = argparse.Namespace(input=str(bundle_dir))
             code = cmd_validate_bundle(args)
             self.assertNotEqual(code, 0, "validate-bundle accepted manifest lacking file_hashes")
@@ -370,7 +360,7 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
                 "evaluations": [],
                 "manifest": {"is_verdict_eligible": False},
             }
-            paths = save_benchmark_reports(data, out_dir)
+            save_benchmark_reports(data, out_dir)
             manifest = json.loads((out_dir / "manifest.json").read_text())
             actual_res_bytes = (out_dir / "result.json").read_bytes()
             actual_hash = hashlib.sha256(actual_res_bytes).hexdigest()
@@ -416,6 +406,7 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
             b_trace.write_text(b_trace.read_text() + '{"tampered": true}\n')
 
             import argparse
+
             args = argparse.Namespace(input=str(out_dir))
             code = cmd_validate_bundle(args)
             self.assertNotEqual(code, 0, "Tampered baseline trace was not detected by validate-bundle")
@@ -560,9 +551,11 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
     async def test_29_e3_draft_main_concurrency_with_non_threadsafe_adapter(self) -> None:
         """Finding J / Finding 29: E3 must verify adapter is declared concurrency-safe before overlapping calls."""
         scheduler = SpeculativeReadScheduler()
+
         # Mock adapter that is explicitly not concurrency safe
         class NonThreadSafeAdapter:
             is_concurrency_safe = False
+
         self.assertFalse(
             scheduler.supports_concurrent_adapter(NonThreadSafeAdapter()),
             "E3 allowed concurrent speculation with an adapter not declared concurrency-safe",
@@ -601,6 +594,7 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
     async def test_33_w6_has_actual_cold_warm_pool_distinction(self) -> None:
         """Finding G / Finding 33: W6 must implement and measure real PersistentColdPool vs PersistentPrewarmedPool."""
         from toolspeed.workloads.w6_cold_start import PersistentColdPool, PersistentPrewarmedPool
+
         cold = PersistentColdPool()
         warm = PersistentPrewarmedPool()
         t_cold = await cold.acquire_time_ms()
@@ -618,15 +612,18 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
             task=AgentTask("t1", "transfer 100"),
             expected_outcome=ExpectedOutcome(required_mutations=1),
         )
+
         class DuplicateMutationTrace:
-            tool_calls = [
-                ToolCall("c1", "transfer", {"amount": 100}),
-                ToolCall("c2", "transfer", {"amount": 100}),
-            ]
-            tool_results = [
-                ToolResult("c1", "transfer", "transfer", {"status": "ok"}, is_error=False),
-                ToolResult("c2", "transfer", "transfer", {"status": "ok"}, is_error=False),
-            ]
+            def __init__(self) -> None:
+                self.tool_calls = [
+                    ToolCall("c1", "transfer", {"amount": 100}),
+                    ToolCall("c2", "transfer", {"amount": 100}),
+                ]
+                self.tool_results = [
+                    ToolResult("c1", "transfer", "transfer", {"status": "ok"}, is_error=False),
+                    ToolResult("c2", "transfer", "transfer", {"status": "ok"}, is_error=False),
+                ]
+
         valid, _, _ = case.validate_execution(final_output="ok", trace=DuplicateMutationTrace())
         self.assertFalse(valid, "W7 permitted duplicate mutations without failing safety gate")
 
@@ -647,7 +644,8 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
 
     def test_36_e5a_comparison_settings_are_asymmetric(self) -> None:
         """Finding K / Finding 36: JSON and bytecode benchmark comparisons must use identical serialization."""
-        from toolspeed.benchmarks.codec_bench import get_json_codec, get_bytecode_codec
+        from toolspeed.benchmarks.codec_bench import get_bytecode_codec, get_json_codec
+
         json_c = get_json_codec()
         byte_c = get_bytecode_codec()
         self.assertEqual(json_c.float_precision_policy, byte_c.float_precision_policy)
@@ -678,7 +676,7 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
         cache.put("tool_1", {"id": 1}, output="stale_val", freshness_contract="relaxed")
         time.sleep(0.02)  # expire TTL
         # Under strict scientific verification, stale data must NOT be returned as fresh hit
-        val, hit, fresh = cache.get("tool_1", {"id": 1}, strict_verification=True)
+        _val, hit, _fresh = cache.get("tool_1", {"id": 1}, strict_verification=True)
         self.assertFalse(hit, "Cache returned expired stale entry under strict verification mode")
 
     def test_39_cache_entries_cross_tenant_or_authority_scope(self) -> None:
@@ -686,12 +684,13 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
         cache = ToolResultCache()
         cache.put("sensitive_query", {"q": "balance"}, output=1000, tenant="tenant_A")
         # Tenant B queries identical tool and arguments
-        val, hit, _ = cache.get("sensitive_query", {"q": "balance"}, tenant="tenant_B")
+        _val, hit, _ = cache.get("sensitive_query", {"q": "balance"}, tenant="tenant_B")
         self.assertFalse(hit, "Cache leaked entries across tenant isolation boundary")
 
     def test_40_composite_claims_caching_while_bypassing_cache_lookup(self) -> None:
         """Finding M / Finding 40: Composite scheduler must visibly route read tool calls through cache."""
         from toolspeed.schedulers.composite import CompositeScheduler
+
         scheduler = CompositeScheduler()
         self.assertTrue(
             scheduler.has_cache_lookup_in_dispatch_path(),
@@ -740,9 +739,9 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
     # -------------------------------------------------------------------------
     def test_43_wheel_cannot_load_protocol_outside_source_tree(self) -> None:
         """Finding O / Finding 43: Protocol must be packaged as package resource, not repo-relative path."""
-        import importlib.resources
         # Loading frozen protocol must work via importlib.resources or package resources
         from toolspeed.core.protocol import load_package_protocol
+
         protocol = load_package_protocol()
         self.assertIsNotNone(protocol, "Failed to load frozen protocol from package resources")
 

@@ -52,10 +52,22 @@ class ToolResultCache:
             return self.clock.now_s()
         return time.perf_counter()
 
-    def _exact_key(self, tool_name: str, arguments: dict[str, Any], tenant: str = "default_tenant", authority: str = "default_authority") -> str:
+    def _exact_key(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        tenant: str = "default_tenant",
+        authority: str = "default_authority",
+    ) -> str:
         return f"{tenant}:{authority}:{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}"
 
-    def _semantic_key(self, tool_name: str, arguments: dict[str, Any], tenant: str = "default_tenant", authority: str = "default_authority") -> str:
+    def _semantic_key(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        tenant: str = "default_tenant",
+        authority: str = "default_authority",
+    ) -> str:
         norm_args = {}
         for k, v in sorted(arguments.items()):
             if isinstance(v, str):

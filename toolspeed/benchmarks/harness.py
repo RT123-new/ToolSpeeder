@@ -11,14 +11,12 @@ import numpy as np
 
 from toolspeed.benchmarks.local_backend import LocalWallClockBackend
 from toolspeed.benchmarks.replay_backend import ReplayBackend
-from toolspeed.core.hypotheses import FROZEN_POLICY
 from toolspeed.core.protocol import (
     BenchmarkProtocol,
     HypothesisThresholds,
     load_package_protocol,
 )
 from toolspeed.core.types import (
-    ApprovalGrant,
     ApprovalIssuer,
     ArtifactManifest,
     EvidenceLevel,
@@ -572,7 +570,7 @@ class BenchmarkHarness:
             }
         )
 
-        pos_ctrl_plan = self.get_positive_sensitivity_control()
+        _pos_ctrl_plan = self.get_positive_sensitivity_control()
         controls.append(
             {
                 "control": "Positive_sensitivity_injected_50pct_speedup",

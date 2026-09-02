@@ -33,10 +33,7 @@ class SpeculativeReadScheduler(BaseScheduler):
 
     async def _safe_cancel_speculation(self, coro_or_task: Any) -> Exception | None:
         """Safely cancels speculative coroutine/task without leaking CancelledError."""
-        if isinstance(coro_or_task, asyncio.Task):
-            task = coro_or_task
-        else:
-            task = asyncio.create_task(coro_or_task)
+        task = coro_or_task if isinstance(coro_or_task, asyncio.Task) else asyncio.create_task(coro_or_task)
         task.cancel()
         try:
             await task

@@ -15,9 +15,9 @@ import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
 import urllib.request
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 
 from typing_extensions import Self

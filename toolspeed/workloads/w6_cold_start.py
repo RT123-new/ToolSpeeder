@@ -133,4 +133,3 @@ class PersistentPrewarmedPool:
 
     async def acquire_time_ms(self) -> float:
         return self.warm_latency_ms
-

@@ -50,7 +50,9 @@ class HypothesisThresholds:
         p95_val = data.get("min_p95_speedup_efficacy", data.get("p95_speedup_target"))
         is_safety = mechanism_type in ("safety_invariant_gate", "safety_gate")
         if p95_val is None and mechanism_type != "model_action_tokens" and not is_safety:
-            raise ProtocolValidationError("Missing required threshold 'min_p95_speedup_efficacy' or 'p95_speedup_target'")
+            raise ProtocolValidationError(
+                "Missing required threshold 'min_p95_speedup_efficacy' or 'p95_speedup_target'"
+            )
 
         succ_val = data.get("min_candidate_success_rate", data.get("min_success_rate", 0.95))
         drop_val = data.get("max_allowable_success_drop", data.get("max_success_drop", 0.0))
@@ -354,7 +356,9 @@ def load_frozen_protocol(plan_path: str | Path | None = None) -> BenchmarkProtoc
         trials_per_seed_replay=t_replay,
         trials_per_seed_local=t_local,
         smoke_trials=int(data.get("smoke_trials_per_seed", data.get("smoke_trials", 10))),
-        bootstrap_resamples=int(data.get("statistical_rules", {}).get("bootstrap_resamples", data.get("bootstrap_resamples", 2000))),
+        bootstrap_resamples=int(
+            data.get("statistical_rules", {}).get("bootstrap_resamples", data.get("bootstrap_resamples", 2000))
+        ),
         bootstrap_ci=float(data.get("statistical_rules", {}).get("bootstrap_ci", data.get("bootstrap_ci", 0.95))),
         warmup_trials=int(warmup.get("trials", 5)),
         warmup_symmetric=bool(warmup.get("symmetric", True)),

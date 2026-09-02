@@ -114,7 +114,9 @@ class ActionBytecodeCodec:
         if schema_hash:
             sh_bytes = schema_hash.encode("utf-8")
             version_byte = self.PROTOCOL_VERSION | 0x80
-            header = struct.pack(">BH", version_byte, len(sh_bytes)) + sh_bytes + struct.pack(">HH", op, len(call.arguments))
+            header = (
+                struct.pack(">BH", version_byte, len(sh_bytes)) + sh_bytes + struct.pack(">HH", op, len(call.arguments))
+            )
         else:
             version_byte = self.PROTOCOL_VERSION
             header = struct.pack(">BHH", version_byte, op, len(call.arguments))

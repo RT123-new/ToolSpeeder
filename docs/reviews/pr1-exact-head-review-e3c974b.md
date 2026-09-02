@@ -55,7 +55,13 @@ Every blocking finding was audited and reproduced directly against the source co
   - Lines 240–250: Global `FROZEN_POLICY` is hard-coded into evaluation thresholds rather than reading mechanism-specific thresholds from `benchmark-plans/tool-speed-v1.1.json`.
   - Lines 458–468: Positive sensitivity control is hard-coded as literal dictionary:
     ```python
-    {"control": "Positive_sensitivity_injected_50pct_speedup", "p95_speedup": 2.00, "measured_speedup": 2.00, "passed_expected_null": True, "null_check": "PASS"}
+    {
+        "control": "Positive_sensitivity_injected_50pct_speedup",
+        "p95_speedup": 2.00,
+        "measured_speedup": 2.00,
+        "passed_expected_null": True,
+        "null_check": "PASS",
+    }
     ```
     rather than being executed and measured through the pipeline.
   - Workload W7 is evaluated as a single latency check rather than splitting into `W7_SAFETY` and `W7_LATENCY`.
@@ -80,9 +86,7 @@ Every blocking finding was audited and reproduced directly against the source co
 - **Evidence:** 
   - `toolspeed/core/types.py` lines 170–172:
     ```python
-    if k in MODEL_VISIBLE_METADATA_WHITELIST or not any(
-        p in str(v).lower() for p in PROHIBITED_METADATA_SUBSTRINGS
-    ):
+    if k in MODEL_VISIBLE_METADATA_WHITELIST or not any(p in str(v).lower() for p in PROHIBITED_METADATA_SUBSTRINGS):
         result[k] = v
     ```
     Non-whitelisted keys whose string values do not match prohibited substrings pass through into `AgentTask.metadata`.

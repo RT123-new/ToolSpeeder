@@ -365,7 +365,7 @@ class ApprovalGrant:
 
     @staticmethod
     def compute_fingerprint(tool_name: str, arguments: Mapping[str, Any]) -> str:
-        fp_payload = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}".encode("utf-8")
+        fp_payload = f"{tool_name}:{json.dumps(dict(arguments), sort_keys=True)}".encode()
         return hashlib.sha256(fp_payload).hexdigest()
 
     @staticmethod
@@ -380,9 +380,7 @@ class ApprovalGrant:
         tenant: str,
         run_id: str,
     ) -> str:
-        msg = f"{approval_id}:{tool_name}:{argument_fingerprint}:{expires_at:.6f}:{authority}:{nonce}:{tenant}:{run_id}".encode(
-            "utf-8"
-        )
+        msg = f"{approval_id}:{tool_name}:{argument_fingerprint}:{expires_at:.6f}:{authority}:{nonce}:{tenant}:{run_id}".encode()
         return hmac.new(secret, msg, hashlib.sha256).hexdigest()
 
     @classmethod
@@ -648,7 +646,7 @@ class BenchmarkCase:
                 return False, "Expected tool sequence not executed", details
             executed_tool_names = [getattr(c, "name", None) or getattr(c, "tool_name", "") for c in trace.tool_calls]
             exp_seq = list(self.expected_outcome.expected_tool_sequence)
-            if list(executed_tool_names[:len(exp_seq)]) != exp_seq:
+            if list(executed_tool_names[: len(exp_seq)]) != exp_seq:
                 details["errors"].append(f"Expected tool sequence {exp_seq}, got {executed_tool_names}")
                 return False, "Executed tool sequence did not match expected sequence", details
 
@@ -663,25 +661,34 @@ class BenchmarkCase:
                     exp_args = exp_args_map[t_name]
                     actual_args = getattr(call, "arguments", {})
                     if actual_args != exp_args:
-                        details["errors"].append(f"Arguments mismatch on {t_name}: expected {exp_args}, got {actual_args}")
+                        details["errors"].append(
+                            f"Arguments mismatch on {t_name}: expected {exp_args}, got {actual_args}"
+                        )
                         return False, f"Tool arguments for '{t_name}' did not match expected", details
 
         # 1d. Check required mutations
-        if self.expected_outcome.required_mutations > 0:
-            if trace is not None and getattr(trace, "tool_calls", None):
-                mut_calls = [c for c in trace.tool_calls if not getattr(c, "is_read_only", True)]
-                if len(mut_calls) != self.expected_outcome.required_mutations:
-                    details["errors"].append(
-                        f"Expected {self.expected_outcome.required_mutations} mutations, found {len(mut_calls)}"
-                    )
-                    return False, f"Mutation count {len(mut_calls)} did not match expected {self.expected_outcome.required_mutations}", details
+        if self.expected_outcome.required_mutations > 0 and trace is not None and getattr(trace, "tool_calls", None):
+            mut_calls = [c for c in trace.tool_calls if not getattr(c, "is_read_only", True)]
+            if len(mut_calls) != self.expected_outcome.required_mutations:
+                details["errors"].append(
+                    f"Expected {self.expected_outcome.required_mutations} mutations, found {len(mut_calls)}"
+                )
+                return (
+                    False,
+                    f"Mutation count {len(mut_calls)} did not match expected {self.expected_outcome.required_mutations}",
+                    details,
+                )
 
         # 1e. Check expected state diff or final state
         exp_state = dict(self.expected_outcome.expected_final_state)
         if self.expected_outcome.expected_state_diff:
             exp_state.update(self.expected_outcome.expected_state_diff)
         if exp_state and final_state is not None:
-            state_dict = final_state.data if hasattr(final_state, "data") else (final_state if isinstance(final_state, dict) else {})
+            state_dict = (
+                final_state.data
+                if hasattr(final_state, "data")
+                else (final_state if isinstance(final_state, dict) else {})
+            )
             for k, v in exp_state.items():
                 if state_dict.get(k) != v:
                     details["errors"].append(f"State mismatch on '{k}': expected {v}, got {state_dict.get(k)}")
@@ -1341,7 +1348,9 @@ class Task:
             prompt=self.prompt,
             workload_family=self.metadata.get("workload_family", "default"),
             context=sanitize_model_visible_data(copy.deepcopy(dict(self.context))),
-            parameters=sanitize_model_visible_data(copy.deepcopy(dict(self.metadata.get("parameters", self.parameters)))),
+            parameters=sanitize_model_visible_data(
+                copy.deepcopy(dict(self.metadata.get("parameters", self.parameters)))
+            ),
             metadata=filtered_meta,
         )
 

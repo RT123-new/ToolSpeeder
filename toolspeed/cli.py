@@ -16,6 +16,8 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
 import numpy as np
 
 from toolspeed.benchmarks.harness import BenchmarkConfig, BenchmarkHarness
@@ -218,7 +220,12 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     manifest_file = parent_dir / "manifest.json"
     sha_file = parent_dir / "bundle.sha256"
-    if Path(input_path).is_dir() and not manifest_file.exists() and not sha_file.exists() and not data.get("evaluations"):
+    if (
+        Path(input_path).is_dir()
+        and not manifest_file.exists()
+        and not sha_file.exists()
+        and not data.get("evaluations")
+    ):
         print(f"❌ Error: Bundle at {parent_dir} is unsealed and unsigned (missing manifest.json / bundle.sha256).")
         return 1
 
@@ -421,7 +428,9 @@ def cmd_validate_bundle(args: argparse.Namespace) -> int:
                 print(f"  • {f}: {manifest[f]}")
 
         manifest_on_disk = parent_dir / "manifest.json"
-        if manifest_on_disk.exists() and ("file_hashes" not in manifest or not isinstance(manifest.get("file_hashes"), dict)):
+        if manifest_on_disk.exists() and (
+            "file_hashes" not in manifest or not isinstance(manifest.get("file_hashes"), dict)
+        ):
             print("❌ FAILED: Manifest missing required 'file_hashes' mapping.")
             checks_passed = False
 
