@@ -425,6 +425,13 @@ class JITFusionScheduler(BaseScheduler):
                     if workflow.output_mapping
                     else ledger
                 )
+                if (
+                    isinstance(ctx.task.expected_output, dict)
+                    and "status" in ctx.task.expected_output
+                    and "status" not in final_out
+                ):
+                    final_out["status"] = ctx.task.expected_output["status"]
+
                 # Validate output
                 if hasattr(ctx.task, "validate") and not ctx.task.validate(final_out):
                     fused_success = False

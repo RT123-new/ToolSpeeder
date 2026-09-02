@@ -129,9 +129,16 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         f"Evidence Level: {evidence_level.value} | Trials: {trials} per condition | Seed: {args.seed} | Out: {out_dir}\n"
     )
 
+    seeds_list = (
+        [int(s.strip()) for s in args.seeds.split(",")]
+        if getattr(args, "seeds", None)
+        else [args.seed, args.seed + 1, args.seed + 2]
+    )
+
     config = BenchmarkConfig(
         trials_per_condition=trials,
         seed=args.seed,
+        seeds=seeds_list,
         evidence_level=evidence_level,
         concurrency_limit=args.concurrency,
         include_negative_controls=True,
@@ -533,6 +540,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Number of trials per condition (defaults: replay=1000, local=200)",
     )
     p_bm.add_argument("--seed", "-s", type=int, default=20260825, help="Random seed")
+    p_bm.add_argument(
+        "--seeds",
+        type=str,
+        default=None,
+        help="Comma-separated random seeds (defaults to 3 seeds for confirmatory eligibility)",
+    )
     p_bm.add_argument("--concurrency", "-c", type=int, default=16, help="Concurrency limit")
     p_bm.add_argument("--out", "-o", type=str, default=None, help="Output directory")
     p_bm.add_argument("--require-pass", action="store_true", help="Exit non-zero if overall verdict is not PASSED")
