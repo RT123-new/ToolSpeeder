@@ -27,6 +27,13 @@ from toolspeed.core.rate_limiter import (
     RateLimiter,
     RateLimitError,
 )
+from toolspeed.core.statistics import (
+    InsufficientSampleSizeError,
+    PairedDifferenceInference,
+    PowerAnalysisConfig,
+    compute_min_sample_size,
+    compute_paired_inference,
+)
 from toolspeed.core.types import (
     ApprovalGrant,
     ApprovalIssuer,
@@ -70,11 +77,14 @@ __all__ = [
     "GuardrailMetrics",
     "GuardrailMonitor",
     "GuardrailTracker",
+    "InsufficientSampleSizeError",
     "LatencyProfile",
     "LatencyProfiler",
     "LatencyStats",
     "MissingMetricError",
     "NanosecondProfiler",
+    "PairedDifferenceInference",
+    "PowerAnalysisConfig",
     "RateLimitError",
     "RateLimiter",
     "RuntimeAuthorityProvider",
@@ -92,6 +102,8 @@ __all__ = [
     "WorkloadSpec",
     "calculate_percentiles",
     "compute_latency_stats",
+    "compute_min_sample_size",
+    "compute_paired_inference",
     "compute_speedup",
     "evaluate_strict_metrics_verdict",
     "is_metric_present",
