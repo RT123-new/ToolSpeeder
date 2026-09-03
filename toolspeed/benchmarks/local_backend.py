@@ -254,10 +254,10 @@ class LocalWallClockBackend:
         elif workload_id == "W2":
             return Task(
                 task_id=f"w2_local_s{eff_seed}_t{trial_index:04d}",
-                prompt=f"Execute SQLite user orders chain for user u_{eff_seed}_{trial_index}",
-                context={"user_id": f"u_{eff_seed}_{trial_index}"},
+                prompt=f"Execute SQLite user orders chain for user u_{trial_index}",
+                context={"user_id": f"u_{trial_index}"},
                 expected_output={
-                    "user": {"user_id": f"u_{eff_seed}_{trial_index}", "name": f"User_{trial_index}"},
+                    "user": {"user_id": f"u_{trial_index}", "name": f"User_{trial_index}"},
                     "orders": {"order_count": 2},
                     "status": "compiled_complete",
                     "fused": True,
@@ -477,7 +477,7 @@ class LocalWallClockBackend:
                     },
                 ),
             ]
-            model = LocalScriptedAdapter(decisions=decisions, decision_delay_s=0.001)
+            model = LocalScriptedAdapter(decisions=decisions, decision_delay_s=0.01)
             return registry, model
 
         elif workload_id == "W3":
