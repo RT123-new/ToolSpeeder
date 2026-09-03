@@ -132,12 +132,16 @@ REGISTERED_SCHEDULER_NAMES: set[str] = {
     "HandwrittenWorkflowScheduler",
     "SpeculativeReadScheduler",
     "SpeculativeReadScheduler_spec_disabled",
+    "SpeculativeReadScheduler_speculation_disabled",
     "CacheScheduler",
     "CacheScheduler_cache_disabled",
+    "CacheScheduler_caching_disabled",
     "CommitHorizonScheduler",
     "CommitHorizonScheduler_early_dispatch_disabled",
+    "CommitHorizonScheduler_commit_horizon_disabled",
     "PersistentPrewarmedPool",
     "PersistentColdPool",
+    "TransactionalAuthorityScheduler",
     "AuthorizedExecutionPath",
     "IdenticalAuthorizedExecutionPath",
     "SequentialExecutionPath",
@@ -148,6 +152,8 @@ REGISTERED_SCHEDULER_NAMES: set[str] = {
     "JSONCodec",
     "SyncReActScheduler",
     "CompositeScheduler",
+    "DirectActionTokenModel",
+    "StandardTextGenerationModel",
     "UnimplementedDirectActionModel",
     "StandardTokenGeneration",
 }
@@ -229,10 +235,59 @@ def validate_protocol_dict(data: dict[str, Any]) -> list[str]:
     if "missing_data_policy" not in data and "missing_data_rule" not in data:
         errors.append("Missing required top-level field: 'missing_data_policy' or 'missing_data_rule'")
 
+    # v1.3 strict requirements
+    is_v1_3 = "v1.3" in str(data.get("plan_id", "")) or str(data.get("plan_version", "")).startswith("1.3")
+    if is_v1_3:
+        v1_3_required = [
+            "author",
+            "date",
+            "git_sha_at_authoring",
+            "purpose",
+            "previous_protocol_reference",
+            "supported_execution_modes",
+            "required_metrics",
+            "hypothesis_verdict_rules",
+        ]
+        for vreq in v1_3_required:
+            if vreq not in data:
+                errors.append(f"Protocol v1.3 missing required field: '{vreq}'")
+
+        modes = data.get("supported_execution_modes", [])
+        if not isinstance(modes, list) or not set(["smoke", "exploratory", "confirmatory"]).issubset(set(modes)):
+            errors.append("Protocol v1.3 must support 'smoke', 'exploratory', and 'confirmatory' modes")
+
+        req_metrics = data.get("required_metrics", [])
+        expected_req_metrics = {
+            "p95_ccl_ms",
+            "p95_speedup",
+            "p99_ccl_ms",
+            "candidate_success_rate",
+            "baseline_success_rate",
+            "relative_success_delta",
+            "cost_multiplier",
+            "memory_high_water_mark_mb",
+            "safety_violations_count",
+        }
+        if not isinstance(req_metrics, list) or not expected_req_metrics.issubset(set(req_metrics)):
+            errors.append("Protocol v1.3 missing one or more of 9 required metrics without defaults")
+
     # Seeds validation
     seeds = data.get("seeds")
-    if not isinstance(seeds, list) or len(seeds) == 0:
-        errors.append("Field 'seeds' must be a non-empty list of unique integers")
+    if isinstance(seeds, dict):
+        exp = seeds.get("exploratory")
+        conf = seeds.get("confirmatory")
+        if not isinstance(exp, list) or len(exp) == 0:
+            errors.append("Field 'seeds.exploratory' must be a non-empty list of integers")
+        if not isinstance(conf, list) or len(conf) == 0:
+            errors.append("Field 'seeds.confirmatory' must be a non-empty list of integers")
+        if exp and conf and len(set(exp).intersection(set(conf))) > 0:
+            errors.append("Exploratory and confirmatory seeds must not overlap")
+        if conf and set(conf).intersection({42, 137, 2026}):
+            errors.append("Retrospective seeds (42, 137, 2026) must not be reused as confirmatory seeds")
+    elif not isinstance(seeds, list) or len(seeds) == 0:
+        errors.append(
+            "Field 'seeds' must be a non-empty list of unique integers or an object with exploratory and confirmatory lists"
+        )
     elif len(seeds) != len(set(seeds)):
         errors.append("Field 'seeds' contains duplicate seed values")
 
@@ -338,10 +393,16 @@ def load_frozen_protocol(plan_path: str | Path | None = None) -> BenchmarkProtoc
     t_local = 200
     if "trials_per_seed" in data and isinstance(data["trials_per_seed"], dict):
         t_replay = int(data["trials_per_seed"].get("replay_integration", 1000))
-        t_local = int(data["trials_per_seed"].get("local_wall_clock", 200))
     elif "trials_per_seed_replay" in data:
         t_replay = int(data["trials_per_seed_replay"])
         t_local = int(data["trials_per_seed_local"])
+
+    seeds_raw = data.get("seeds", [])
+    seeds_list: list[int] = (
+        list(seeds_raw.get("exploratory", [])) + list(seeds_raw.get("confirmatory", []))
+        if isinstance(seeds_raw, dict)
+        else list(seeds_raw)
+    )
 
     return BenchmarkProtocol(
         plan_id=data["plan_id"],
@@ -352,7 +413,7 @@ def load_frozen_protocol(plan_path: str | Path | None = None) -> BenchmarkProtoc
         workload_fixture_version=data["workload_fixture_version"],
         required_metric_policy_version=data["required_metric_policy_version"],
         evidence_levels=list(data["evidence_levels"]),
-        seeds=list(data["seeds"]),
+        seeds=seeds_list,
         trials_per_seed_replay=t_replay,
         trials_per_seed_local=t_local,
         smoke_trials=int(data.get("smoke_trials_per_seed", data.get("smoke_trials", 10))),
