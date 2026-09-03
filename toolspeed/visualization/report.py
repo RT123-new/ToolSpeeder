@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from toolspeed.benchmarks.bundle import capture_environment_metadata, get_current_git_commit
 from toolspeed.core.types import EvidenceLevel, compute_file_sha256, strict_json_dumps
 from toolspeed.experiments.full_suite import SuiteResult
 from toolspeed.visualization.charts import (
@@ -699,18 +700,22 @@ def save_benchmark_reports(
         # 1. Traces JSONL files & Cases
         baseline_traces_path = staging_dir / "baseline-traces.jsonl"
         candidate_traces_path = staging_dir / "candidate-traces.jsonl"
+        raw_traces_path = staging_dir / "raw-traces.jsonl"
         controls_traces_path = staging_dir / "controls-traces.jsonl"
         cases_path = staging_dir / "cases.jsonl"
 
         with (
             open(baseline_traces_path, "w", encoding="utf-8") as f_b,
             open(candidate_traces_path, "w", encoding="utf-8") as f_c,
+            open(raw_traces_path, "w", encoding="utf-8") as f_raw,
             open(cases_path, "w", encoding="utf-8") as f_cases,
         ):
             if hasattr(result, "evaluations") and result.evaluations:
                 for ev in result.evaluations:
                     for idx, r_c in enumerate(ev.candidate_results):
-                        f_c.write(json.dumps(r_c.to_dict()) + "\n")
+                        line_c = json.dumps(r_c.to_dict()) + "\n"
+                        f_c.write(line_c)
+                        f_raw.write(line_c)
                         f_cases.write(
                             json.dumps({"workload_id": ev.workload_id, "trial_index": idx, "task_id": r_c.task_id})
                             + "\n"
@@ -720,6 +725,7 @@ def save_benchmark_reports(
             else:
                 f_b.write(json.dumps({"info": "baseline_traces"}) + "\n")
                 f_c.write(json.dumps({"info": "candidate_traces"}) + "\n")
+                f_raw.write(json.dumps({"info": "raw_traces"}) + "\n")
                 f_cases.write(json.dumps({"info": "cases"}) + "\n")
 
         with open(controls_traces_path, "w", encoding="utf-8") as f_ctrl:
@@ -745,12 +751,24 @@ def save_benchmark_reports(
         protocol_path.write_text(proto_content, encoding="utf-8")
         bm_plan_path.write_text(proto_content, encoding="utf-8")
 
+        # 2b. Provenance: git-commit.txt and environment.json
+        git_commit_sha = get_current_git_commit()
+        git_commit_path = staging_dir / "git-commit.txt"
+        git_commit_path.write_text(f"{git_commit_sha}\n", encoding="utf-8")
+
+        env_path = staging_dir / "environment.json"
+        env_meta = capture_environment_metadata()
+        env_path.write_text(strict_json_dumps(env_meta, indent=2), encoding="utf-8")
+
         # 3. Compute early payload hashes
         proto_hash = compute_file_sha256(protocol_path)
         cases_hash = compute_file_sha256(cases_path)
         c_trace_hash = compute_file_sha256(candidate_traces_path)
+        raw_trace_hash = compute_file_sha256(raw_traces_path)
         b_trace_hash = compute_file_sha256(baseline_traces_path)
         ctrl_trace_hash = compute_file_sha256(controls_traces_path)
+        git_commit_hash = compute_file_sha256(git_commit_path)
+        env_hash = compute_file_sha256(env_path)
 
         # 4. Reports (MD and HTML)
         md_path = staging_dir / "report.md"
@@ -789,9 +807,9 @@ def save_benchmark_reports(
         manifest["fixture_manifest_hash"] = cases_hash
         manifest["candidate_trace_hash"] = c_trace_hash
         manifest["baseline_trace_hash"] = b_trace_hash
-        manifest["raw_trace_hash"] = c_trace_hash
+        manifest["raw_trace_hash"] = raw_trace_hash
         manifest["controls_trace_hash"] = ctrl_trace_hash
-        manifest["code_git_sha"] = manifest.get("code_git_sha") or manifest.get("git_sha", "unknown")
+        manifest["code_git_sha"] = git_commit_sha
         manifest["trial_count"] = manifest.get(
             "trial_count",
             len(data.get("evaluations", [{}])[0].get("candidate_results", [])) if data.get("evaluations") else 0,
@@ -803,10 +821,13 @@ def save_benchmark_reports(
             "report.html": compute_file_sha256(html_path),
             "baseline-traces.jsonl": b_trace_hash,
             "candidate-traces.jsonl": c_trace_hash,
+            "raw-traces.jsonl": raw_trace_hash,
             "controls-traces.jsonl": ctrl_trace_hash,
             "cases.jsonl": cases_hash,
             "protocol.json": proto_hash,
             "benchmark-plan.json": proto_hash,
+            "git-commit.txt": git_commit_hash,
+            "environment.json": env_hash,
             "falsification.json": compute_file_sha256(falsification_path),
         }
         manifest["file_hashes"] = dict(file_hashes)
@@ -826,11 +847,17 @@ def save_benchmark_reports(
         manifest_path = staging_dir / "manifest.json"
         manifest_path.write_text(strict_json_dumps(manifest, indent=2), encoding="utf-8")
 
+        # 9b. Detached seal manifest.sig
+        manifest_hash = compute_file_sha256(manifest_path)
+        manifest_sig_path = staging_dir / "manifest.sig"
+        manifest_sig_path.write_text(f"{manifest_hash}\n", encoding="utf-8")
+
         # 10. Checksum bundle.sha256 file
         all_checksums = dict(file_hashes)
         all_checksums["result.json"] = res_hash
         all_checksums["benchmark_result.json"] = bm_res_hash
-        all_checksums["manifest.json"] = compute_file_sha256(manifest_path)
+        all_checksums["manifest.json"] = manifest_hash
+        all_checksums["manifest.sig"] = compute_file_sha256(manifest_sig_path)
         bundle_sha_path = staging_dir / "bundle.sha256"
         checksum_lines = [f"{hash_val}  {fname}" for fname, hash_val in sorted(all_checksums.items())]
         bundle_sha_path.write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
@@ -845,6 +872,7 @@ def save_benchmark_reports(
             "markdown": final_out / "report.md",
             "html": final_out / "report.html",
             "manifest": final_out / "manifest.json",
+            "manifest_sig": final_out / "manifest.sig",
             "bundle_sha": final_out / "bundle.sha256",
         }
     except Exception:
