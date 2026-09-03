@@ -1,6 +1,15 @@
 """Core module for ToolSpeed: types, profiler, guardrails, and rate limiters."""
 
 from toolspeed.core.guardrails import GuardrailMonitor, GuardrailTracker
+from toolspeed.core.metrics import (
+    V1_3_REQUIRED_METRICS,
+    MissingMetricError,
+    StrictMetricBundle,
+    evaluate_strict_metrics_verdict,
+    is_metric_present,
+    parse_strict_metric_bundle,
+    validate_metric_presence,
+)
 from toolspeed.core.profiler import (
     CCLTracker,
     LatencyProfiler,
@@ -44,6 +53,7 @@ from toolspeed.core.types import (
 )
 
 __all__ = [
+    "V1_3_REQUIRED_METRICS",
     "ApprovalGrant",
     "ApprovalIssuer",
     "AsyncConcurrencyLimiter",
@@ -63,12 +73,14 @@ __all__ = [
     "LatencyProfile",
     "LatencyProfiler",
     "LatencyStats",
+    "MissingMetricError",
     "NanosecondProfiler",
     "RateLimitError",
     "RateLimiter",
     "RuntimeAuthorityProvider",
     "SpanContext",
     "SpanRecord",
+    "StrictMetricBundle",
     "Task",
     "TaskInstance",
     "TaskResult",
@@ -81,4 +93,8 @@ __all__ = [
     "calculate_percentiles",
     "compute_latency_stats",
     "compute_speedup",
+    "evaluate_strict_metrics_verdict",
+    "is_metric_present",
+    "parse_strict_metric_bundle",
+    "validate_metric_presence",
 ]
