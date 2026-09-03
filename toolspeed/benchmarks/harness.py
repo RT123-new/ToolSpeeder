@@ -22,6 +22,7 @@ from toolspeed.core.types import (
     ArtifactManifest,
     EvidenceLevel,
     ExecutionAuthorityContext,
+    ExecutionTrace,
     Task,
     TaskResult,
     VerdictState,
@@ -395,11 +396,13 @@ class BenchmarkHarness:
             backend_wl = "W7" if "W7" in workload_id else workload_id
             tools_w_b, model_w_b = self.backend.create_workload_environment(backend_wl, trial_index=w)
             sched_w_b = baseline_cls(SchedulerConfig(concurrency_limit=self.config.concurrency_limit), **b_kw)
-            await sched_w_b.execute(task_w_b, model_w_b, tools_w_b, authority_context=auth_w_b)
+            task_w_b_sched = task_w_b.to_model_task() if hasattr(task_w_b, "to_model_task") else task_w_b
+            task_w_c_sched = task_w_c.to_model_task() if hasattr(task_w_c, "to_model_task") else task_w_c
+            await sched_w_b.execute(task_w_b_sched, model_w_b, tools_w_b, authority_context=auth_w_b)
 
             tools_w_c, model_w_c = self.backend.create_workload_environment(backend_wl, trial_index=w)
             sched_w_c = candidate_cls(SchedulerConfig(concurrency_limit=self.config.concurrency_limit))
-            await sched_w_c.execute(task_w_c, model_w_c, tools_w_c, authority_context=auth_w_c)
+            await sched_w_c.execute(task_w_c_sched, model_w_c, tools_w_c, authority_context=auth_w_c)
 
         for i in range(trials):
             task_b = task_factory(i)
@@ -441,15 +444,45 @@ class BenchmarkHarness:
             )
 
             # Counterbalance execution order per trial to eliminate sequence bias
+            task_b_sched = task_b.to_model_task() if hasattr(task_b, "to_model_task") else task_b
+            task_c_sched = task_c.to_model_task() if hasattr(task_c, "to_model_task") else task_c
             run_candidate_first = i % 2 == 1
             if run_candidate_first:
                 execution_order.append("candidate_first")
-                res_c = await c_sched.execute(task_c, model_c, tools_c, authority_context=auth_ctx_c)
-                res_b = await b_sched.execute(task_b, model_b, tools_b, authority_context=auth_ctx_b)
+                res_c = await c_sched.execute(task_c_sched, model_c, tools_c, authority_context=auth_ctx_c)
+                res_b = await b_sched.execute(task_b_sched, model_b, tools_b, authority_context=auth_ctx_b)
             else:
                 execution_order.append("baseline_first")
-                res_b = await b_sched.execute(task_b, model_b, tools_b, authority_context=auth_ctx_b)
-                res_c = await c_sched.execute(task_c, model_c, tools_c, authority_context=auth_ctx_c)
+                res_b = await b_sched.execute(task_b_sched, model_b, tools_b, authority_context=auth_ctx_b)
+                res_c = await c_sched.execute(task_c_sched, model_c, tools_c, authority_context=auth_ctx_c)
+
+            trace_b = ExecutionTrace(
+                task_id=task_b.task_id,
+                arm="baseline",
+                workload_id=workload_id,
+                success=res_b.success,
+                final_output=res_b.final_answer,
+                tool_calls=list(res_b.tool_calls),
+                tool_results=list(res_b.tool_results),
+                events=list(res_b.events),
+            )
+            trace_c = ExecutionTrace(
+                task_id=task_c.task_id,
+                arm="candidate",
+                workload_id=workload_id,
+                success=res_c.success,
+                final_output=res_c.final_answer,
+                tool_calls=list(res_c.tool_calls),
+                tool_results=list(res_c.tool_results),
+                events=list(res_c.events),
+            )
+
+            res_b.success = task_b.validate(res_b.final_answer, trace=trace_b)
+            res_c.success = task_c.validate(res_c.final_answer, trace=trace_c)
+            if not res_b.success:
+                res_b.ccl_ms = None
+            if not res_c.success:
+                res_c.ccl_ms = None
 
             baseline_results.append(res_b)
             candidate_results.append(res_c)

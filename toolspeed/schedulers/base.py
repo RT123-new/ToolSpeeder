@@ -15,7 +15,6 @@ from toolspeed.core.types import (
     AgentTask,
     ApprovalGrant,
     ExecutionAuthorityContext,
-    ExecutionTrace,
     StateSnapshot,
     Task,
     TaskResult,
@@ -230,19 +229,7 @@ class BaseScheduler(ABC):
             else:
                 final_answer = await self._execute_internal(ctx, model, tools)
 
-            temp_trace = ExecutionTrace(
-                task_id=task.task_id,
-                success=True,
-                final_output=final_answer,
-                tool_calls=list(ctx.tool_calls),
-                tool_results=list(ctx.tool_results),
-                events=list(ctx.profiler.events),
-            )
-
-            if isinstance(task, Task):
-                success = task.validate(final_answer, trace=temp_trace, initial_state=initial_state)
-            else:
-                success = True
+            success = True
 
         except asyncio.TimeoutError:
             error = f"Execution timed out after {self.config.timeout_seconds}s"
