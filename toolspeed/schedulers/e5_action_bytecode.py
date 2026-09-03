@@ -126,8 +126,8 @@ class ActionBytecodeCodec:
 
         return header + body
 
-    def decode(self, data: bytes) -> ToolCall:
-        """Decodes binary bytecode back into a structured ToolCall, validating length, bounds, and duplicate keys."""
+    def decode(self, data: bytes, expected_schema_hash: str = "") -> ToolCall:
+        """Decodes binary bytecode back into a structured ToolCall, validating length, bounds, duplicate keys, and schema hash."""
         if len(data) < 5:
             raise ValueError(f"Bytecode packet too short: expected at least 5 bytes header, got {len(data)}")
         if len(data) > self.MAX_PACKET_SIZE:
@@ -141,11 +141,26 @@ class ActionBytecodeCodec:
         if base_version != self.PROTOCOL_VERSION:
             raise ValueError(f"Unsupported bytecode protocol version: {base_version}")
 
+        packet_sh = ""
         if has_sh:
             if len(data) < offset + 2:
                 raise ValueError("Bytecode packet truncated: missing schema hash length")
             (sh_len,) = struct.unpack(">H", data[offset : offset + 2])
-            offset += 2 + sh_len
+            offset += 2
+            if len(data) < offset + sh_len:
+                raise ValueError("Bytecode packet truncated: missing schema hash body")
+            packet_sh = data[offset : offset + sh_len].decode("utf-8")
+            offset += sh_len
+
+        if expected_schema_hash:
+            if not has_sh:
+                raise ValueError(
+                    f"Schema identity mismatch before decode: expected '{expected_schema_hash}', but packet has no embedded schema hash"
+                )
+            if packet_sh != expected_schema_hash:
+                raise ValueError(
+                    f"Schema identity mismatch before decode: expected '{expected_schema_hash}', got '{packet_sh}'"
+                )
 
         if len(data) < offset + 4:
             raise ValueError("Bytecode packet truncated: missing opcode and arg_count")

@@ -33,8 +33,14 @@ class CanonicalJSONCodec:
         }
         return json.dumps(data, sort_keys=True, allow_nan=False).encode("utf-8")
 
-    def decode(self, payload: bytes) -> ToolCall:
+    def decode(self, payload: bytes, expected_schema_hash: str = "") -> ToolCall:
         data = json.loads(payload.decode("utf-8"))
+        if expected_schema_hash:
+            packet_sh = data.get("schema_hash", "")
+            if packet_sh != expected_schema_hash:
+                raise ValueError(
+                    f"Schema identity mismatch before decode: expected '{expected_schema_hash}', got '{packet_sh}'"
+                )
         return ToolCall(
             call_id=data["call_id"],
             tool_name=data["tool_name"],
