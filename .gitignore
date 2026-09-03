@@ -29,5 +29,6 @@ artifacts/local/
 artifacts/confirmatory_*/
 artifacts/smoke_test/
 artifacts/replay_*/
+artifacts/noncanonical/
 evidence-*
 smoke-*
