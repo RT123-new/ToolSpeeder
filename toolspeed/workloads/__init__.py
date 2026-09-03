@@ -16,7 +16,13 @@ from toolspeed.workloads.w2_chains import (
     evaluate_w2_compilation_vs_step_by_step,
     execute_compiled_plan,
 )
-from toolspeed.workloads.w3_branching import W3BranchingWorkload
+from toolspeed.workloads.w3_branching import (
+    W3BranchingWorkload,
+    W3DraftInjectingAdapter,
+    W3SpeculationFailurePoint,
+    W3SpeculationSweepReport,
+    evaluate_w3_speculation_failure_sweep,
+)
 from toolspeed.workloads.w4_locality import W4LocalityWorkload
 from toolspeed.workloads.w5_large_payloads import W5LargePayloadsWorkload
 from toolspeed.workloads.w6_cold_start import W6ColdStartWorkload
@@ -33,11 +39,15 @@ __all__ = [
     "W2ComparisonResult",
     "W2DynamicDependencyCompiler",
     "W3BranchingWorkload",
+    "W3DraftInjectingAdapter",
+    "W3SpeculationFailurePoint",
+    "W3SpeculationSweepReport",
     "W4LocalityWorkload",
     "W5LargePayloadsWorkload",
     "W6ColdStartWorkload",
     "W7SideEffectsWorkload",
     "evaluate_w1_concurrency_pressure",
     "evaluate_w2_compilation_vs_step_by_step",
+    "evaluate_w3_speculation_failure_sweep",
     "execute_compiled_plan",
 ]
