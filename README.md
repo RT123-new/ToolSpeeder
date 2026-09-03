@@ -11,23 +11,36 @@ ToolSpeed evaluates and optimizes the serial critical path latency (Correct Comp
 
 ## 📋 Current Status & Integrity State
 
-> **Current status:** integrity repair in progress.  
-> **Current CI status:** compatibility and smoke checks pass on commit `e3c974be61d58df0c2870a098099f1371a161c10`.  
-> **Current confirmatory evidence:** not yet collected under a valid frozen protocol.  
-> **Replay/local smoke outputs:** operational tests only, not verdict-eligible.  
-> **Live evidence:** absent.  
-> **Historical numerical outputs:** noncanonical legacy data and must not be used for scientific claims.
+```text
+INTEGRITY REPAIR INCOMPLETE
 
-### Claim Audit Table
+The September 2 replay runs are retained as noncanonical exploratory
+diagnostics. They do not satisfy the seed, comparison, control, oracle,
+artifact, or prospective-protocol requirements for confirmatory evidence.
 
-| Claim | Previous Location | Verified? | Exact Evidence | Corrected Wording |
+The current exact-head CI status is in progress (restored strict typing,
+zero mypy errors, test suite running across Python 3.10–3.13).
+
+No canonical confirmatory replay evidence exists.
+
+No canonical confirmatory local evidence exists.
+
+Live evidence is absent.
+```
+
+### Claim Audit & Retraction Table
+
+| Claim | Prior Location | Verified State | Corrected Wording | Evidence |
 | :--- | :--- | :--- | :--- | :--- |
-| "INTEGRITY REPAIR COMPLETED — EVIDENCE READY" | PR #1 Body | **REFUTED** | Skipped CI full-evidence sweep; unaddressed architectural findings A–O. | Current status: integrity repair in progress. |
-| "Recomputed directly from raw traces" | PR #1 Body, `cli.py` | **REFUTED** | `cli.py:289-307` reads stored `evaluations` from `result.json`. | Evaluated from stored summaries; raw-trace recomputation pending implementation. |
-| "Full bundle validation pass" | PR #1 Body | **QUALIFIED** | Validated only on smoke runs; no canonical full-sweep bundle exists. | Compatibility and smoke checks pass; canonical evidence uncollected. |
-| "LRU capacity enforcement" | `phase2_cache.py`, README | **REFUTED** | `phase2_cache.py:108` evicts by creation timestamp (FIFO). | Bounded FIFO eviction with separate sub-store limits. |
-| "Safe Subprocess Sandbox with memory caps and SIGKILL" | `SECURITY.md`, README | **REFUTED** | `live_tools.py:198` uses `shell=True`, no memory cap, no process-tree kill. | Controlled local execution tool; not an isolated security sandbox. |
-| "Prospectively frozen protocol v1.1" | `tool-speed-v1.1.json` | **QUALIFIED** | Authored retrospectively after initial implementation exploration. | Retrospective repair protocol v1.1; draft v1.2 required. |
+| "INTEGRITY REPAIR COMPLETED — CONFIRMATORY FALSIFICATION REPORTED" | PR #1 Body, Status | **RETRACTED** | `INTEGRITY REPAIR INCOMPLETE` | CI was red at `be36503`; E2 oracle leak; controls hard-coded; protocol unverified. |
+| "100% quality gates passing" | PR #1 Body | **RETRACTED** | CI failed across all Python versions at `be36503`. Restored locally at `5cfef2e`. | GitHub Actions run `33682319407`. |
+| "Confirmatory empirical benchmark (3 seeds)" | PR #1 Body, Status | **RETRACTED** | Noncanonical exploratory diagnostics. | Harness did not loop seeds; CLI synthesized artificial seed arrays. |
+| "Recomputed directly from raw traces" | PR #1 Body, `cli.py` | **RETRACTED** | Evaluated from stored summaries with weak fallbacks. | `cli.py:316-368` uses fallback latencies, default success, tests only 1.0x. |
+| "Cryptographically sealed canonical evidence" | PR #1 Body, `report.py` | **RETRACTED** | Unsealed/inconsistent manifests; excluded by `.gitignore`. | `raw_trace_hash` covers candidate only; `result_hash` missing from embedded manifest. |
+| "All findings A–O resolved" | PR #1 Body | **RETRACTED** | Partially patched via test-facing facades. | Methods like `create_w2_state` and `PersistentColdPool.acquire_time_ms` were stubs. |
+| "True execution controls" | PR #1 Body, `harness.py` | **RETRACTED** | Hard-coded literal return values. | `run_negative_controls()` returned literal 1.0 and 2.0 dictionaries without running arms. |
+| "W7 safety verified" | PR #1 Body | **RETRACTED** | Unverified mock tool responses without durable ledger. | Tools returned static dicts; no account balance or state transition ledger existed. |
+| "E5a codec falsified" | PR #1 Body | **RETRACTED** | Unmeasured; scheduler compared against scheduler. | `codec_bench.py` was a 21-line stub; no codec vs JSON round-trip measured. |
 
 ---
 

@@ -11,8 +11,8 @@ ToolSpeed executes and orchestrates automated AI agent tool calling pipelines. B
    Any tool with `side_effects=True` or `is_read_only=False` requires an active, valid approval grant. Schedulers must not manufacture authorization grants.
 3. **Speculation & Horizon Safety**:
    Speculative reads and early commit horizons are restricted by contract to tools declared read-only and idempotent. Mutative tools are rejected from speculative execution.
-4. **Controlled Local Tool Execution**:
-   Local tools (`AsyncLocalFileIOTool`, `SafeSubprocessSandbox`) operate within designated temporary working directories with configured execution timeouts. They are controlled benchmark execution tools and do not provide hardened OS-level multi-tenant container isolation or hard memory caps.
+4. **Controlled Local Tool Execution & Limitations**:
+   Local tools (`AsyncLocalFileIOTool`, `SafeSubprocessSandbox`) operate within designated temporary working directories with configured execution timeouts. They are controlled local execution utilities for benchmark measurement and DO NOT provide hardened OS-level multi-tenant container isolation, memory caps, network isolation, or syscall filtering. They must not be treated as adversarial security boundaries.
 5. **Rate Limiting**:
    `RateLimiter` enforces capacity bounds, unified deadline timeouts, and non-blocking token refunds on cancellation.
 6. **Bytecode Transport Codec**:

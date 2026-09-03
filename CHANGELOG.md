@@ -3,17 +3,15 @@
 All notable changes to ToolSpeed are documented in this file.
 
 ## [Unreleased] - Integrity Repair Phase
-
-### Corrected & Retracted
-- **Claim Retraction**: Retracted `INTEGRITY REPAIR COMPLETED — EVIDENCE READY` claim from PR #1 body. Set authoritative verdict to `INTEGRITY REPAIR INCOMPLETE`.
-- **Documentation Alignment**: Updated `README.md`, `SECURITY.md`, `docs/PR1_REPAIR_STATUS.md`, and `docs/KNOWN_LIMITATIONS.md` with required status language:
-  - Current status: integrity repair in progress.
-  - Current CI status: compatibility and smoke checks pass on `e3c974be61d58df0c2870a098099f1371a161c10`.
-  - Current confirmatory evidence: not yet collected under a valid frozen protocol.
-  - Replay/local smoke outputs: operational tests only, not verdict-eligible.
-  - Live evidence: absent.
-- **Security Claim Normalization**: Removed claims of OS-level memory caps, SIGKILL process tree termination, and mathematically prohibited speculation from `SECURITY.md`.
-- **Regression Suite**: Added `tests/test_review_findings.py` with failing regression tests reproducing findings A through O.
+ 
+### Retracted Claims & Interim Status
+- **Authoritative Status**: Set to `INTEGRITY REPAIR INCOMPLETE`.
+- **Confirmatory Replay Claim Retraction**: Retracted `INTEGRITY REPAIR COMPLETED — CONFIRMATORY FALSIFICATION REPORTED`. Reclassified September 2 runs as noncanonical exploratory diagnostics.
+- **CI Quality Gates**: Retracted `100% quality gates passing` for head `be36503` where CI was red due to 6 mypy errors. Restored strict typing and removed E2 oracle leak at `5cfef2e`.
+- **Seed Matrix Retraction**: Retracted claims of 3 independent confirmatory seeds; harness did not iterate seed arrays and CLI synthesized synthetic seed lists.
+- **Controls Retraction**: Retracted claims of verified execution controls; negative and positive controls were hard-coded dictionaries.
+- **Facade Retraction**: Retracted resolution of findings A–O that relied on test-facing stubs (`create_w2_state`, `PersistentColdPool.acquire_time_ms`, etc.).
+- **Oracle Barrier**: Removed `expected_output` and `validate` access from JIT fusion scheduler; added AST regression test `tests/test_oracle_static_barrier.py`.
 
 ## [0.2.0] - 2026-08-28
 

@@ -8,10 +8,13 @@ This document details current scientific and engineering limitations of the Tool
 
 ## 2. Evidence Eligibility Limitations
 - **Operational Smoke Runs**: Smoke runs (`n=10–50` trials) are operational smoke tests only and are strictly `INCONCLUSIVE` (`is_verdict_eligible: false`).
-- **Confirmatory Evidence**: Confirmatory evidence requires 3 preregistered seeds ($\ge 1,000$ trials/seed for Replay, $\ge 200$ trials/seed for Local Wall-Clock) executed under a prospectively frozen protocol. Such evidence has not yet been collected at the current head.
+- **September 2 Replay Runs**: Retained as noncanonical exploratory diagnostics. Executed under retrospective v1.1 protocol rules with single-process loops, synthetic seed arrays, and hardcoded control dicts. They do not satisfy prospective confirmatory requirements.
+- **Confirmatory Evidence**: Confirmatory evidence requires 3 preregistered seeds ($\ge 1,000$ trials/seed for Replay, $\ge 200$ trials/seed for Local Wall-Clock) executed under a prospectively frozen protocol from a clean code tree. Such evidence has not yet been collected.
 
-## 3. Protocol Status
-- **Protocol v1.1**: Authored retrospectively after initial implementation exploration; serves as a repair protocol. A draft successor (`tool-speed-v1.2-draft.json`) is required to formally specify machine-evaluable hypothesis rules.
+## 3. Protocol Lineage & Prospective Governance
+- **Protocol v1.1**: Retrospective repair protocol. Not prospective.
+- **Protocol v1.2-draft**: Unfrozen exploratory draft. Seeds and thresholds visible during exploratory runs; cannot be frozen retroactively.
+- **Protocol v1.3-draft**: Prospective protocol defining explicit execution modes, machine-evaluable statistical inference, and strict Draft 2020-12 validation. Must be frozen prior to confirmatory execution.
 
 ## 4. E5b Direct Token Generation vs E5a Transport Codec
 - **E5a (Implemented)**: Action Bytecode transport serialization codec. Provides binary packet compression and wire serialization efficiency. It does NOT accelerate upstream model reasoning or token generation.
