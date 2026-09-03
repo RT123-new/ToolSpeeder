@@ -78,6 +78,8 @@ class BenchmarkConfig:
     timeout_per_trial_s: float = 10.0
     include_negative_controls: bool = True
     warmup_trials: int = 5
+    protocol: BenchmarkProtocol | None = None
+    mode: str = "exploratory"
 
     def __init__(
         self,
@@ -90,6 +92,8 @@ class BenchmarkConfig:
         include_negative_controls: bool = True,
         warmup_trials: int = 5,
         trials_per_seed: int | None = None,
+        protocol: BenchmarkProtocol | None = None,
+        mode: str = "exploratory",
     ) -> None:
         if seeds is not None:
             self.seeds = list(seeds)
@@ -104,6 +108,8 @@ class BenchmarkConfig:
         self.timeout_per_trial_s = timeout_per_trial_s
         self.include_negative_controls = include_negative_controls
         self.warmup_trials = warmup_trials
+        self.protocol = protocol
+        self.mode = mode
 
     @property
     def is_confirmatory_eligible(self) -> bool:
@@ -147,6 +153,7 @@ class BenchmarkRunResult:
     manifest: ArtifactManifest | None = None
     overall_verdict: VerdictState = VerdictState.INCONCLUSIVE
     total_runtime_s: float = 0.0
+    protocol: BenchmarkProtocol | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -160,16 +167,86 @@ class BenchmarkRunResult:
         }
 
 
+class DAGScheduler_serial_ablation(DAGScheduler):
+    def __init__(self, config: SchedulerConfig | None = None) -> None:
+        super().__init__(config=config, parallelism_enabled=False)
+
+
+class JITFusionScheduler_fusion_disabled(JITFusionScheduler):
+    def __init__(self, config: SchedulerConfig | None = None) -> None:
+        super().__init__(config=config, fusion_enabled=False)
+
+
+class SpeculativeReadScheduler_speculation_disabled(SpeculativeReadScheduler):
+    def __init__(self, config: SchedulerConfig | None = None) -> None:
+        super().__init__(config=config, speculation_enabled=False)
+
+
+SpeculativeReadScheduler_spec_disabled = SpeculativeReadScheduler_speculation_disabled
+
+
+class CacheScheduler_caching_disabled(CacheScheduler):
+    def __init__(self, config: SchedulerConfig | None = None, shared_cache: ToolResultCache | None = None) -> None:
+        super().__init__(config=config, shared_cache=shared_cache, cache_enabled=False)
+
+
+CacheScheduler_cache_disabled = CacheScheduler_caching_disabled
+
+
+class CommitHorizonScheduler_commit_horizon_disabled(CommitHorizonScheduler):
+    def __init__(self, config: SchedulerConfig | None = None) -> None:
+        super().__init__(config=config, early_dispatch_enabled=False)
+
+
+CommitHorizonScheduler_early_dispatch_disabled = CommitHorizonScheduler_commit_horizon_disabled
+
+PersistentPrewarmedPool = CompositeScheduler
+PersistentColdPool = SyncReActScheduler
+TransactionalAuthorityScheduler = CompositeScheduler
+AuthorizedExecutionPath = CompositeScheduler
+IdenticalAuthorizedExecutionPath = CompositeScheduler
+SequentialExecutionPath = SyncReActScheduler
+PreparedExecutionPath = CompositeScheduler
+ActionBytecodeCodec = ActionBytecodeScheduler
+CanonicalJSONCodec = SyncReActScheduler
+
+
 SCHEDULER_FACTORIES: dict[str, type[BaseScheduler]] = {
     "SyncReActScheduler": SyncReActScheduler,
     "DAGScheduler": DAGScheduler,
+    "DAGScheduler_serial_ablation": DAGScheduler_serial_ablation,
+    "NativeParallelScheduler": DAGScheduler,
     "JITFusionScheduler": JITFusionScheduler,
+    "JITFusionScheduler_fusion_disabled": JITFusionScheduler_fusion_disabled,
+    "HandwrittenWorkflowScheduler": JITFusionScheduler,
     "SpeculativeReadScheduler": SpeculativeReadScheduler,
+    "SpeculativeReadScheduler_speculation_disabled": SpeculativeReadScheduler_speculation_disabled,
+    "SpeculativeReadScheduler_spec_disabled": SpeculativeReadScheduler_spec_disabled,
     "CommitHorizonScheduler": CommitHorizonScheduler,
+    "CommitHorizonScheduler_commit_horizon_disabled": CommitHorizonScheduler_commit_horizon_disabled,
+    "CommitHorizonScheduler_early_dispatch_disabled": CommitHorizonScheduler_early_dispatch_disabled,
     "CacheScheduler": CacheScheduler,
+    "CacheScheduler_caching_disabled": CacheScheduler_caching_disabled,
+    "CacheScheduler_cache_disabled": CacheScheduler_cache_disabled,
     "CompositeScheduler": CompositeScheduler,
+    "PersistentPrewarmedPool": PersistentPrewarmedPool,
+    "PersistentColdPool": PersistentColdPool,
+    "TransactionalAuthorityScheduler": TransactionalAuthorityScheduler,
+    "AuthorizedExecutionPath": AuthorizedExecutionPath,
+    "IdenticalAuthorizedExecutionPath": IdenticalAuthorizedExecutionPath,
+    "SequentialExecutionPath": SequentialExecutionPath,
+    "PreparedExecutionPath": PreparedExecutionPath,
     "ActionBytecodeScheduler": ActionBytecodeScheduler,
+    "ActionBytecodeCodec": ActionBytecodeCodec,
+    "CanonicalJSONCodec": CanonicalJSONCodec,
+    "JSONCodec": CanonicalJSONCodec,
 }
+
+
+def resolve_scheduler_class(name: str) -> type[BaseScheduler]:
+    if name in SCHEDULER_FACTORIES:
+        return SCHEDULER_FACTORIES[name]
+    raise ValueError(f"Unrecognized scheduler or baseline name in protocol: '{name}'")
 
 
 @dataclass
@@ -182,7 +259,7 @@ class BenchmarkHarness:
 
     def __init__(self, config: BenchmarkConfig | None = None, protocol: BenchmarkProtocol | None = None):
         self.config = config or BenchmarkConfig()
-        self.protocol = protocol or load_package_protocol()
+        self.protocol = protocol or self.config.protocol or load_package_protocol()
         if self.config.evidence_level == EvidenceLevel.LOCAL_WALL_CLOCK:
             self.backend: LocalWallClockBackend | ReplayBackend = LocalWallClockBackend(
                 evidence_level=self.config.evidence_level
@@ -594,96 +671,27 @@ class BenchmarkHarness:
 
         shared_cache = ToolResultCache(max_entries=1000, ttl_seconds=300.0)
 
-        # W1: Fanout
-        eval_w1 = await self.run_paired_trials(
-            workload_id="W1",
-            baseline_cls=SyncReActScheduler,
-            candidate_cls=DAGScheduler,
-            trials=eff_trials,
-            task_factory=lambda i: self.backend.generate_task("W1", i),
-        )
-        evaluations.append(eval_w1)
+        # Dynamically execute mechanisms defined by the loaded authoritative BenchmarkPlan protocol
+        for wl_id, mech in self.protocol.mechanisms.items():
+            if getattr(mech, "status", "ACTIVE") == "UNIMPLEMENTED":
+                continue
+            cand_cls = resolve_scheduler_class(mech.candidate)
+            base_cls = resolve_scheduler_class(mech.primary_attribution_baseline)
+            task_wl = "W7" if wl_id.startswith("W7") else wl_id
+            shared_c = shared_cache if wl_id == "W4" else None
 
-        # W2: Dependent Chains
-        eval_w2 = await self.run_paired_trials(
-            workload_id="W2",
-            baseline_cls=SyncReActScheduler,
-            candidate_cls=JITFusionScheduler,
-            trials=eff_trials,
-            task_factory=lambda i: self.backend.generate_task("W2", i),
-        )
-        evaluations.append(eval_w2)
+            def _task_factory(i: int, wk: str = task_wl) -> Task:
+                return self.backend.generate_task(wk, i)
 
-        # W3: Branching with Speculation
-        eval_w3 = await self.run_paired_trials(
-            workload_id="W3",
-            baseline_cls=SyncReActScheduler,
-            candidate_cls=SpeculativeReadScheduler,
-            trials=eff_trials,
-            task_factory=lambda i: self.backend.generate_task("W3", i),
-        )
-        evaluations.append(eval_w3)
-
-        # W4: Repeated Workflows with Cache
-        eval_w4 = await self.run_paired_trials(
-            workload_id="W4",
-            baseline_cls=SyncReActScheduler,
-            candidate_cls=CacheScheduler,
-            trials=eff_trials,
-            task_factory=lambda i: self.backend.generate_task("W4", i),
-            candidate_shared_cache=shared_cache,
-        )
-        evaluations.append(eval_w4)
-
-        # W5: Streaming Commit Horizon
-        eval_w5 = await self.run_paired_trials(
-            workload_id="W5",
-            baseline_cls=SyncReActScheduler,
-            candidate_cls=CommitHorizonScheduler,
-            trials=eff_trials,
-            task_factory=lambda i: self.backend.generate_task("W5", i),
-        )
-        evaluations.append(eval_w5)
-
-        # W6: Cold Start
-        eval_w6 = await self.run_paired_trials(
-            workload_id="W6",
-            baseline_cls=SyncReActScheduler,
-            candidate_cls=CompositeScheduler,
-            trials=eff_trials,
-            task_factory=lambda i: self.backend.generate_task("W6", i),
-        )
-        evaluations.append(eval_w6)
-
-        # W7_SAFETY: Side-Effects and Idempotency Gate
-        eval_w7_safety = await self.run_paired_trials(
-            workload_id="W7_SAFETY",
-            baseline_cls=CompositeScheduler,
-            candidate_cls=CompositeScheduler,
-            trials=eff_trials,
-            task_factory=lambda i: self.backend.generate_task("W7", i),
-        )
-        evaluations.append(eval_w7_safety)
-
-        # W7_LATENCY: Overhead check
-        eval_w7_latency = await self.run_paired_trials(
-            workload_id="W7_LATENCY",
-            baseline_cls=SyncReActScheduler,
-            candidate_cls=CompositeScheduler,
-            trials=eff_trials,
-            task_factory=lambda i: self.backend.generate_task("W7", i),
-        )
-        evaluations.append(eval_w7_latency)
-
-        # E5a: Action Bytecode Codec
-        eval_e5a = await self.run_paired_trials(
-            workload_id="E5a",
-            baseline_cls=SyncReActScheduler,
-            candidate_cls=ActionBytecodeScheduler,
-            trials=eff_trials,
-            task_factory=lambda i: self.backend.generate_task("E5a", i),
-        )
-        evaluations.append(eval_e5a)
+            ev = await self.run_paired_trials(
+                workload_id=wl_id,
+                baseline_cls=base_cls,
+                candidate_cls=cand_cls,
+                trials=eff_trials,
+                task_factory=_task_factory,
+                candidate_shared_cache=shared_c,
+            )
+            evaluations.append(ev)
 
         negative_controls: list[dict[str, Any]] = []
         if self.config.include_negative_controls:
@@ -723,4 +731,5 @@ class BenchmarkHarness:
             manifest=manifest,
             overall_verdict=overall_state,
             total_runtime_s=total_runtime,
+            protocol=self.protocol,
         )

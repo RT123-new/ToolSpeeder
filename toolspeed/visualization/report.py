@@ -732,13 +732,16 @@ def save_benchmark_reports(
         # 2. Frozen protocol copies
         protocol_path = staging_dir / "protocol.json"
         bm_plan_path = staging_dir / "benchmark-plan.json"
-        repo_protocol = Path("benchmark-plans/tool-speed-v1.1.json")
-        if not repo_protocol.exists():
-            repo_protocol = Path("benchmark-plans/tool-speed-v1.json")
-        if repo_protocol.exists():
-            proto_content = repo_protocol.read_text(encoding="utf-8")
+        if hasattr(result, "protocol") and result.protocol is not None and getattr(result.protocol, "raw_json", None):
+            proto_content = result.protocol.raw_json
         else:
-            proto_content = json.dumps({"plan_id": "tool-speed-v1.1", "version": "1.1.0"}, indent=2)
+            repo_protocol = Path("benchmark-plans/tool-speed-v1.1.json")
+            if not repo_protocol.exists():
+                repo_protocol = Path("benchmark-plans/tool-speed-v1.json")
+            if repo_protocol.exists():
+                proto_content = repo_protocol.read_text(encoding="utf-8")
+            else:
+                proto_content = json.dumps({"plan_id": "tool-speed-v1.1", "version": "1.1.0"}, indent=2)
         protocol_path.write_text(proto_content, encoding="utf-8")
         bm_plan_path.write_text(proto_content, encoding="utf-8")
 
