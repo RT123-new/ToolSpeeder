@@ -44,12 +44,24 @@ from toolspeed.workloads.w6_cold_start import (
     evaluate_w6_subprocess_warm_vs_cold,
     execute_cold_subprocess,
 )
-from toolspeed.workloads.w7_side_effects import W7SideEffectsWorkload
+from toolspeed.workloads.w7_side_effects import (
+    ExternalStateLedger,
+    W7aSafetyReport,
+    W7aSafetyWorkload,
+    W7bLatencyReport,
+    W7bLatencyWorkload,
+    W7LatencyWorkload,
+    W7SafetyWorkload,
+    W7SideEffectsWorkload,
+    evaluate_w7a_safety,
+    evaluate_w7b_latency,
+)
 
 __all__ = [
     "BaseWorkload",
     "CompiledExecutionPlan",
     "CompiledPlanStep",
+    "ExternalStateLedger",
     "W1ConcurrencyPressurePoint",
     "W1ConcurrencySweepReport",
     "W1IndependentWorkload",
@@ -69,7 +81,13 @@ __all__ = [
     "W6AmortizationPoint",
     "W6ColdStartWorkload",
     "W6SubprocessSweepReport",
+    "W7LatencyWorkload",
+    "W7SafetyWorkload",
     "W7SideEffectsWorkload",
+    "W7aSafetyReport",
+    "W7aSafetyWorkload",
+    "W7bLatencyReport",
+    "W7bLatencyWorkload",
     "WarmSubprocessPool",
     "WarmSubprocessWorker",
     "evaluate_w1_concurrency_pressure",
@@ -78,6 +96,8 @@ __all__ = [
     "evaluate_w4_cache_eviction_pressure",
     "evaluate_w5_streaming_vs_buffering",
     "evaluate_w6_subprocess_warm_vs_cold",
+    "evaluate_w7a_safety",
+    "evaluate_w7b_latency",
     "execute_cold_subprocess",
     "execute_compiled_plan",
 ]
