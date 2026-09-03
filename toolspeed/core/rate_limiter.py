@@ -243,16 +243,12 @@ class AsyncConcurrencyLimiter:
         return delay_ns / 1_000_000.0
 
     def release(self) -> None:
-        """Release concurrency slot safely. Over-release is bounded to 0."""
+        """Release concurrency slot safely. Raises RuntimeError on over-release."""
         with self._sync_lock:
             if self._active_count <= 0:
-                self._active_count = 0
-                return
+                raise RuntimeError("Over-release invariant violation: active concurrency count is already 0")
             self._active_count -= 1
-        try:
-            self._semaphore.release()
-        except ValueError:
-            pass
+        self._semaphore.release()
 
     async def __aenter__(self) -> Self:
         await self.acquire()
@@ -282,6 +278,8 @@ class RateLimitLease:
     concurrency_acquired: bool
     limiter: RateLimiter
     queue_delay_ms: float
+    absolute_deadline: float | None = None
+    release_state: str = "active"
     _released: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -291,6 +289,7 @@ class RateLimitLease:
             if self._released:
                 return
             self._released = True
+            self.release_state = "released"
         if self.concurrency_acquired:
             self.limiter.concurrency_limiter.release()
 
@@ -300,6 +299,7 @@ class RateLimitLease:
             if self._released:
                 return
             self._released = True
+            self.release_state = "refunded"
         if self.concurrency_acquired:
             self.limiter.concurrency_limiter.release()
         if self.tokens_acquired > 0:
@@ -354,13 +354,20 @@ class RateLimiter:
             return self.clock.now_ns()
         return time.perf_counter_ns()
 
-    async def acquire_lease(self, tokens: int = 1, timeout: float | None = None) -> RateLimitLease:
+    async def acquire_lease(
+        self,
+        tokens: int = 1,
+        timeout: float | None = None,
+        deadline: float | None = None,
+    ) -> RateLimitLease:
         """Explicitly acquire a RateLimitLease object."""
-        deadline = (self._now_s() + timeout) if timeout is not None else None
+        eff_deadline = (
+            deadline if deadline is not None else ((self._now_s() + timeout) if timeout is not None else None)
+        )
         start_ns = self._now_ns()
-        await self.token_bucket.acquire(tokens=tokens, deadline=deadline)
+        await self.token_bucket.acquire(tokens=tokens, deadline=eff_deadline)
         try:
-            await self.concurrency_limiter.acquire(deadline=deadline)
+            await self.concurrency_limiter.acquire(deadline=eff_deadline)
         except (Exception, asyncio.CancelledError):
             self.token_bucket.refund(tokens=tokens)
             raise
@@ -369,6 +376,8 @@ class RateLimiter:
             concurrency_acquired=True,
             limiter=self,
             queue_delay_ms=(self._now_ns() - start_ns) / 1_000_000.0,
+            absolute_deadline=eff_deadline,
+            release_state="active",
         )
 
     @asynccontextmanager
@@ -399,6 +408,8 @@ class RateLimiter:
                 concurrency_acquired=True,
                 limiter=self,
                 queue_delay_ms=total_delay,
+                absolute_deadline=eff_deadline,
+                release_state="active",
             )
         except (Exception, asyncio.CancelledError):
             if not concurrency_acquired:

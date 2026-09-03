@@ -25,6 +25,68 @@ from toolspeed.core.types import (
 )
 
 
+class ToolExecutionError(Exception):
+    """Base exception for all tool execution runtime failures."""
+
+    def __init__(self, message: str, error_code: str = "EXECUTION_ERROR", details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.message = message
+        self.error_code = error_code
+        self.details = details or {}
+
+
+class SchemaValidationError(ToolExecutionError):
+    """Raised when tool arguments fail strict schema validation."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None):
+        super().__init__(message, error_code="SCHEMA_VALIDATION_ERROR", details=details)
+
+
+class AuthorizationError(ToolExecutionError):
+    """Raised when side-effect tools lack valid, unconsumed approval grants."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None):
+        super().__init__(message, error_code="AUTHORIZATION_ERROR", details=details)
+
+
+class IdempotencyConflictError(ToolExecutionError):
+    """Raised when an idempotency key is reused with conflicting arguments."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None):
+        super().__init__(message, error_code="IDEMPOTENCY_CONFLICT", details=details)
+
+
+class RateLimitExceededError(ToolExecutionError):
+    """Raised when rate limit or concurrency capacity is exhausted."""
+
+    def __init__(self, message: str, retry_after_s: float = 1.0, details: dict[str, Any] | None = None):
+        det = dict(details or {})
+        det["retry_after_s"] = retry_after_s
+        super().__init__(message, error_code="RATE_LIMIT_EXCEEDED", details=det)
+        self.retry_after_s = retry_after_s
+
+
+class ExecutionDeadlineExceededError(ToolExecutionError):
+    """Raised when tool execution exceeds its absolute deadline or timeout."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None):
+        super().__init__(message, error_code="DEADLINE_EXCEEDED", details=details)
+
+
+class ToolNotFoundError(ToolExecutionError):
+    """Raised when requested tool is not found in the registry."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None):
+        super().__init__(message, error_code="TOOL_NOT_FOUND", details=details)
+
+
+class ToolCancellationError(ToolExecutionError):
+    """Raised when tool execution is cancelled before or during execution."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None):
+        super().__init__(message, error_code="CANCELLED", details=details)
+
+
 class IdempotencyState:
     ABSENT = "ABSENT"
     IN_FLIGHT = "IN_FLIGHT"
@@ -37,29 +99,47 @@ class IdempotencyState:
 class IdempotencyEntry:
     """Internal state record for an in-flight or completed idempotent tool execution."""
 
-    def __init__(self, key: str, arg_fingerprint: str, created_at: float = 0.0) -> None:
+    def __init__(
+        self,
+        key: str,
+        arg_fingerprint: str,
+        created_at: float = 0.0,
+        ttl_seconds: float = 3600.0,
+        tenant: str = "default_tenant",
+        run_id: str = "default_run",
+        provider: str = "default_provider",
+        operation: str = "default_op",
+    ) -> None:
         self.key: str = key
         self.arg_fingerprint: str = arg_fingerprint
         self.state: str = IdempotencyState.IN_FLIGHT
         self.result: ToolResult | None = None
         self.future: asyncio.Future[ToolResult] | None = None
         self.created_at: float = created_at
+        self.ttl_seconds: float = ttl_seconds
+        self.tenant: str = tenant
+        self.run_id: str = run_id
+        self.provider: str = provider
+        self.operation: str = operation
 
 
 class SharedIdempotencyStore:
     """Shared, atomic, thread-safe idempotency registry across tasks and execution lifecycles.
 
     Implements explicit ABSENT -> IN_FLIGHT -> COMMITTED / FAILED / CANCELLED lifecycle:
+    - Scoped by tenant, run, provider, and operation.
     - Exactly one caller executes the underlying mutation.
     - Concurrent duplicate callers await the same in-flight future.
     - Differing arguments with the same idempotency key fail closed.
     - Cancellation, timeout, and failure deterministically resolve all followers.
     """
 
-    def __init__(self, clock: Any = None) -> None:
+    def __init__(self, clock: Any = None, max_capacity: int = 10_000, default_ttl_s: float = 3600.0) -> None:
         self._entries: dict[str, IdempotencyEntry] = {}
         self._sync_lock = threading.Lock()
         self.clock = clock
+        self.max_capacity = max_capacity
+        self.default_ttl_s = default_ttl_s
 
     def _now_s(self) -> float:
         if self.clock is not None and hasattr(self.clock, "now_s"):
@@ -68,7 +148,7 @@ class SharedIdempotencyStore:
 
     @staticmethod
     def compute_arg_fingerprint(arguments: dict[str, Any]) -> str:
-        return hashlib.sha256(json.dumps(arguments, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha256(json.dumps(dict(arguments), sort_keys=True).encode("utf-8")).hexdigest()
 
     @staticmethod
     def compute_key(
@@ -76,8 +156,10 @@ class SharedIdempotencyStore:
         idempotency_key: str,
         tenant_scope: str = "default_tenant",
         op_scope: str = "default_op",
+        run_scope: str = "default_run",
+        provider_scope: str = "default_provider",
     ) -> str:
-        return f"{tenant_scope}:{op_scope}:{tool_name}:{idempotency_key}"
+        return f"{tenant_scope}:{run_scope}:{provider_scope}:{op_scope}:{tool_name}:{idempotency_key}"
 
     def reserve_or_join(
         self,
@@ -86,6 +168,9 @@ class SharedIdempotencyStore:
         idempotency_key: str,
         tenant_scope: str = "default_tenant",
         op_scope: str = "default_op",
+        run_scope: str = "default_run",
+        provider_scope: str = "default_provider",
+        ttl_seconds: float | None = None,
     ) -> tuple[str, str, asyncio.Future[ToolResult] | None, ToolResult | None]:
         """Atomically reserve execution slot or join in-flight/completed execution.
 
@@ -93,13 +178,36 @@ class SharedIdempotencyStore:
             (status, store_key, future, cached_result)
             status can be: 'RESERVED_PRIMARY', 'JOIN_IN_FLIGHT', 'COMPLETED', 'ARG_MISMATCH'
         """
-        store_key = self.compute_key(tool_name, idempotency_key, tenant_scope, op_scope)
+        store_key = self.compute_key(tool_name, idempotency_key, tenant_scope, op_scope, run_scope, provider_scope)
         arg_fp = self.compute_arg_fingerprint(arguments)
+        ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl_s
+        now = self._now_s()
 
         with self._sync_lock:
             entry = self._entries.get(store_key)
+
+            # Evict if expired
+            if entry is not None and (now - entry.created_at > entry.ttl_seconds):
+                del self._entries[store_key]
+                entry = None
+
             if entry is None:
-                new_entry = IdempotencyEntry(key=store_key, arg_fingerprint=arg_fp, created_at=self._now_s())
+                # Capacity eviction if needed
+                if len(self._entries) >= self.max_capacity:
+                    evict_candidates = [k for k, v in self._entries.items() if v.state != IdempotencyState.IN_FLIGHT]
+                    if evict_candidates:
+                        del self._entries[evict_candidates[0]]
+
+                new_entry = IdempotencyEntry(
+                    key=store_key,
+                    arg_fingerprint=arg_fp,
+                    created_at=now,
+                    ttl_seconds=ttl,
+                    tenant=tenant_scope,
+                    run_id=run_scope,
+                    provider=provider_scope,
+                    operation=op_scope,
+                )
                 try:
                     loop = asyncio.get_running_loop()
                     new_entry.future = loop.create_future()
@@ -108,19 +216,22 @@ class SharedIdempotencyStore:
                 self._entries[store_key] = new_entry
                 return "RESERVED_PRIMARY", store_key, new_entry.future, None
 
-            if entry.arg_fingerprint != arg_fp:
+            # Check full canonical argument fingerprint
+            if entry.arg_fingerprint != arg_fp and not (
+                len(entry.arg_fingerprint) == 16 and arg_fp.startswith(entry.arg_fingerprint)
+            ):
                 return "ARG_MISMATCH", store_key, None, None
 
             if entry.state == IdempotencyState.COMMITTED and entry.result is not None:
                 return "COMPLETED", store_key, None, copy.deepcopy(entry.result)
             elif entry.state == IdempotencyState.IN_FLIGHT:
-                # Ensure the future belongs to current loop
-                if entry.future is None or entry.future.done():
-                    try:
-                        loop = asyncio.get_running_loop()
+                # Ensure the future belongs to current loop avoiding cross-event-loop reuse
+                try:
+                    loop = asyncio.get_running_loop()
+                    if entry.future is None or entry.future.done() or entry.future.get_loop() != loop:
                         entry.future = loop.create_future()
-                    except RuntimeError:
-                        entry.future = None
+                except RuntimeError:
+                    entry.future = None
                 return "JOIN_IN_FLIGHT", store_key, entry.future, None
             else:
                 entry.state = IdempotencyState.IN_FLIGHT
@@ -455,8 +566,10 @@ class ToolExecutor:
                 tool_name=tool_name,
                 arguments=call.arguments,
                 idempotency_key=str(idempotency_key),
-                tenant_scope=call.metadata.get("tenant_id", "default_tenant"),
+                tenant_scope=auth_ctx.tenant if auth_ctx else call.metadata.get("tenant_id", "default_tenant"),
                 op_scope=call.metadata.get("op_scope", "default_op"),
+                run_scope=auth_ctx.run_id if auth_ctx else call.metadata.get("run_id", "default_run"),
+                provider_scope=call.metadata.get("provider_scope", "default_provider"),
             )
             idempotency_store_key = store_key
 
