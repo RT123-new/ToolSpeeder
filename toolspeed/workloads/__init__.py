@@ -35,7 +35,15 @@ from toolspeed.workloads.w5_large_payloads import (
     W5StreamingSweepReport,
     evaluate_w5_streaming_vs_buffering,
 )
-from toolspeed.workloads.w6_cold_start import W6ColdStartWorkload
+from toolspeed.workloads.w6_cold_start import (
+    W6AmortizationPoint,
+    W6ColdStartWorkload,
+    W6SubprocessSweepReport,
+    WarmSubprocessPool,
+    WarmSubprocessWorker,
+    evaluate_w6_subprocess_warm_vs_cold,
+    execute_cold_subprocess,
+)
 from toolspeed.workloads.w7_side_effects import W7SideEffectsWorkload
 
 __all__ = [
@@ -58,12 +66,18 @@ __all__ = [
     "W5LargePayloadsWorkload",
     "W5StreamingComparisonPoint",
     "W5StreamingSweepReport",
+    "W6AmortizationPoint",
     "W6ColdStartWorkload",
+    "W6SubprocessSweepReport",
     "W7SideEffectsWorkload",
+    "WarmSubprocessPool",
+    "WarmSubprocessWorker",
     "evaluate_w1_concurrency_pressure",
     "evaluate_w2_compilation_vs_step_by_step",
     "evaluate_w3_speculation_failure_sweep",
     "evaluate_w4_cache_eviction_pressure",
     "evaluate_w5_streaming_vs_buffering",
+    "evaluate_w6_subprocess_warm_vs_cold",
+    "execute_cold_subprocess",
     "execute_compiled_plan",
 ]

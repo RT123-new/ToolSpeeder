@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import sys
 import time
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -209,3 +214,209 @@ class PersistentPrewarmedPool(BaseContainerPool):
             warm_start_delay_ms=warm_latency_ms,
             prewarmed=True,
         )
+
+
+async def execute_cold_subprocess(expression: str = "2 + 2") -> tuple[Any, float]:
+    """Spawns a fresh Python subprocess per call, incurring real process startup overhead."""
+    start_ns = time.perf_counter_ns()
+    script = f"import json; res = eval({expression!r}, {{'__builtins__': None, 'sum': sum, 'abs': abs}}); print(json.dumps({{'status': 'success', 'result': res}}))"
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    duration_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
+    out = json.loads(stdout.decode("utf-8"))
+    return out["result"], duration_ms
+
+
+class WarmSubprocessWorker:
+    """Persistent worker process communicating over pipes/stdin/stdout."""
+
+    def __init__(self) -> None:
+        self.proc: asyncio.subprocess.Process | None = None
+
+    async def start(self) -> None:
+        script = (
+            "import sys, json\n"
+            'sys.stdout.write(json.dumps({"status": "ready"}) + "\\n")\n'
+            "sys.stdout.flush()\n"
+            "for line in sys.stdin:\n"
+            "    if not line.strip(): continue\n"
+            "    req = json.loads(line)\n"
+            '    if req.get("action") == "shutdown": break\n'
+            '    expr = req.get("expression", "2 + 2")\n'
+            '    res = eval(expr, {"__builtins__": None, "sum": sum, "abs": abs})\n'
+            '    sys.stdout.write(json.dumps({"status": "success", "result": res}) + "\\n")\n'
+            "    sys.stdout.flush()\n"
+        )
+        self.proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            script,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        if self.proc.stdout is not None:
+            ready_line = await self.proc.stdout.readline()
+            out = json.loads(ready_line.decode("utf-8"))
+            if out.get("status") != "ready":
+                raise RuntimeError(f"Unexpected worker handshake: {ready_line!r}")
+
+    async def execute(self, expression: str = "2 + 2") -> tuple[Any, float]:
+        if self.proc is None or self.proc.stdin is None or self.proc.stdout is None:
+            raise RuntimeError("Warm worker process not started")
+        start_ns = time.perf_counter_ns()
+        payload = json.dumps({"expression": expression}) + "\n"
+        self.proc.stdin.write(payload.encode("utf-8"))
+        await self.proc.stdin.drain()
+        line = await self.proc.stdout.readline()
+        duration_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
+        out = json.loads(line.decode("utf-8"))
+        return out["result"], duration_ms
+
+    async def close(self) -> None:
+        if self.proc is not None:
+            if self.proc.stdin and not self.proc.stdin.is_closing():
+                try:
+                    self.proc.stdin.write(b'{"action":"shutdown"}\n')
+                    await self.proc.stdin.drain()
+                    self.proc.stdin.close()
+                except Exception:
+                    pass
+            try:
+                await asyncio.wait_for(self.proc.wait(), timeout=1.0)
+            except Exception:
+                self.proc.kill()
+                await self.proc.wait()
+
+
+class WarmSubprocessPool:
+    """Pool of reusable persistent worker processes."""
+
+    def __init__(self, pool_size: int = 4) -> None:
+        self.pool_size = pool_size
+        self.workers: list[WarmSubprocessWorker] = []
+        self.queue: asyncio.Queue[WarmSubprocessWorker] = asyncio.Queue()
+        self.init_duration_ms: float = 0.0
+
+    async def start(self, concurrency: int = 4) -> None:
+        start_ns = time.perf_counter_ns()
+        self.workers = [WarmSubprocessWorker() for _ in range(self.pool_size)]
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _start_worker(w: WarmSubprocessWorker) -> None:
+            async with sem:
+                await w.start()
+                await self.queue.put(w)
+
+        await asyncio.gather(*[_start_worker(w) for w in self.workers])
+        self.init_duration_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
+
+    async def execute(self, expression: str = "2 + 2") -> tuple[Any, float]:
+        worker = await self.queue.get()
+        try:
+            return await worker.execute(expression)
+        finally:
+            await self.queue.put(worker)
+
+    async def close(self) -> None:
+        for worker in self.workers:
+            await worker.close()
+        self.workers.clear()
+
+
+@dataclass(frozen=True)
+class W6AmortizationPoint:
+    concurrency: int
+    call_count: int
+    pool_size: int
+    cold_duration_ms: float
+    warm_duration_ms: float
+    speedup: float
+    is_positive: bool
+
+
+@dataclass
+class W6SubprocessSweepReport:
+    points: list[W6AmortizationPoint]
+
+    def verify_subprocess_amortization_invariants(self) -> tuple[bool, str]:
+        """Verifies:
+
+        - Speedup is positive (> 1.0x) only when call_count > pool_size.
+        - Speedup is <= 1.0x when call_count <= pool_size.
+        """
+        if not self.points:
+            return False, "No amortization points evaluated"
+
+        for p in self.points:
+            if p.call_count <= p.pool_size and p.speedup > 1.05:
+                return (
+                    False,
+                    f"Speedup was positive ({p.speedup:.2f}x) when call_count ({p.call_count}) <= pool_size ({p.pool_size}) at concurrency {p.concurrency}",
+                )
+            if p.call_count > p.pool_size and p.speedup <= 1.0:
+                return (
+                    False,
+                    f"Speedup was not positive ({p.speedup:.2f}x) when call_count ({p.call_count}) > pool_size ({p.pool_size}) at concurrency {p.concurrency}",
+                )
+
+        return True, "All W6 subprocess warm vs cold amortization invariants hold."
+
+
+async def evaluate_w6_subprocess_warm_vs_cold(
+    concurrencies: Sequence[int] = (1, 2, 4, 8),
+    pool_size: int = 4,
+    under_amortized_calls: int = 2,
+    over_amortized_calls: int = 12,
+) -> W6SubprocessSweepReport:
+    """Measures real process spawn overhead comparing fresh cold processes vs pooled warm processes."""
+    points: list[W6AmortizationPoint] = []
+
+    for conc in concurrencies:
+        for count in (under_amortized_calls, over_amortized_calls):
+            # Cold execution: fresh process per call under concurrency limit
+            sem = asyncio.Semaphore(conc)
+
+            async def _run_cold(idx: int, s: asyncio.Semaphore = sem) -> float:
+                async with s:
+                    _, dur = await execute_cold_subprocess(f"{idx} + {idx}")
+                    return dur
+
+            start_cold = time.perf_counter_ns()
+            await asyncio.gather(*[_run_cold(i) for i in range(count)])
+            cold_total_ms = (time.perf_counter_ns() - start_cold) / 1_000_000.0
+
+            # Warm execution: prewarmed pool of size pool_size, then run count calls
+            pool = WarmSubprocessPool(pool_size=pool_size)
+            start_warm = time.perf_counter_ns()
+            await pool.start(concurrency=conc)
+
+            async def _run_warm(idx: int, s: asyncio.Semaphore = sem, p: WarmSubprocessPool = pool) -> float:
+                async with s:
+                    _, dur = await p.execute(f"{idx} + {idx}")
+                    return dur
+
+            await asyncio.gather(*[_run_warm(i) for i in range(count)])
+            warm_total_ms = (time.perf_counter_ns() - start_warm) / 1_000_000.0
+            await pool.close()
+
+            speedup = cold_total_ms / warm_total_ms if warm_total_ms > 0 else 1.0
+            points.append(
+                W6AmortizationPoint(
+                    concurrency=conc,
+                    call_count=count,
+                    pool_size=pool_size,
+                    cold_duration_ms=cold_total_ms,
+                    warm_duration_ms=warm_total_ms,
+                    speedup=speedup,
+                    is_positive=speedup > 1.0,
+                )
+            )
+
+    return W6SubprocessSweepReport(points=points)
