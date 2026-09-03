@@ -8,6 +8,8 @@ import hmac
 import json
 import math
 import platform
+import secrets
+import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -15,7 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 
 class EvidenceLevel(str, Enum):
@@ -344,7 +346,9 @@ class ExpectedOutcome:
         )
 
 
-DEFAULT_ISSUER_SECRET: bytes = b"toolspeed_trusted_authority_hmac_secret_key_32b_fixed"
+# Dynamically generate fresh cryptographic secret per process run rather than static source code constant
+_RUNTIME_ISSUER_SECRET: bytes = secrets.token_bytes(32)
+DEFAULT_ISSUER_SECRET: bytes = _RUNTIME_ISSUER_SECRET
 
 
 @dataclass(frozen=True)
@@ -395,7 +399,7 @@ class ApprovalGrant:
         run_id: str = "default_run",
         single_use: bool = True,
         current_time: float | None = None,
-        issuer_secret: bytes = DEFAULT_ISSUER_SECRET,
+        issuer_secret: bytes = _RUNTIME_ISSUER_SECRET,
     ) -> ApprovalGrant:
         fp = cls.compute_fingerprint(tool_name, arguments)
         now = current_time if current_time is not None else time.time()
@@ -426,7 +430,7 @@ class ApprovalGrant:
         run_id: str | None = None,
         current_time: float | None = None,
         allowed_authorities: Sequence[str] = ("trusted_system", "human_supervisor"),
-        issuer_secret: bytes = DEFAULT_ISSUER_SECRET,
+        issuer_secret: bytes = _RUNTIME_ISSUER_SECRET,
     ) -> bool:
         if self.authority not in allowed_authorities:
             return False
@@ -442,30 +446,171 @@ class ApprovalGrant:
         if now > self.expires_at:
             return False
         fp = self.compute_fingerprint(tool_name, arguments)
-        if self.argument_fingerprint != fp and self.argument_fingerprint != fp[:16]:
+        # Strict canonical full SHA-256 matching only — no truncated fingerprint acceptance
+        if self.argument_fingerprint != fp:
             return False
-        if self.signature:
-            expected_sig = self.compute_signature(
-                issuer_secret,
-                self.approval_id,
-                self.tool_name,
-                self.argument_fingerprint,
-                self.expires_at,
-                self.authority,
-                self.nonce,
-                self.tenant,
-                self.run_id,
-            )
-            if not hmac.compare_digest(self.signature, expected_sig):
+        # Signature is strictly required — reject unsigned grants
+        if not self.signature:
+            return False
+        expected_sig = self.compute_signature(
+            issuer_secret,
+            self.approval_id,
+            self.tool_name,
+            self.argument_fingerprint,
+            self.expires_at,
+            self.authority,
+            self.nonce,
+            self.tenant,
+            self.run_id,
+        )
+        return hmac.compare_digest(self.signature, expected_sig)
+
+
+class AuthorityProvider(Protocol):
+    """Protocol for runtime capability authority providers managing cryptographic approval grants."""
+
+    def issue(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        ttl_seconds: float = 300.0,
+        subject: str = "default_subject",
+        tenant: str = "default_tenant",
+        run_id: str = "default_run",
+        single_use: bool = True,
+        current_time: float | None = None,
+    ) -> ApprovalGrant: ...
+
+    def verify(
+        self,
+        grant: ApprovalGrant,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        subject: str | None = None,
+        tenant: str | None = None,
+        run_id: str | None = None,
+        current_time: float | None = None,
+    ) -> bool: ...
+
+    def consume(
+        self,
+        grant_id: str,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        subject: str | None = None,
+        tenant: str | None = None,
+        run_id: str | None = None,
+        current_time: float | None = None,
+    ) -> bool: ...
+
+
+class RuntimeAuthorityProvider:
+    """Thread-safe, out-of-band authority provider generating fresh run-scoped secrets."""
+
+    def __init__(
+        self,
+        secret: bytes | None = None,
+        authority: str = "trusted_system",
+        run_id: str | None = None,
+    ) -> None:
+        self.secret = secret if secret is not None else secrets.token_bytes(32)
+        self.authority = authority
+        self.run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
+        self._lock = threading.Lock()
+        self._issued_grants: dict[str, ApprovalGrant] = {}
+        self._consumed_grant_ids: set[str] = set()
+
+    def issue(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        ttl_seconds: float = 300.0,
+        subject: str = "default_subject",
+        tenant: str = "default_tenant",
+        run_id: str | None = None,
+        single_use: bool = True,
+        current_time: float | None = None,
+    ) -> ApprovalGrant:
+        effective_run_id = run_id or self.run_id
+        grant = ApprovalGrant.create(
+            tool_name=tool_name,
+            arguments=arguments,
+            authority=self.authority,
+            ttl_seconds=ttl_seconds,
+            subject=subject,
+            tenant=tenant,
+            run_id=effective_run_id,
+            single_use=single_use,
+            current_time=current_time,
+            issuer_secret=self.secret,
+        )
+        with self._lock:
+            self._issued_grants[grant.approval_id] = grant
+        return grant
+
+    def verify(
+        self,
+        grant: ApprovalGrant,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        subject: str | None = None,
+        tenant: str | None = None,
+        run_id: str | None = None,
+        current_time: float | None = None,
+    ) -> bool:
+        return grant.matches(
+            tool_name=tool_name,
+            arguments=arguments,
+            subject=subject,
+            tenant=tenant,
+            run_id=run_id or self.run_id,
+            current_time=current_time,
+            allowed_authorities=(self.authority,),
+            issuer_secret=self.secret,
+        )
+
+    def consume(
+        self,
+        grant_id: str,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        subject: str | None = None,
+        tenant: str | None = None,
+        run_id: str | None = None,
+        current_time: float | None = None,
+    ) -> bool:
+        with self._lock:
+            if grant_id in self._consumed_grant_ids:
                 return False
-        return True
+            grant = self._issued_grants.get(grant_id)
+            if grant is None:
+                return False
+            if not self.verify(
+                grant,
+                tool_name=tool_name,
+                arguments=arguments,
+                subject=subject,
+                tenant=tenant,
+                run_id=run_id,
+                current_time=current_time,
+            ):
+                return False
+            if grant.single_use:
+                self._consumed_grant_ids.add(grant_id)
+            return True
 
 
 class ApprovalIssuer:
     """Trusted capability issuer generating signed approval grants."""
 
-    def __init__(self, secret: bytes = DEFAULT_ISSUER_SECRET, authority: str = "trusted_system"):
-        self.secret = secret
+    def __init__(
+        self,
+        secret: bytes | None = None,
+        authority: str = "trusted_system",
+        run_id: str | None = None,
+    ):
+        self.provider = RuntimeAuthorityProvider(secret=secret, authority=authority, run_id=run_id)
+        self.secret = self.provider.secret
         self.authority = authority
 
     def issue(
@@ -479,17 +624,15 @@ class ApprovalIssuer:
         single_use: bool = True,
         current_time: float | None = None,
     ) -> ApprovalGrant:
-        return ApprovalGrant.create(
+        return self.provider.issue(
             tool_name=tool_name,
             arguments=arguments,
-            authority=self.authority,
             ttl_seconds=ttl_seconds,
             subject=subject,
             tenant=tenant,
             run_id=run_id,
             single_use=single_use,
             current_time=current_time,
-            issuer_secret=self.secret,
         )
 
 
@@ -503,10 +646,13 @@ class ExecutionAuthorityContext:
     allowed_authorities: list[str] = field(default_factory=lambda: ["trusted_system", "human_supervisor"])
     grants: list[ApprovalGrant] = field(default_factory=list)
     consumed_grant_ids: set[str] = field(default_factory=set)
-    issuer_secret: bytes = DEFAULT_ISSUER_SECRET
+    issuer_secret: bytes = field(default_factory=lambda: _RUNTIME_ISSUER_SECRET)
+    provider: AuthorityProvider | None = None
+    _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def add_grant(self, grant: ApprovalGrant) -> None:
-        self.grants.append(grant)
+        with self._lock:
+            self.grants.append(grant)
 
     def verify_and_consume_grant(
         self,
@@ -514,22 +660,39 @@ class ExecutionAuthorityContext:
         arguments: Mapping[str, Any],
         current_time: float | None = None,
     ) -> bool:
-        for grant in self.grants:
-            if grant.approval_id in self.consumed_grant_ids:
-                continue
-            if grant.matches(
-                tool_name=tool_name,
-                arguments=arguments,
-                subject=self.subject,
-                tenant=self.tenant,
-                run_id=self.run_id,
-                current_time=current_time,
-                allowed_authorities=self.allowed_authorities,
-            ):
-                if grant.single_use:
-                    self.consumed_grant_ids.add(grant.approval_id)
-                return True
-        return False
+        with self._lock:
+            if self.provider is not None:
+                for grant in self.grants:
+                    if grant.approval_id not in self.consumed_grant_ids and self.provider.consume(
+                        grant.approval_id,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        subject=self.subject,
+                        tenant=self.tenant,
+                        run_id=self.run_id,
+                        current_time=current_time,
+                    ):
+                        if grant.single_use:
+                            self.consumed_grant_ids.add(grant.approval_id)
+                        return True
+
+            for grant in self.grants:
+                if grant.approval_id in self.consumed_grant_ids:
+                    continue
+                if grant.matches(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    subject=self.subject,
+                    tenant=self.tenant,
+                    run_id=self.run_id,
+                    current_time=current_time,
+                    allowed_authorities=self.allowed_authorities,
+                    issuer_secret=self.issuer_secret,
+                ):
+                    if grant.single_use:
+                        self.consumed_grant_ids.add(grant.approval_id)
+                    return True
+            return False
 
 
 @dataclass(frozen=True)

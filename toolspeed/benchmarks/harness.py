@@ -381,17 +381,18 @@ class BenchmarkHarness:
         for w in range(self.config.warmup_trials):
             task_w_b = task_factory(w)
             task_w_c = task_factory(w)
-            auth_w_b = ExecutionAuthorityContext()
-            auth_w_c = ExecutionAuthorityContext()
+            auth_w_b = ExecutionAuthorityContext(issuer_secret=issuer.secret)
+            auth_w_c = ExecutionAuthorityContext(issuer_secret=issuer.secret)
             if "W7" in workload_id:
-                grant = task_w_b.metadata.get("approval_grant")
-                if grant is not None:
-                    auth_w_b.add_grant(grant)
-                    auth_w_c.add_grant(grant)
-                else:
-                    g = issuer.issue("execute_fund_transfer", {"recipient": "Alice", "amount": 100.0})
-                    auth_w_b.add_grant(g)
-                    auth_w_c.add_grant(g)
+                idemp_key = task_w_b.parameters.get("idempotency_key") or f"tx_warmup_{w:04d}"
+                g_b = issuer.issue(
+                    "execute_fund_transfer", {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key}
+                )
+                g_c = issuer.issue(
+                    "execute_fund_transfer", {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key}
+                )
+                auth_w_b.add_grant(g_b)
+                auth_w_c.add_grant(g_c)
 
             backend_wl = "W7" if "W7" in workload_id else workload_id
             tools_w_b, model_w_b = self.backend.create_workload_environment(backend_wl, trial_index=w)
@@ -407,17 +408,18 @@ class BenchmarkHarness:
         for i in range(trials):
             task_b = task_factory(i)
             task_c = task_factory(i)
-            auth_ctx_b = ExecutionAuthorityContext()
-            auth_ctx_c = ExecutionAuthorityContext()
+            auth_ctx_b = ExecutionAuthorityContext(issuer_secret=issuer.secret)
+            auth_ctx_c = ExecutionAuthorityContext(issuer_secret=issuer.secret)
             if "W7" in workload_id:
-                grant = task_b.metadata.get("approval_grant")
-                if grant is not None:
-                    auth_ctx_b.add_grant(grant)
-                    auth_ctx_c.add_grant(grant)
-                else:
-                    g = issuer.issue("execute_fund_transfer", {"recipient": "Alice", "amount": 100.0})
-                    auth_ctx_b.add_grant(g)
-                    auth_ctx_c.add_grant(g)
+                idemp_key = task_b.parameters.get("idempotency_key") or f"tx_replay_{i:04d}"
+                g_b = issuer.issue(
+                    "execute_fund_transfer", {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key}
+                )
+                g_c = issuer.issue(
+                    "execute_fund_transfer", {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key}
+                )
+                auth_ctx_b.add_grant(g_b)
+                auth_ctx_c.add_grant(g_c)
 
             backend_wl = "W7" if "W7" in workload_id else workload_id
             tools_b, model_b = self.backend.create_workload_environment(backend_wl, trial_index=i)
