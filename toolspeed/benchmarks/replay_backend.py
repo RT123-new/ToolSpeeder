@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import numpy as np
@@ -38,7 +37,7 @@ from toolspeed.workloads.w7_side_effects import W7SideEffectsWorkload
 
 
 class ReplayToolAdapter(BaseToolAdapter):
-    """Deterministic virtual-time tool adapter replaying pre-recorded responses."""
+    """Deterministic, causal virtual-time tool adapter evaluating arguments and state transitions."""
 
     def __init__(
         self,
@@ -47,6 +46,8 @@ class ReplayToolAdapter(BaseToolAdapter):
         recorded_responses: list[dict[str, Any]] | None = None,
         default_latency_ms: float = 20.0,
         clock: Clock | None = None,
+        state: dict[str, Any] | None = None,
+        handler: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None,
     ):
         super().__init__(spec=spec)
         self._name = name
@@ -55,6 +56,10 @@ class ReplayToolAdapter(BaseToolAdapter):
         self._default_latency_ms = default_latency_ms
         self._call_index = 0
         self.clock = clock or VirtualClock()
+        self.state: dict[str, Any] = state if state is not None else {}
+        self.handler = handler
+        self.call_history: list[tuple[dict[str, Any], int]] = []
+        self.idempotency_records: dict[str, dict[str, Any]] = {}
 
     @property
     def name(self) -> str:
@@ -70,21 +75,45 @@ class ReplayToolAdapter(BaseToolAdapter):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        resp_data: dict[str, Any] = {}
+        start_ns = self.clock.now_ns()
         delay_ms = self._default_latency_ms
-        if self._call_index < len(self._recorded_responses):
-            recorded = self._recorded_responses[self._call_index]
-            self._call_index += 1
-            resp_data = recorded.get("output", {})
-            delay_ms = float(recorded.get("latency_ms", self._default_latency_ms))
-        else:
-            resp_data = {"status": "ok", "echo_args": call.arguments}
+        resp_data: dict[str, Any] = {}
 
-        start_wall = time.perf_counter()
-        dur_ns = int(delay_ms * 1_000_000)
+        # 1. Check idempotency for side-effect calls
+        idemp_key = call.arguments.get("idempotency_key") if call.arguments else None
+        if idemp_key and idemp_key in self.idempotency_records:
+            resp_data = dict(self.idempotency_records[idemp_key])
+            delay_ms = 5.0  # Idempotency hit executes with minimal cache-like latency
+        elif self.handler is not None:
+            # 2. Causal execution handler evaluates arguments against current state
+            resp_data = self.handler(dict(call.arguments), self.state)
+        else:
+            # 3. Match by arguments if recorded response specifies arguments
+            matched = None
+            for r in self._recorded_responses:
+                if "arguments" in r and r["arguments"] == call.arguments:
+                    matched = r
+                    break
+            if matched is not None:
+                resp_data = matched.get("output", {})
+                delay_ms = float(matched.get("latency_ms", self._default_latency_ms))
+            elif self._call_index < len(self._recorded_responses):
+                recorded = self._recorded_responses[self._call_index]
+                self._call_index += 1
+                resp_data = recorded.get("output", {})
+                delay_ms = float(recorded.get("latency_ms", self._default_latency_ms))
+            else:
+                resp_data = {"status": "ok", "echo_args": call.arguments}
+
+        if idemp_key and idemp_key not in self.idempotency_records:
+            self.idempotency_records[idemp_key] = resp_data
 
         # Advance virtual or wall time via Clock
         await self.clock.sleep_ms(delay_ms)
+        end_ns = self.clock.now_ns()
+        dur_ns = end_ns - start_ns if end_ns > start_ns else int(delay_ms * 1_000_000)
+
+        self.call_history.append((dict(call.arguments), start_ns))
 
         return ToolResult(
             call_id=call.call_id,
@@ -95,14 +124,14 @@ class ReplayToolAdapter(BaseToolAdapter):
             is_error=False,
             execution_time_ns=dur_ns,
             execution_time_ms=delay_ms,
-            started_at=start_wall,
-            finished_at=start_wall + (delay_ms / 1000.0),
+            started_at=start_ns / 1_000_000_000.0,
+            finished_at=end_ns / 1_000_000_000.0,
             cost_usd=0.0001,
         )
 
 
 class ReplayLLMAdapter(BaseLLMAdapter):
-    """Deterministic virtual-time LLM adapter replaying decisions and streaming chunks."""
+    """Deterministic, causal virtual-time LLM adapter evaluating decisions from execution history."""
 
     def __init__(
         self,
@@ -111,6 +140,7 @@ class ReplayLLMAdapter(BaseLLMAdapter):
         decision_delay_ms: float = 30.0,
         stream_chunks_count: int = 4,
         clock: Clock | None = None,
+        policy: Callable[[AgentTask, list[dict[str, Any]]], LLMDecision] | None = None,
     ):
         self.decisions = list(decisions or [])
         self.draft_prediction = draft_prediction
@@ -118,8 +148,11 @@ class ReplayLLMAdapter(BaseLLMAdapter):
         self.stream_chunks_count = stream_chunks_count
         self._turn_index = 0
         self.clock = clock or VirtualClock()
+        self.policy = policy
 
-    def _get_decision_sync(self, task: AgentTask) -> LLMDecision:
+    def _get_decision_sync(self, task: AgentTask, history: list[dict[str, Any]] | None = None) -> LLMDecision:
+        if self.policy is not None:
+            return self.policy(task, history or [])
         if self._turn_index < len(self.decisions):
             decision = self.decisions[self._turn_index]
             self._turn_index += 1
@@ -139,7 +172,7 @@ class ReplayLLMAdapter(BaseLLMAdapter):
         tools: list[ToolSpec],
     ) -> LLMDecision:
         await self.clock.sleep_ms(self.decision_delay_ms)
-        return self._get_decision_sync(task)
+        return self._get_decision_sync(task, history)
 
     async def predict_draft(
         self,
@@ -156,7 +189,7 @@ class ReplayLLMAdapter(BaseLLMAdapter):
         history: list[dict[str, Any]],
         tools: list[ToolSpec],
     ) -> AsyncIterator[StreamingChunk]:
-        decision = self._get_decision_sync(task)
+        decision = self._get_decision_sync(task, history)
         chunks = max(1, self.stream_chunks_count)
         chunk_delay = self.decision_delay_ms / chunks if chunks > 0 else 0.0
 
