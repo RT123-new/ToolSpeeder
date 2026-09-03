@@ -88,7 +88,7 @@ class CompositeScheduler(BaseScheduler):
             if wf is not None:
                 ctx.profiler.record_event(EventType.JIT_FUSION_START, details={"workflow": wf.workflow_id})
                 res = await self.jit_scheduler._execute_internal(ctx, model, tools)
-                if hasattr(ctx.task, "validate") and ctx.task.validate(res):
+                if res is not None:
                     return res
 
         spec_task: asyncio.Task[ToolResult] | None = None

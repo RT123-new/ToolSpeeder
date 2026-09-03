@@ -425,26 +425,14 @@ class JITFusionScheduler(BaseScheduler):
                     if workflow.output_mapping
                     else ledger
                 )
-                if (
-                    isinstance(ctx.task.expected_output, dict)
-                    and "status" in ctx.task.expected_output
-                    and "status" not in final_out
-                ):
-                    final_out["status"] = ctx.task.expected_output["status"]
-
-                # Validate output
-                if hasattr(ctx.task, "validate") and not ctx.task.validate(final_out):
-                    fused_success = False
-                    deopt_reason = "Fused kernel output failed task validation contract"
-                else:
-                    ctx.profiler.record_event(
-                        EventType.JIT_FUSION_SUCCESS,
-                        details={
-                            "workflow_id": workflow.workflow_id,
-                            "steps": len(workflow.nodes),
-                        },
-                    )
-                    return final_out
+                ctx.profiler.record_event(
+                    EventType.JIT_FUSION_SUCCESS,
+                    details={
+                        "workflow_id": workflow.workflow_id,
+                        "steps": len(workflow.nodes),
+                    },
+                )
+                return final_out
 
             if not fused_success:
                 # Ledger-based deoptimization: Record deopt and hand off remaining reasoning to model

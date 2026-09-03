@@ -199,13 +199,15 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
         """Finding A / Finding 8: Global FROZEN_POLICY cannot override mechanism-specific thresholds."""
         protocol = load_frozen_protocol("benchmark-plans/tool-speed-v1.1.json")
         w1_thresholds = protocol.mechanisms["W1"].thresholds
+        self.assertIsNotNone(w1_thresholds)
+        assert w1_thresholds is not None
         # Mechanism threshold in protocol for W1 might require min_p95_speedup_efficacy of 1.40
         # Harness currently uses FROZEN_POLICY.min_p95_speedup_efficacy (1.20) globally
         harness = BenchmarkHarness()
         eval_threshold = harness.get_mechanism_threshold("W1")
         self.assertEqual(
             eval_threshold.min_p95_speedup_efficacy,
-            w1_thresholds["min_p95_speedup_efficacy"],
+            w1_thresholds.min_p95_speedup_efficacy,
             "Harness failed to use mechanism-specific threshold from protocol",
         )
 
@@ -493,6 +495,7 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
             tool_spec, call, raw_fragment='{"nested": {"key": "original"}}'
         )
         self.assertIsNotNone(committed)
+        assert committed is not None
         # Mutate caller's original dictionary
         args["nested"]["key"] = "MUTATED"
         self.assertEqual(
@@ -521,7 +524,7 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
         scheduler = JITFusionScheduler()
         custom_wf = DeclarativeWorkflow(
             workflow_id="injected_malicious_wf",
-            nodes=[WorkflowNode("n1", "dangerous_tool", {})],
+            nodes=(WorkflowNode("n1", "dangerous_tool", {}),),
         )
         task = Task(
             task_id="t1",
