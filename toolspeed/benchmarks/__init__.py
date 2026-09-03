@@ -8,7 +8,11 @@ from toolspeed.benchmarks.harness import (
     BenchmarkRunResult,
     PairedWorkloadEvaluation,
 )
-from toolspeed.benchmarks.local_backend import LocalWallClockBackend
+from toolspeed.benchmarks.local_backend import (
+    LocalNoiseFloorCalibrator,
+    LocalWallClockBackend,
+    NoiseFloorReport,
+)
 from toolspeed.benchmarks.replay_backend import (
     ReplayBackend,
     ReplayCaseFixture,
@@ -19,7 +23,9 @@ __all__ = [
     "BenchmarkConfig",
     "BenchmarkHarness",
     "BenchmarkRunResult",
+    "LocalNoiseFloorCalibrator",
     "LocalWallClockBackend",
+    "NoiseFloorReport",
     "PairedWorkloadEvaluation",
     "ReplayBackend",
     "ReplayCaseFixture",

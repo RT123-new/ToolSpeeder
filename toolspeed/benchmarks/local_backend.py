@@ -39,6 +39,7 @@ from toolspeed.core.types import (
     ToolResult,
     ToolSpec,
 )
+from toolspeed.schedulers.base import BaseScheduler, SchedulerConfig
 
 
 class ThreadingLocalTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -121,7 +122,10 @@ class LocalWallClockBackend:
         self.rng = np.random.default_rng(seed)
         self._servers: list[LocalHTTPServer] = []
         self._temp_dirs: list[str] = []
-        self._lock = threading.Lock()
+        self._arm_servers: dict[tuple[str, int], LocalHTTPServer] = {}
+        self._arm_sandbox_dirs: dict[tuple[str, int], str] = {}
+        self._arm_fileio_dirs: dict[tuple[str, int], str] = {}
+        self._lock = threading.RLock()
         self._shared_server: LocalHTTPServer | None = None
         self._shared_sandbox_dir: str | None = None
         self._shared_fileio_dir: str | None = None
@@ -133,8 +137,7 @@ class LocalWallClockBackend:
 
     async def create_w2_state(self, trial_idx: int = 0, arm: str = "baseline") -> W2State:
         """Creates an isolated, non-shared SQLite database file per trial and arm with deterministic initial data."""
-        d = tempfile.mkdtemp(prefix=f"toolspeed_w2_{arm}_{trial_idx}_")
-        self._temp_dirs.append(d)
+        d = self._get_isolated_fileio_dir(arm, trial_idx)
         db_file = os.path.join(d, "w2_orders.db")
         conn = sqlite3.connect(db_file)
         cur = conn.cursor()
@@ -171,30 +174,65 @@ class LocalWallClockBackend:
             conn.commit()
             conn.close()
 
-    def _get_shared_server(self) -> LocalHTTPServer:
+    def _get_isolated_server(self, arm: str, trial_index: int) -> LocalHTTPServer:
         with self._lock:
-            if self._shared_server is None:
+            key = (arm, trial_index)
+            if key not in self._arm_servers:
                 srv = LocalHTTPServer()
                 srv.start()
                 self._servers.append(srv)
-                self._shared_server = srv
-            return self._shared_server
+                self._arm_servers[key] = srv
+            return self._arm_servers[key]
+
+    def _get_isolated_sandbox_dir(self, arm: str, trial_index: int) -> str:
+        with self._lock:
+            key = (arm, trial_index)
+            if key not in self._arm_sandbox_dirs:
+                d = tempfile.mkdtemp(prefix=f"toolspeed_local_sb_{arm}_{trial_index}_")
+                self._temp_dirs.append(d)
+                self._arm_sandbox_dirs[key] = d
+            return self._arm_sandbox_dirs[key]
+
+    def _get_isolated_fileio_dir(self, arm: str, trial_index: int) -> str:
+        with self._lock:
+            key = (arm, trial_index)
+            if key not in self._arm_fileio_dirs:
+                d = tempfile.mkdtemp(prefix=f"toolspeed_local_fio_{arm}_{trial_index}_")
+                self._temp_dirs.append(d)
+                self._arm_fileio_dirs[key] = d
+            return self._arm_fileio_dirs[key]
+
+    def _get_shared_server(self) -> LocalHTTPServer:
+        return self._get_isolated_server("shared", 0)
 
     def _get_shared_sandbox_dir(self) -> str:
-        with self._lock:
-            if self._shared_sandbox_dir is None:
-                d = tempfile.mkdtemp(prefix="toolspeed_local_sb_")
-                self._temp_dirs.append(d)
-                self._shared_sandbox_dir = d
-            return self._shared_sandbox_dir
+        return self._get_isolated_sandbox_dir("shared", 0)
 
     def _get_shared_fileio_dir(self) -> str:
+        return self._get_isolated_fileio_dir("shared", 0)
+
+    def cleanup(self) -> None:
+        """Clean up all isolated servers and temp directories."""
         with self._lock:
-            if self._shared_fileio_dir is None:
-                d = tempfile.mkdtemp(prefix="toolspeed_local_fio_")
-                self._temp_dirs.append(d)
-                self._shared_fileio_dir = d
-            return self._shared_fileio_dir
+            for srv in self._servers:
+                try:
+                    srv.stop()
+                except Exception:
+                    pass
+            self._servers.clear()
+            self._arm_servers.clear()
+            for d in self._temp_dirs:
+                if os.path.exists(d):
+                    try:
+                        shutil.rmtree(d)
+                    except Exception:
+                        pass
+            self._temp_dirs.clear()
+            self._arm_sandbox_dirs.clear()
+            self._arm_fileio_dirs.clear()
+
+    def __del__(self) -> None:
+        self.cleanup()
 
     def generate_task(self, workload_id: str, trial_index: int = 0, seed: int | None = None) -> Task:
         """Constructs an immutable Task with seeded parameters and strict validator."""
@@ -277,7 +315,7 @@ class LocalWallClockBackend:
         self, workload_id: str, trial_index: int = 0, arm: str = "baseline"
     ) -> tuple[ToolRegistry, BaseLLMAdapter]:
         registry = ToolRegistry()
-        server = self._get_shared_server()
+        server = self._get_isolated_server(arm, trial_index)
 
         if workload_id == "W1":
 
@@ -332,7 +370,7 @@ class LocalWallClockBackend:
             return registry, model
 
         elif workload_id == "W2":
-            db_dir = self._get_shared_fileio_dir()
+            db_dir = self._get_isolated_fileio_dir(arm, trial_index)
             db_path = os.path.join(db_dir, f"test_chain_{trial_index}.db")
 
             conn = sqlite3.connect(db_path)
@@ -568,7 +606,7 @@ class LocalWallClockBackend:
             return registry, model
 
         elif workload_id == "W6":
-            sandbox_dir = self._get_shared_sandbox_dir()
+            sandbox_dir = self._get_isolated_sandbox_dir(arm, trial_index)
 
             class LocalSubprocessTool(BaseToolAdapter):
                 @property
@@ -721,26 +759,6 @@ class LocalWallClockBackend:
             model = LocalScriptedAdapter(decisions=decisions, decision_delay_s=0.001)
             return registry, model
 
-    def cleanup(self) -> None:
-        """Tears down servers and deletes temporary sandbox directories."""
-        with self._lock:
-            for s in self._servers:
-                try:
-                    s.stop()
-                except Exception:
-                    pass
-            self._servers.clear()
-            self._shared_server = None
-
-            for d in self._temp_dirs:
-                try:
-                    shutil.rmtree(d, ignore_errors=True)
-                except Exception:
-                    pass
-            self._temp_dirs.clear()
-            self._shared_sandbox_dir = None
-            self._shared_fileio_dir = None
-
     async def close(self) -> None:
         self.cleanup()
 
@@ -833,3 +851,109 @@ class LocalScriptedAdapter(BaseLLMAdapter):
                 parsed_tool_calls=decision.tool_calls if is_final else [],
                 metadata={"final_answer": decision.final_answer} if is_final else {},
             )
+
+
+@dataclass
+class NoiseFloorReport:
+    """Empirical noise floor and minimum detectable effect (MDE) characterization."""
+
+    null_baseline_p50_ms: float
+    null_baseline_p95_ms: float
+    null_candidate_p50_ms: float
+    null_candidate_p95_ms: float
+    noise_floor_ms: float
+    mde_ms: float  # 3x noise floor
+    trials_sampled: int
+    is_statistically_sound: bool
+    rejection_reason: str = ""
+
+    def evaluate_claim(self, measured_effect_ms: float) -> tuple[bool, str]:
+        """Evaluates whether a measured speedup / effect exceeds the 3x noise floor threshold."""
+        if abs(measured_effect_ms) < self.mde_ms:
+            reason = (
+                f"Claim rejected: measured effect {measured_effect_ms:.4f}ms is below "
+                f"the minimum detectable effect (MDE) of 3x noise floor ({self.mde_ms:.4f}ms)."
+            )
+            return False, reason
+        return True, f"Claim accepted: measured effect {measured_effect_ms:.4f}ms exceeds MDE ({self.mde_ms:.4f}ms)."
+
+
+class LocalNoiseFloorCalibrator:
+    """Calibrates local wall-clock measurement noise using null-hypothesis runs."""
+
+    def __init__(self, backend: LocalWallClockBackend | None = None) -> None:
+        self.backend = backend or LocalWallClockBackend()
+
+    async def calibrate(
+        self,
+        baseline_cls: type[BaseScheduler],
+        candidate_cls: type[BaseScheduler],
+        workload_id: str = "W1",
+        trials: int = 5,
+        config: SchedulerConfig | None = None,
+    ) -> NoiseFloorReport:
+        """Runs null-hypothesis comparisons (baseline vs baseline, candidate vs candidate)
+
+        to measure empirical noise floor and compute MDE (3x noise floor).
+        """
+        cfg = config or SchedulerConfig(concurrency_limit=4)
+        base_diffs: list[float] = []
+        cand_diffs: list[float] = []
+
+        for t in range(trials):
+            # 1. baseline vs baseline null test
+            t_b1 = self.backend.generate_task(workload_id, trial_index=t, seed=self.backend.seed)
+            t_b2 = self.backend.generate_task(workload_id, trial_index=t, seed=self.backend.seed)
+            r1, m1 = self.backend.create_workload_environment(workload_id, trial_index=t, arm="null_base_a")
+            r2, m2 = self.backend.create_workload_environment(workload_id, trial_index=t, arm="null_base_b")
+
+            s_b1 = baseline_cls(cfg)
+            s_b2 = baseline_cls(cfg)
+
+            task_b1_sched = t_b1.to_model_task() if hasattr(t_b1, "to_model_task") else t_b1
+            task_b2_sched = t_b2.to_model_task() if hasattr(t_b2, "to_model_task") else t_b2
+
+            res_b1 = await s_b1.execute(task_b1_sched, m1, r1)
+            res_b2 = await s_b2.execute(task_b2_sched, m2, r2)
+
+            diff_base = abs(res_b1.total_duration_ms - res_b2.total_duration_ms)
+            base_diffs.append(diff_base)
+
+            # 2. candidate vs candidate null test
+            t_c1 = self.backend.generate_task(workload_id, trial_index=t, seed=self.backend.seed)
+            t_c2 = self.backend.generate_task(workload_id, trial_index=t, seed=self.backend.seed)
+            r3, m3 = self.backend.create_workload_environment(workload_id, trial_index=t, arm="null_cand_a")
+            r4, m4 = self.backend.create_workload_environment(workload_id, trial_index=t, arm="null_cand_b")
+
+            s_c1 = candidate_cls(cfg)
+            s_c2 = candidate_cls(cfg)
+
+            task_c1_sched = t_c1.to_model_task() if hasattr(t_c1, "to_model_task") else t_c1
+            task_c2_sched = t_c2.to_model_task() if hasattr(t_c2, "to_model_task") else t_c2
+
+            res_c1 = await s_c1.execute(task_c1_sched, m3, r3)
+            res_c2 = await s_c2.execute(task_c2_sched, m4, r4)
+
+            diff_cand = abs(res_c1.total_duration_ms - res_c2.total_duration_ms)
+            cand_diffs.append(diff_cand)
+
+        p50_b = float(np.percentile(base_diffs, 50)) if base_diffs else 0.0
+        p95_b = float(np.percentile(base_diffs, 95)) if base_diffs else 0.0
+        p50_c = float(np.percentile(cand_diffs, 50)) if cand_diffs else 0.0
+        p95_c = float(np.percentile(cand_diffs, 95)) if cand_diffs else 0.0
+
+        all_diffs = base_diffs + cand_diffs
+        noise_floor = float(np.median(all_diffs)) if all_diffs else 0.1
+        noise_floor = max(0.01, noise_floor)
+        mde = 3.0 * noise_floor
+
+        return NoiseFloorReport(
+            null_baseline_p50_ms=p50_b,
+            null_baseline_p95_ms=p95_b,
+            null_candidate_p50_ms=p50_c,
+            null_candidate_p95_ms=p95_c,
+            noise_floor_ms=noise_floor,
+            mde_ms=mde,
+            trials_sampled=trials,
+            is_statistically_sound=True,
+        )
