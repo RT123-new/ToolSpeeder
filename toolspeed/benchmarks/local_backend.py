@@ -134,15 +134,34 @@ class LocalWallClockBackend:
         for i in range(100):
             cur.execute("INSERT INTO orders VALUES (?, ?, ?, ?)", (i, f"item_{i}", "pending", 10.0 + i))
         conn.commit()
+        cur.execute("SELECT id, item, status, amount FROM orders ORDER BY id")
+        rows = cur.fetchall()
+        tbl_hash = hashlib.sha256(json.dumps(rows).encode("utf-8")).hexdigest()
         conn.close()
-        tbl_hash = hashlib.sha256(b"w2_orders_initial_schema_and_100_rows").hexdigest()
         return W2State(db_path=db_file, table_hash=tbl_hash)
 
-    async def get_w2_row_count(self, trial_idx: int = 0) -> int:
-        return 100
+    async def get_w2_row_count(self, trial_idx: int = 0, arm: str = "baseline", db_path: str | None = None) -> int:
+        """Counts rows in the trial database."""
+        target_path = db_path
+        if not target_path:
+            state = await self.create_w2_state(trial_idx, arm)
+            target_path = state.db_path
+        conn = sqlite3.connect(target_path)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM orders")
+        cnt = int(cur.fetchone()[0])
+        conn.close()
+        return cnt
 
-    async def execute_w2_step(self, trial_idx: int = 0) -> None:
-        pass
+    async def execute_w2_step(self, trial_idx: int = 0, arm: str = "baseline", db_path: str | None = None) -> None:
+        """Executes a mutative step inserting a row into the trial database."""
+        target_path = db_path
+        if target_path and os.path.exists(target_path):
+            conn = sqlite3.connect(target_path)
+            cur = conn.cursor()
+            cur.execute("INSERT INTO orders VALUES (?, ?, ?, ?)", (999, "extra_item", "processed", 99.9))
+            conn.commit()
+            conn.close()
 
     def _get_shared_server(self) -> LocalHTTPServer:
         with self._lock:

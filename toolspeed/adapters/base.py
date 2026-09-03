@@ -236,6 +236,8 @@ class BaseLLMAdapter(ABC):
     Strictly accepts AgentTask ONLY (never Task or Oracle).
     """
 
+    is_concurrency_safe: bool = True
+
     @abstractmethod
     async def decide(
         self,

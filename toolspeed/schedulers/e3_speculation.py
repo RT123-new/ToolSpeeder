@@ -29,7 +29,7 @@ class SpeculativeReadScheduler(BaseScheduler):
 
     def supports_concurrent_adapter(self, adapter: Any) -> bool:
         """Verifies whether an adapter is explicitly concurrency-safe for overlapped speculative execution."""
-        return bool(getattr(adapter, "is_concurrency_safe", True))
+        return bool(getattr(adapter, "is_concurrency_safe", False))
 
     async def _safe_cancel_speculation(self, coro_or_task: Any) -> Exception | None:
         """Safely cancels speculative coroutine/task without leaking CancelledError."""
@@ -53,7 +53,7 @@ class SpeculativeReadScheduler(BaseScheduler):
         if contention_mode == "no_contention":
             contention_mode = "isolated"
         threshold = ctx.config.speculation_confidence_threshold
-        spec_enabled = self.config.speculation_enabled
+        spec_enabled = self.config.speculation_enabled and self.supports_concurrent_adapter(model)
 
         # In 'isolated' mode, instantiate an independent capacity limiter for speculative traffic
         isolated_executor: ToolExecutor | None = None
@@ -88,7 +88,7 @@ class SpeculativeReadScheduler(BaseScheduler):
                 if spec_task and not spec_task.done():
                     await cancel_and_await(spec_task)
 
-                # 1. Launch Draft Prediction and Main Model Reasoning CONCURRENTLY if speculation enabled
+                # 1. Launch Draft Prediction and Main Model Reasoning CONCURRENTLY if speculation enabled and model is concurrency-safe
                 if spec_enabled:
                     draft_task = asyncio.create_task(
                         model.predict_draft(ctx.agent_task, ctx.history, tools.list_specs())

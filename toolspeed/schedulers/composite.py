@@ -345,10 +345,45 @@ class CompositeScheduler(BaseScheduler):
                         node.status = "running"
 
                         async def _exec_node(n: DAGNode = node) -> ToolResult:
+                            call_name = n.call.name or n.call.tool_name
+                            adapter = tools.get(call_name)
+                            is_read = (
+                                bool(adapter.spec.is_read_only and not adapter.spec.side_effects) if adapter else False
+                            )
+
+                            if is_read and self.config.cache_enabled:
+                                cached_val, hit, _ = self.cache.get(call_name, n.call.arguments)
+                                if hit:
+                                    ctx.profiler.record_event(EventType.CACHE_HIT, details={"tool": call_name})
+                                    res = ToolResult(
+                                        call_id=n.call.call_id,
+                                        name=call_name,
+                                        tool_name=call_name,
+                                        output=cached_val,
+                                        result=cached_val,
+                                        is_error=False,
+                                        execution_time_ns=1_000,
+                                    )
+                                    n.result = res
+                                    n.status = "completed"
+                                    ctx.record_tool_result(res)
+                                    return res
+
                             res = await ctx.executor.execute(n.call)
                             n.result = res
                             n.status = "completed" if res.is_success else "failed"
                             ctx.record_tool_result(res)
+
+                            if res.is_success and self.config.cache_enabled:
+                                if is_read:
+                                    self.cache.put(
+                                        call_name,
+                                        n.call.arguments,
+                                        res.output if res.output is not None else res.result,
+                                    )
+                                else:
+                                    self.cache.invalidate_tool(call_name)
+
                             return res
 
                         active_dag_tasks[asyncio.create_task(_exec_node())] = node

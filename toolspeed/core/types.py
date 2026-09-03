@@ -1403,6 +1403,9 @@ class Task:
         if self.expected_output is None:
             return False
 
+        if isinstance(self.expected_output, dict) and isinstance(actual_output, dict):
+            return all(k in actual_output and actual_output[k] == v for k, v in self.expected_output.items())
+
         return bool(self.expected_output == actual_output)
 
 

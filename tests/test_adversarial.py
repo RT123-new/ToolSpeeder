@@ -422,7 +422,11 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
 
         Verification: Invalid result is NOT returned; scheduler deoptimizes to model reasoning.
         """
-        from toolspeed.schedulers.e2_jit_fusion import DeclarativeWorkflow, WorkflowNode
+        from toolspeed.schedulers.e2_jit_fusion import (
+            DeclarativeWorkflow,
+            WorkflowInvariant,
+            WorkflowNode,
+        )
 
         bad_workflow = DeclarativeWorkflow(
             workflow_id="corrupted_kernel",
@@ -432,6 +436,14 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
                     tool_name="fetch_user",
                     args_template={"user_id": "$context.user_id"},
                     output_key="user",
+                ),
+            ),
+            invariants=(
+                WorkflowInvariant(
+                    field_path="user.status",
+                    operator="equals",
+                    expected_value="active",
+                    description="User status must be active",
                 ),
             ),
             output_mapping={"sum": -99999},

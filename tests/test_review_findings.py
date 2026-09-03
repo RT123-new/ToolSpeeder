@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, ToolRegistry
 from toolspeed.adapters.live_tools import AsyncLocalFileIOTool, SafeSubprocessSandbox
 from toolspeed.benchmarks.harness import (
     BenchmarkConfig,
@@ -29,6 +30,7 @@ from toolspeed.core.protocol import (
 from toolspeed.core.types import (
     AgentTask,
     BenchmarkCase,
+    EventType,
     EvidenceLevel,
     ExpectedOutcome,
     StateSnapshot,
@@ -556,12 +558,35 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
         scheduler = SpeculativeReadScheduler()
 
         # Mock adapter that is explicitly not concurrency safe
-        class NonThreadSafeAdapter:
+        class NonThreadSafeAdapter(BaseLLMAdapter):
             is_concurrency_safe = False
 
+            def __init__(self) -> None:
+                self.predict_draft_called = False
+
+            async def decide(
+                self, task: AgentTask, history: list[dict[str, Any]], available_tools: list[ToolSpec]
+            ) -> LLMDecision:
+                return LLMDecision(final_answer="done")
+
+            async def predict_draft(
+                self, task: AgentTask, history: list[dict[str, Any]], available_tools: list[ToolSpec]
+            ) -> ToolCall | None:
+                self.predict_draft_called = True
+                return None
+
+        adapter = NonThreadSafeAdapter()
         self.assertFalse(
-            scheduler.supports_concurrent_adapter(NonThreadSafeAdapter()),
+            scheduler.supports_concurrent_adapter(adapter),
             "E3 allowed concurrent speculation with an adapter not declared concurrency-safe",
+        )
+
+        # Behavioral test: scheduler must refuse to invoke predict_draft when adapter is not concurrency-safe
+        ctx = ExecutionContext(task=AgentTask("t1", "prompt"))
+        await scheduler._execute_internal(ctx, adapter, ToolRegistry())
+        self.assertFalse(
+            adapter.predict_draft_called,
+            "Scheduler executed concurrent predict_draft on non-concurrency-safe adapter",
         )
 
     async def test_30_e3_single_slot_speculative_failure_leaks_cancelled_error(self) -> None:
@@ -586,10 +611,16 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
     async def test_32_w2_rows_accumulate_between_trials(self) -> None:
         """Finding G / Finding 32: Sequential W2 trials must not accumulate rows in database."""
         backend = LocalWallClockBackend()
-        count1 = await backend.get_w2_row_count(trial_idx=0)
-        await backend.execute_w2_step(trial_idx=0)
-        count2 = await backend.get_w2_row_count(trial_idx=1)
-        self.assertEqual(count1, count2, "W2 rows accumulated across sequential trials in SQLite")
+        state0 = await backend.create_w2_state(trial_idx=0, arm="candidate")
+        count0 = await backend.get_w2_row_count(trial_idx=0, db_path=state0.db_path)
+        self.assertEqual(count0, 100)
+        await backend.execute_w2_step(trial_idx=0, db_path=state0.db_path)
+        mutated_count0 = await backend.get_w2_row_count(trial_idx=0, db_path=state0.db_path)
+        self.assertEqual(mutated_count0, 101, "Trial 0 failed to execute real row mutation")
+
+        state1 = await backend.create_w2_state(trial_idx=1, arm="candidate")
+        count1 = await backend.get_w2_row_count(trial_idx=1, db_path=state1.db_path)
+        self.assertEqual(count1, 100, "W2 rows accumulated across sequential trials in SQLite")
 
     # -------------------------------------------------------------------------
     # Finding G / Finding 33: W6 persistent cold vs warm pools
@@ -598,11 +629,21 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
         """Finding G / Finding 33: W6 must implement and measure real PersistentColdPool vs PersistentPrewarmedPool."""
         from toolspeed.workloads.w6_cold_start import PersistentColdPool, PersistentPrewarmedPool
 
-        cold = PersistentColdPool()
-        warm = PersistentPrewarmedPool()
-        t_cold = await cold.acquire_time_ms()
-        t_warm = await warm.acquire_time_ms()
+        cold = PersistentColdPool(capacity=2, init_latency_ms=40.0)
+        warm = PersistentPrewarmedPool(capacity=2, warm_latency_ms=2.0)
+
+        # Behavioral acquisition and slot tracking
+        slot_cold, t_cold = await cold.acquire_slot()
+        slot_warm, t_warm = await warm.acquire_slot()
+
+        self.assertTrue(slot_cold.is_acquired)
+        self.assertTrue(slot_warm.is_acquired)
         self.assertGreater(t_cold, t_warm + 5.0, "Cold pool startup latency was not greater than prewarmed pool")
+
+        await cold.release_slot(slot_cold)
+        await warm.release_slot(slot_warm)
+        self.assertFalse(slot_cold.is_acquired)
+        self.assertFalse(slot_warm.is_acquired)
 
     # -------------------------------------------------------------------------
     # Finding E & Phase 24: W7 Side effects and authority
@@ -647,12 +688,23 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
 
     def test_36_e5a_comparison_settings_are_asymmetric(self) -> None:
         """Finding K / Finding 36: JSON and bytecode benchmark comparisons must use identical serialization."""
-        from toolspeed.benchmarks.codec_bench import get_bytecode_codec, get_json_codec
+        from toolspeed.benchmarks.codec_bench import (
+            benchmark_codecs_symmetric,
+            get_bytecode_codec,
+            get_json_codec,
+        )
 
         json_c = get_json_codec()
         byte_c = get_bytecode_codec()
         self.assertEqual(json_c.float_precision_policy, byte_c.float_precision_policy)
         self.assertEqual(json_c.key_sort_policy, byte_c.key_sort_policy)
+
+        # Behavioral test: benchmark real tool call across codecs
+        call = ToolCall(call_id="c_symmetric", tool_name="fetch_data", arguments={"page": 1, "query": "test"})
+        res = benchmark_codecs_symmetric(call, schema_hash="schema_xyz")
+        self.assertTrue(res.round_trip_equal, "Codecs produced mismatched round-trip outputs under symmetric benchmark")
+        self.assertGreater(res.json_bytes, 0)
+        self.assertGreater(res.bytecode_bytes, 0)
 
     # -------------------------------------------------------------------------
     # Finding L: Phase 2 Cache Eviction & Scoping
@@ -690,8 +742,10 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
         _val, hit, _ = cache.get("sensitive_query", {"q": "balance"}, tenant="tenant_B")
         self.assertFalse(hit, "Cache leaked entries across tenant isolation boundary")
 
-    def test_40_composite_claims_caching_while_bypassing_cache_lookup(self) -> None:
+    async def test_40_composite_claims_caching_while_bypassing_cache_lookup(self) -> None:
         """Finding M / Finding 40: Composite scheduler must visibly route read tool calls through cache."""
+        from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, ToolRegistry
+        from toolspeed.adapters.mock_tools import MockToolAdapter
         from toolspeed.schedulers.composite import CompositeScheduler
 
         scheduler = CompositeScheduler()
@@ -699,6 +753,64 @@ class TestReviewFindingsRedTests(unittest.IsolatedAsyncioTestCase):
             scheduler.has_cache_lookup_in_dispatch_path(),
             "Composite scheduler claims caching but bypasses cache in execution path",
         )
+
+        # Behavioral test: execute repeated read calls and verify caching
+        call_count = 0
+
+        def read_handler(args: dict[str, Any]) -> dict[str, Any]:
+            nonlocal call_count
+            call_count += 1
+            return {"user": "alice"}
+
+        reg = ToolRegistry()
+        reg.register(
+            MockToolAdapter(
+                spec=ToolSpec("read_user", required_args=["user_id"], is_read_only=True, is_idempotent=True),
+                handler=read_handler,
+            )
+        )
+
+        class MockRecomputationLLM(BaseLLMAdapter):
+            def __init__(self, decisions: list[LLMDecision]) -> None:
+                self.decisions = list(decisions)
+                self._turn = 0
+
+            async def decide(
+                self, task: AgentTask, history: list[dict[str, Any]], available_tools: list[ToolSpec]
+            ) -> LLMDecision:
+                if self._turn < len(self.decisions):
+                    d = self.decisions[self._turn]
+                    self._turn += 1
+                    return d
+                return LLMDecision(final_answer="done")
+
+            async def predict_draft(
+                self, task: AgentTask, history: list[dict[str, Any]], available_tools: list[ToolSpec]
+            ) -> ToolCall | None:
+                return None
+
+        llm1 = MockRecomputationLLM(
+            decisions=[
+                LLMDecision(tool_calls=[ToolCall("c1", "read_user", {"user_id": "u1"})]),
+                LLMDecision(final_answer="done"),
+            ]
+        )
+        task1 = AgentTask("t1", "get user")
+        await scheduler.execute(task1, llm1, reg)
+        self.assertEqual(call_count, 1)
+
+        llm2 = MockRecomputationLLM(
+            decisions=[
+                LLMDecision(tool_calls=[ToolCall("c2", "read_user", {"user_id": "u1"})]),
+                LLMDecision(final_answer="done"),
+            ]
+        )
+        task2 = AgentTask("t2", "get user again")
+        res2 = await scheduler.execute(task2, llm2, reg)
+        # Handler must not have been called a second time due to cache hit!
+        self.assertEqual(call_count, 1, "Composite scheduler did not reuse cached tool result on identical read")
+        has_cache_hit = any(e.event_type == EventType.CACHE_HIT for e in res2.events)
+        self.assertTrue(has_cache_hit, "Composite scheduler failed to record CACHE_HIT event on cached read")
 
     # -------------------------------------------------------------------------
     # Finding N: Local tool security & isolation

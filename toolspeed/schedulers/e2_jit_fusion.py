@@ -206,6 +206,7 @@ class WorkflowRegistry:
             output_mapping={
                 "user": "$user",
                 "orders": "$orders",
+                "status": "compiled_complete",
                 "fused": True,
             },
             description="Fused fetch_user -> fetch_orders declarative workflow",

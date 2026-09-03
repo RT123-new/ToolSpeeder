@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import numpy as np
@@ -115,21 +116,96 @@ class W6ColdStartWorkload(BaseWorkload):
         return FunctionValidator(_validate)
 
 
-class PersistentColdPool:
-    """Simulates an on-demand un-warmed container pool with real spin-up latency."""
+class PoolSlot:
+    """Represents an isolated sandbox / worker execution slot."""
 
-    def __init__(self, init_latency_ms: float = 35.0) -> None:
-        self.init_latency_ms = init_latency_ms
+    def __init__(self, slot_id: str, is_warm: bool = False, init_cost_ms: float = 35.0) -> None:
+        self.slot_id = slot_id
+        self.is_warm = is_warm
+        self.init_cost_ms = init_cost_ms
+        self.is_acquired = False
+        self.acquired_at: float | None = None
+        self.released_at: float | None = None
+
+
+class BaseContainerPool:
+    """Base class for container/sandbox pools with slot lifecycle tracking."""
+
+    def __init__(
+        self,
+        capacity: int = 10,
+        cold_start_delay_ms: float = 35.0,
+        warm_start_delay_ms: float = 2.0,
+        prewarmed: bool = False,
+    ) -> None:
+        import asyncio
+
+        self._asyncio = asyncio
+        self.capacity = capacity
+        self.cold_start_delay_ms = cold_start_delay_ms
+        self.warm_start_delay_ms = warm_start_delay_ms
+        self.is_prewarmed_pool = prewarmed
+        self._slots: list[PoolSlot] = [
+            PoolSlot(f"slot_{i}", is_warm=prewarmed, init_cost_ms=cold_start_delay_ms) for i in range(capacity)
+        ]
+        self._lock: asyncio.Lock | None = None
+        self.total_acquisitions = 0
+        self.total_prewarm_cost_ms = (capacity * cold_start_delay_ms) if prewarmed else 0.0
+
+    def _get_lock(self) -> Any:
+        if self._lock is None:
+            self._lock = self._asyncio.Lock()
+        return self._lock
+
+    async def acquire_slot(self) -> tuple[PoolSlot, float]:
+        """Acquires a slot and returns (slot, latency_cost_ms)."""
+        lock = self._get_lock()
+        async with lock:
+            for slot in self._slots:
+                if not slot.is_acquired:
+                    slot.is_acquired = True
+                    slot.acquired_at = time.perf_counter()
+                    self.total_acquisitions += 1
+                    if slot.is_warm:
+                        return slot, self.warm_start_delay_ms
+                    else:
+                        slot.is_warm = True
+                        return slot, self.cold_start_delay_ms
+            raise RuntimeError("Container pool exhausted: no free slots available")
+
+    async def release_slot(self, slot: PoolSlot) -> None:
+        """Releases an acquired slot back to the pool."""
+        lock = self._get_lock()
+        async with lock:
+            slot.is_acquired = False
+            slot.released_at = time.perf_counter()
 
     async def acquire_time_ms(self) -> float:
-        return self.init_latency_ms
+        """Acquires and immediately releases a slot to measure acquisition latency."""
+        slot, latency = await self.acquire_slot()
+        await self.release_slot(slot)
+        return latency
 
 
-class PersistentPrewarmedPool:
-    """Simulates an active pre-warmed container pool with immediate slot acquisition."""
+class PersistentColdPool(BaseContainerPool):
+    """Cold container pool: slots require cold-start initialization on first acquisition."""
 
-    def __init__(self, warm_latency_ms: float = 2.0) -> None:
-        self.warm_latency_ms = warm_latency_ms
+    def __init__(self, capacity: int = 10, init_latency_ms: float = 35.0) -> None:
+        super().__init__(
+            capacity=capacity,
+            cold_start_delay_ms=init_latency_ms,
+            warm_start_delay_ms=2.0,
+            prewarmed=False,
+        )
 
-    async def acquire_time_ms(self) -> float:
-        return self.warm_latency_ms
+
+class PersistentPrewarmedPool(BaseContainerPool):
+    """Prewarmed container pool: slots are initialized ahead of time for low latency."""
+
+    def __init__(self, capacity: int = 10, warm_latency_ms: float = 2.0) -> None:
+        super().__init__(
+            capacity=capacity,
+            cold_start_delay_ms=35.0,
+            warm_start_delay_ms=warm_latency_ms,
+            prewarmed=True,
+        )
