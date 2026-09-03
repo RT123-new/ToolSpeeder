@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -733,3 +734,33 @@ class BenchmarkHarness:
             total_runtime_s=total_runtime,
             protocol=self.protocol,
         )
+
+    async def run_multi_seed_benchmark(
+        self, seeds: list[int] | None = None, trials: int | None = None
+    ) -> list[BenchmarkRunResult]:
+        """Executes genuine outer loops over all specified protocol seeds and verifies cross-seed variance."""
+        effective_seeds = list(seeds) if seeds is not None else list(self.config.seeds)
+        results: list[BenchmarkRunResult] = []
+        eff_trials = trials if trials is not None else self.config.trials_per_condition
+
+        for s in effective_seeds:
+            # Re-seed backend for genuine independent task instances
+            self.backend.reseed(s)
+            self.config.seed = s
+            res = await self.run_full_benchmark(trials=eff_trials)
+            results.append(res)
+
+        # Integrity verification: fail if multiple seeds claim execution but produce identical case digests
+        if len(results) > 1:
+            case_hashes = set()
+            for r in results:
+                serialized_cases = "".join(r_c.task_id for ev in r.evaluations for r_c in ev.candidate_results)
+                case_digest = hashlib.sha256(serialized_cases.encode("utf-8")).hexdigest()
+                case_hashes.add(case_digest)
+            if len(case_hashes) < len(results):
+                raise ValueError(
+                    f"Multi-seed integrity failure: {len(results)} seeds were executed but produced identical task cases! "
+                    f"Unique case digests: {len(case_hashes)}. Fixtures must vary across seeds."
+                )
+
+        return results

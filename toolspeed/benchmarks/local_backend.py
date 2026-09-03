@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 from typing_extensions import Self
 
 from toolspeed.adapters.base import (
@@ -114,14 +115,21 @@ class W2State:
 class LocalWallClockBackend:
     """Local Wall-Clock Backend executing real OS primitives with pure monotonic timing."""
 
-    def __init__(self, evidence_level: EvidenceLevel = EvidenceLevel.LOCAL_WALL_CLOCK):
+    def __init__(self, evidence_level: EvidenceLevel = EvidenceLevel.LOCAL_WALL_CLOCK, seed: int = 42):
         self.evidence_level = evidence_level
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
         self._servers: list[LocalHTTPServer] = []
         self._temp_dirs: list[str] = []
         self._lock = threading.Lock()
         self._shared_server: LocalHTTPServer | None = None
         self._shared_sandbox_dir: str | None = None
         self._shared_fileio_dir: str | None = None
+
+    def reseed(self, seed: int) -> None:
+        """Reseeds the backend RNG and trial parameter generator."""
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
 
     async def create_w2_state(self, trial_idx: int = 0, arm: str = "baseline") -> W2State:
         """Creates an isolated, non-shared SQLite database file per trial and arm with deterministic initial data."""
@@ -188,74 +196,81 @@ class LocalWallClockBackend:
                 self._shared_fileio_dir = d
             return self._shared_fileio_dir
 
-    def generate_task(self, workload_id: str, trial_index: int = 0) -> Task:
+    def generate_task(self, workload_id: str, trial_index: int = 0, seed: int | None = None) -> Task:
         """Constructs an immutable Task with seeded parameters and strict validator."""
+        eff_seed = seed if seed is not None else self.seed
         if workload_id == "W1":
             return Task(
-                task_id=f"w1_local_trial_{trial_index:04d}",
-                prompt=f"Query local HTTP server shards 0 to 4 for trial {trial_index}",
+                task_id=f"w1_local_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Query local HTTP server shards 0 to 4 for trial {trial_index} (seed={eff_seed})",
                 expected_output={"status": "success", "total_shards": 5},
-                metadata={"workload_id": "W1", "trial_index": trial_index},
+                metadata={"workload_id": "W1", "trial_index": trial_index, "seed": eff_seed},
             )
         elif workload_id == "W2":
             return Task(
-                task_id=f"w2_local_trial_{trial_index:04d}",
-                prompt=f"Execute SQLite user orders chain for user u_{trial_index}",
-                context={"user_id": f"u_{trial_index}"},
+                task_id=f"w2_local_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Execute SQLite user orders chain for user u_{eff_seed}_{trial_index}",
+                context={"user_id": f"u_{eff_seed}_{trial_index}"},
                 expected_output={
-                    "user": {"user_id": f"u_{trial_index}", "name": f"User_{trial_index}"},
+                    "user": {"user_id": f"u_{eff_seed}_{trial_index}", "name": f"User_{trial_index}"},
                     "orders": {"order_count": 2},
+                    "status": "compiled_complete",
                     "fused": True,
                 },
-                metadata={"workload_id": "W2", "trial_index": trial_index, "workflow_id": "user_orders"},
+                metadata={
+                    "workload_id": "W2",
+                    "trial_index": trial_index,
+                    "workflow_id": "user_orders",
+                    "seed": eff_seed,
+                },
             )
         elif workload_id == "W3":
             return Task(
-                task_id=f"w3_local_trial_{trial_index:04d}",
-                prompt=f"Execute branching customer check for cust_{trial_index}",
-                expected_output={"status": "approved", "customer_id": f"cust_{trial_index}"},
-                metadata={"workload_id": "W3", "trial_index": trial_index},
+                task_id=f"w3_local_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Execute branching customer check for cust_{eff_seed}_{trial_index}",
+                expected_output={"status": "approved", "customer_id": f"cust_{eff_seed}_{trial_index}"},
+                metadata={"workload_id": "W3", "trial_index": trial_index, "seed": eff_seed},
             )
         elif workload_id == "W4":
-            key_id = f"item_{trial_index % 10}"
+            key_id = f"item_{eff_seed}_{trial_index % 10}"
             return Task(
-                task_id=f"w4_local_trial_{trial_index:04d}",
+                task_id=f"w4_local_s{eff_seed}_t{trial_index:04d}",
                 prompt=f"Lookup price for {key_id}",
                 expected_output={"sku": key_id, "price": 49.99},
-                metadata={"workload_id": "W4", "trial_index": trial_index},
+                metadata={"workload_id": "W4", "trial_index": trial_index, "seed": eff_seed},
             )
         elif workload_id == "W5":
             return Task(
-                task_id=f"w5_local_trial_{trial_index:04d}",
-                prompt=f"Stream query data for trial {trial_index}",
+                task_id=f"w5_local_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Stream query data for trial {trial_index} (seed={eff_seed})",
                 expected_output={"status": "success", "count": 100},
-                metadata={"workload_id": "W5", "trial_index": trial_index},
+                metadata={"workload_id": "W5", "trial_index": trial_index, "seed": eff_seed},
             )
         elif workload_id == "W6":
             return Task(
-                task_id=f"w6_local_trial_{trial_index:04d}",
-                prompt=f"Run subprocess compute task {trial_index}",
+                task_id=f"w6_local_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Run subprocess compute task {trial_index} (seed={eff_seed})",
                 expected_output={"status": "success", "exit_code": 0},
-                metadata={"workload_id": "W6", "trial_index": trial_index},
+                metadata={"workload_id": "W6", "trial_index": trial_index, "seed": eff_seed},
             )
         elif workload_id == "W7":
-            idemp_key = f"tx_local_{trial_index:04d}"
+            idemp_key = f"tx_local_s{eff_seed}_{trial_index:04d}"
             grant = ApprovalGrant.create(
                 "execute_fund_transfer", {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key}
             )
             return Task(
-                task_id=f"w7_local_trial_{trial_index:04d}",
+                task_id=f"w7_local_s{eff_seed}_t{trial_index:04d}",
                 prompt=f"Execute fund transfer with idempotency key {idemp_key}",
                 parameters={"idempotency_key": idemp_key},
                 expected_output={"status": "transferred", "idempotency_key": idemp_key},
-                metadata={"workload_id": "W7", "trial_index": trial_index, "approval_grant": grant},
+                metadata={"workload_id": "W7", "trial_index": trial_index, "approval_grant": grant, "seed": eff_seed},
             )
         else:
             return Task(
-                task_id=f"e5a_local_trial_{trial_index:04d}",
-                prompt=f"Action bytecode transport evaluation trial {trial_index}",
+                task_id=f"e5a_local_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Action bytecode transport evaluation trial {trial_index} (seed={eff_seed})",
                 expected_output={"status": "done", "trial": trial_index},
-                metadata={"workload_id": "E5a", "trial_index": trial_index},
+                metadata={"workload_id": "E5a", "trial_index": trial_index, "seed": eff_seed},
             )
 
     def create_workload_environment(

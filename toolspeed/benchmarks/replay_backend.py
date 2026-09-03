@@ -8,6 +8,8 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+import numpy as np
+
 from toolspeed.adapters.base import (
     BaseLLMAdapter,
     BaseToolAdapter,
@@ -187,9 +189,12 @@ class ReplayBackend:
         self,
         evidence_level: EvidenceLevel = EvidenceLevel.REPLAY_INTEGRATION,
         clock: Clock | None = None,
+        seed: int = 42,
     ):
         self.evidence_level = evidence_level
         self.clock = clock or VirtualClock()
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
         self._workloads: dict[str, Any] = {
             "W1": W1IndependentWorkload(),
             "W2": W2ChainsWorkload(),
@@ -200,19 +205,25 @@ class ReplayBackend:
             "W7": W7SideEffectsWorkload(),
         }
 
-    def generate_task(self, workload_id: str, trial_index: int = 0) -> Task:
+    def reseed(self, seed: int) -> None:
+        """Reseeds the backend RNG and trial parameter generator."""
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
+
+    def generate_task(self, workload_id: str, trial_index: int = 0, seed: int | None = None) -> Task:
         """Constructs an immutable Task with seeded parameters and strict validator."""
+        eff_seed = seed if seed is not None else self.seed
         if workload_id == "W1":
             return Task(
-                task_id=f"w1_replay_trial_{trial_index:04d}",
-                prompt=f"Dispatch fanout metric queries for trial {trial_index}",
+                task_id=f"w1_replay_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Dispatch fanout metric queries for trial {trial_index} (seed={eff_seed})",
                 expected_output={"status": "success", "total_load": 250, "server_count": 5},
-                metadata={"workload_id": "W1", "trial_index": trial_index},
+                metadata={"workload_id": "W1", "trial_index": trial_index, "seed": eff_seed},
             )
         elif workload_id == "W2":
             return Task(
-                task_id=f"w2_replay_trial_{trial_index:04d}",
-                prompt=f"Execute user orders chain for user u_{trial_index}",
+                task_id=f"w2_replay_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Execute user orders chain for user u_{trial_index} (seed={eff_seed})",
                 context={"user_id": f"u_{trial_index}"},
                 expected_output={
                     "user": {"user_id": f"u_{trial_index}", "name": "Alice"},
@@ -220,36 +231,41 @@ class ReplayBackend:
                     "status": "compiled_complete",
                     "fused": True,
                 },
-                metadata={"workload_id": "W2", "trial_index": trial_index, "workflow_id": "user_orders"},
+                metadata={
+                    "workload_id": "W2",
+                    "trial_index": trial_index,
+                    "workflow_id": "user_orders",
+                    "seed": eff_seed,
+                },
             )
         elif workload_id == "W3":
             return Task(
-                task_id=f"w3_replay_trial_{trial_index:04d}",
-                prompt=f"Execute branching customer check for cust_{trial_index}",
+                task_id=f"w3_replay_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Execute branching customer check for cust_{trial_index} (seed={eff_seed})",
                 expected_output={"status": "approved", "customer_id": f"cust_{trial_index}"},
-                metadata={"workload_id": "W3", "trial_index": trial_index},
+                metadata={"workload_id": "W3", "trial_index": trial_index, "seed": eff_seed},
             )
         elif workload_id == "W4":
             key_id = f"item_{trial_index % 10}"
             return Task(
-                task_id=f"w4_replay_trial_{trial_index:04d}",
-                prompt=f"Lookup price for {key_id}",
+                task_id=f"w4_replay_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Lookup price for {key_id} (seed={eff_seed})",
                 expected_output={"sku": key_id, "price": 49.99},
-                metadata={"workload_id": "W4", "trial_index": trial_index},
+                metadata={"workload_id": "W4", "trial_index": trial_index, "seed": eff_seed},
             )
         elif workload_id == "W5":
             return Task(
-                task_id=f"w5_replay_trial_{trial_index:04d}",
-                prompt=f"Stream query dataset for trial {trial_index}",
+                task_id=f"w5_replay_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Stream query dataset for trial {trial_index} (seed={eff_seed})",
                 expected_output={"status": "success", "count": 100},
-                metadata={"workload_id": "W5", "trial_index": trial_index},
+                metadata={"workload_id": "W5", "trial_index": trial_index, "seed": eff_seed},
             )
         elif workload_id == "W6":
             return Task(
-                task_id=f"w6_replay_trial_{trial_index:04d}",
-                prompt=f"Run sandbox compute task for trial {trial_index}",
+                task_id=f"w6_replay_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Run sandbox compute task for trial {trial_index} (seed={eff_seed})",
                 expected_output={"result": 55},
-                metadata={"workload_id": "W6", "trial_index": trial_index},
+                metadata={"workload_id": "W6", "trial_index": trial_index, "seed": eff_seed},
             )
         elif workload_id == "W7":
             idemp_key = f"tx_replay_{trial_index:04d}"
@@ -257,19 +273,23 @@ class ReplayBackend:
                 "execute_fund_transfer", {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key}
             )
             return Task(
-                task_id=f"w7_replay_trial_{trial_index:04d}",
-                prompt=f"Execute fund transfer with idempotency key {idemp_key}",
-                parameters={"idempotency_key": idemp_key},
+                task_id=f"w7_replay_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Execute approved fund transfer tx_{trial_index} (seed={eff_seed})",
+                parameters={"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key},
                 expected_output={"status": "transferred", "idempotency_key": idemp_key},
-                metadata={"workload_id": "W7", "trial_index": trial_index, "approval_grant": grant},
+                metadata={
+                    "workload_id": "W7",
+                    "trial_index": trial_index,
+                    "approval_grant": grant,
+                    "seed": eff_seed,
+                },
             )
         else:
-            # Fallback for E5a transport codec workload
             return Task(
-                task_id=f"e5a_trial_{trial_index:04d}",
-                prompt=f"Execute action bytecode benchmark payload trial {trial_index}",
+                task_id=f"e5a_replay_s{eff_seed}_t{trial_index:04d}",
+                prompt=f"Serialize action bytecode for trial {trial_index} (seed={eff_seed})",
                 expected_output={"status": "done", "trial": trial_index},
-                metadata={"workload_id": "E5a", "trial_index": trial_index},
+                metadata={"workload_id": "E5a", "trial_index": trial_index, "seed": eff_seed},
             )
 
     def create_workload_environment(

@@ -220,10 +220,16 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     )
 
     harness = BenchmarkHarness(config=config, protocol=protocol)
-    result = asyncio.run(harness.run_full_benchmark())
-
-    # Save benchmark bundle reports directly
-    save_benchmark_reports(result, out_dir)
+    if len(seeds_list) > 1:
+        results = asyncio.run(harness.run_multi_seed_benchmark(seeds=seeds_list, trials=trials))
+        for res_item in results:
+            seed_dir = out_dir / f"seed_{res_item.manifest.seed}" if res_item.manifest else out_dir
+            save_benchmark_reports(res_item, seed_dir)
+        result = results[0]
+        save_benchmark_reports(result, out_dir)
+    else:
+        result = asyncio.run(harness.run_full_benchmark())
+        save_benchmark_reports(result, out_dir)
 
     print("\n📊 Paired Benchmark Evaluation Summary (P95 CCL Speedup):")
     bar_data = {
