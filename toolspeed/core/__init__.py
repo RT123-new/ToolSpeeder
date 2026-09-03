@@ -19,6 +19,7 @@ from toolspeed.core.rate_limiter import (
     RateLimitError,
 )
 from toolspeed.core.types import (
+    BenchmarkCase,
     DependencyNode,
     EventType,
     ExecutionEvent,
@@ -40,6 +41,7 @@ from toolspeed.core.types import (
 __all__ = [
     "AsyncConcurrencyLimiter",
     "AsyncTokenBucket",
+    "BenchmarkCase",
     "CCLTracker",
     "DependencyNode",
     "EventType",

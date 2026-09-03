@@ -550,8 +550,8 @@ class BenchmarkCase:
 
     def __init__(
         self,
-        case_id: str,
-        workload_id: str,
+        case_id: str | None = None,
+        workload_id: str = "default",
         agent_task: AgentTask | None = None,
         expected_outcome: ExpectedOutcome | None = None,
         authority_context: ExecutionAuthorityContext | None = None,
@@ -562,23 +562,105 @@ class BenchmarkCase:
         parameters: Mapping[str, Any] | None = None,
         metadata: Mapping[str, Any] | None = None,
         task: AgentTask | None = None,
+        task_id: str | None = None,
+        prompt: str = "",
+        expected_output: Any = None,
+        validator: Any = None,
+        context: Mapping[str, Any] | None = None,
+        expected_tools: Sequence[str] | None = None,
+        expected_args: Mapping[str, Any] | None = None,
     ) -> None:
-        actual_task = agent_task or task or AgentTask(task_id=case_id, prompt="")
-        object.__setattr__(self, "case_id", case_id)
+        cid = case_id or task_id or str(uuid.uuid4())[:8]
+        p_dict = dict(parameters or {})
+        c_dict = dict(context or {})
+        m_dict = dict(metadata or {})
+        actual_task = (
+            agent_task
+            or task
+            or AgentTask(
+                task_id=task_id or cid,
+                prompt=prompt,
+                workload_family=workload_id,
+                context=c_dict,
+                parameters=p_dict,
+                metadata=filter_model_visible_metadata(m_dict),
+            )
+        )
+        if expected_outcome is None:
+            expected_outcome = ExpectedOutcome(
+                expected_final_value=expected_output,
+                required_tools=tuple(expected_tools or ()),
+                expected_arguments=dict(expected_args or {}),
+            )
+        object.__setattr__(self, "case_id", cid)
         object.__setattr__(self, "workload_id", workload_id)
         object.__setattr__(self, "agent_task", actual_task)
-        object.__setattr__(self, "expected_outcome", expected_outcome or ExpectedOutcome())
+        object.__setattr__(self, "expected_outcome", expected_outcome)
         object.__setattr__(self, "authority_context", authority_context or ExecutionAuthorityContext())
         object.__setattr__(self, "initial_state", initial_state or StateSnapshot(state_id="init_state"))
         object.__setattr__(self, "fixture", dict(fixture or {}))
         object.__setattr__(self, "seed", seed)
         object.__setattr__(self, "trial_index", trial_index)
-        object.__setattr__(self, "parameters", dict(parameters or {}))
-        object.__setattr__(self, "metadata", dict(metadata or {}))
+        object.__setattr__(self, "parameters", p_dict)
+        object.__setattr__(self, "metadata", m_dict)
 
     @property
     def task(self) -> AgentTask:
         return self.agent_task
+
+    @property
+    def task_id(self) -> str:
+        return self.agent_task.task_id if self.agent_task else self.case_id
+
+    @property
+    def prompt(self) -> str:
+        return self.agent_task.prompt if self.agent_task else ""
+
+    @property
+    def expected_output(self) -> Any:
+        return self.expected_outcome.expected_final_value if self.expected_outcome else None
+
+    def to_model_task(self) -> Task:
+        """Constructs an isolated Task with zero access to expected output or validators."""
+        c = self.agent_task.context if self.agent_task else {}
+        p = self.agent_task.parameters if self.agent_task else self.parameters
+        m = self.agent_task.metadata if self.agent_task else self.metadata
+        return Task(
+            task_id=self.task_id,
+            prompt=self.prompt,
+            context=sanitize_model_visible_data(copy.deepcopy(dict(c))),
+            parameters=sanitize_model_visible_data(copy.deepcopy(dict(p))),
+            metadata=filter_model_visible_metadata(dict(m)),
+            expected_output=None,
+            validator=None,
+        )
+
+    def to_agent_task(self) -> AgentTask:
+        """Constructs a model-visible AgentTask strictly stripped of test oracles."""
+        return self.agent_task
+
+    def validate(
+        self,
+        actual_output: Any,
+        trace: Any = None,
+        initial_state: StateSnapshot | None = None,
+        final_state: StateSnapshot | None = None,
+    ) -> bool:
+        """Strict validation executed outside scheduler visibility."""
+        passed, _, _ = self.validate_execution(actual_output, trace=trace, final_state=final_state)
+        return passed
+
+    @classmethod
+    def from_task(cls, task: Task) -> BenchmarkCase:
+        return cls(
+            case_id=task.task_id,
+            workload_id=task.metadata.get("workload_id", "default"),
+            agent_task=task.to_agent_task(),
+            expected_outcome=ExpectedOutcome(
+                expected_final_value=task.expected_output,
+                required_tools=tuple(task.metadata.get("required_tools", task.metadata.get("expected_tools", ()))),
+            ),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1407,6 +1489,20 @@ class Task:
             return all(k in actual_output and actual_output[k] == v for k, v in self.expected_output.items())
 
         return bool(self.expected_output == actual_output)
+
+    def to_model_task(self) -> Task:
+        """Returns a Task strictly stripped of expected_output, validator, and oracle metadata."""
+        return Task(
+            task_id=self.task_id,
+            prompt=self.prompt,
+            context=sanitize_model_visible_data(copy.deepcopy(dict(self.context))),
+            parameters=sanitize_model_visible_data(
+                copy.deepcopy(dict(self.metadata.get("parameters", self.parameters)))
+            ),
+            metadata=filter_model_visible_metadata(self.metadata),
+            expected_output=None,
+            validator=None,
+        )
 
 
 @dataclass
