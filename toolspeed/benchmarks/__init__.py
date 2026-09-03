@@ -9,7 +9,11 @@ from toolspeed.benchmarks.harness import (
     PairedWorkloadEvaluation,
 )
 from toolspeed.benchmarks.local_backend import LocalWallClockBackend
-from toolspeed.benchmarks.replay_backend import ReplayBackend
+from toolspeed.benchmarks.replay_backend import (
+    ReplayBackend,
+    ReplayCaseFixture,
+    ReplayFixtureManager,
+)
 
 __all__ = [
     "BenchmarkConfig",
@@ -18,4 +22,6 @@ __all__ = [
     "LocalWallClockBackend",
     "PairedWorkloadEvaluation",
     "ReplayBackend",
+    "ReplayCaseFixture",
+    "ReplayFixtureManager",
 ]

@@ -274,7 +274,7 @@ class LocalWallClockBackend:
             )
 
     def create_workload_environment(
-        self, workload_id: str, trial_index: int = 0
+        self, workload_id: str, trial_index: int = 0, arm: str = "baseline"
     ) -> tuple[ToolRegistry, BaseLLMAdapter]:
         registry = ToolRegistry()
         server = self._get_shared_server()

@@ -395,13 +395,13 @@ class BenchmarkHarness:
                 auth_w_c.add_grant(g_c)
 
             backend_wl = "W7" if "W7" in workload_id else workload_id
-            tools_w_b, model_w_b = self.backend.create_workload_environment(backend_wl, trial_index=w)
+            tools_w_b, model_w_b = self.backend.create_workload_environment(backend_wl, trial_index=w, arm="baseline")
             sched_w_b = baseline_cls(SchedulerConfig(concurrency_limit=self.config.concurrency_limit), **b_kw)
             task_w_b_sched = task_w_b.to_model_task() if hasattr(task_w_b, "to_model_task") else task_w_b
             task_w_c_sched = task_w_c.to_model_task() if hasattr(task_w_c, "to_model_task") else task_w_c
             await sched_w_b.execute(task_w_b_sched, model_w_b, tools_w_b, authority_context=auth_w_b)
 
-            tools_w_c, model_w_c = self.backend.create_workload_environment(backend_wl, trial_index=w)
+            tools_w_c, model_w_c = self.backend.create_workload_environment(backend_wl, trial_index=w, arm="candidate")
             sched_w_c = candidate_cls(SchedulerConfig(concurrency_limit=self.config.concurrency_limit))
             await sched_w_c.execute(task_w_c_sched, model_w_c, tools_w_c, authority_context=auth_w_c)
 
@@ -422,8 +422,8 @@ class BenchmarkHarness:
                 auth_ctx_c.add_grant(g_c)
 
             backend_wl = "W7" if "W7" in workload_id else workload_id
-            tools_b, model_b = self.backend.create_workload_environment(backend_wl, trial_index=i)
-            tools_c, model_c = self.backend.create_workload_environment(backend_wl, trial_index=i)
+            tools_b, model_b = self.backend.create_workload_environment(backend_wl, trial_index=i, arm="baseline")
+            tools_c, model_c = self.backend.create_workload_environment(backend_wl, trial_index=i, arm="candidate")
 
             b_sched = baseline_cls(
                 SchedulerConfig(

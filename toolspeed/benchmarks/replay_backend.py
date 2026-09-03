@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+from typing_extensions import Self
 
 from toolspeed.adapters.base import (
     BaseLLMAdapter,
@@ -23,6 +26,7 @@ from toolspeed.core.types import (
     ApprovalGrant,
     EvidenceLevel,
     Task,
+    TokenUsage,
     ToolCall,
     ToolResult,
     ToolSpec,
@@ -215,6 +219,233 @@ class ReplayLLMAdapter(BaseLLMAdapter):
             )
 
 
+@dataclass
+class ReplayCaseFixture:
+    """Pre-generated immutable per-case fixture bound to seed, workload, arm, and epoch."""
+
+    case_id: str
+    seed: int
+    workload_id: str
+    arm: str
+    epoch: int
+    trial_index: int
+    tool_latencies: dict[str, float]
+    model_latency_ms: float
+    tool_responses: dict[str, Any]
+    trace_events: list[str]
+    tokens: TokenUsage
+    side_effects: dict[str, Any]
+    prompt: str
+    expected_output: dict[str, Any]
+    metadata: dict[str, Any]
+    _frozen: bool = False
+
+    def freeze(self) -> Self:
+        self._frozen = True
+        return self
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_frozen", False) and name != "_frozen":
+            raise RuntimeError(f"Cannot mutate immutable ReplayCaseFixture: attempted to set '{name}'")
+        super().__setattr__(name, value)
+
+    def clone(self, new_arm: str | None = None, new_epoch: int | None = None) -> ReplayCaseFixture:
+        """Create an independent, deep-copied fixture instance with optional new arm/epoch."""
+        return ReplayCaseFixture(
+            case_id=f"{self.workload_id}_s{self.seed}_{new_arm or self.arm}_ep{new_epoch if new_epoch is not None else self.epoch}_t{self.trial_index:04d}",
+            seed=self.seed,
+            workload_id=self.workload_id,
+            arm=new_arm or self.arm,
+            epoch=new_epoch if new_epoch is not None else self.epoch,
+            trial_index=self.trial_index,
+            tool_latencies=copy.deepcopy(self.tool_latencies),
+            model_latency_ms=self.model_latency_ms,
+            tool_responses=copy.deepcopy(self.tool_responses),
+            trace_events=copy.deepcopy(self.trace_events),
+            tokens=copy.deepcopy(self.tokens),
+            side_effects=copy.deepcopy(self.side_effects),
+            prompt=self.prompt,
+            expected_output=copy.deepcopy(self.expected_output),
+            metadata=copy.deepcopy(self.metadata),
+            _frozen=False,
+        ).freeze()
+
+
+class ReplayFixtureManager:
+    """Generates and manages pre-generated immutable fixtures across seeds, workloads, arms, and epochs."""
+
+    def __init__(self) -> None:
+        self._fixtures: dict[tuple[int, str, str, int], ReplayCaseFixture] = {}
+        self._arm_epochs: dict[str, int] = {}
+        self._lock = threading.RLock()
+
+    def get_epoch_for_arm(self, arm: str) -> int:
+        with self._lock:
+            if arm not in self._arm_epochs:
+                self._arm_epochs[arm] = len(self._arm_epochs) + 1
+            return self._arm_epochs[arm]
+
+    def advance_arm_epoch(self, arm: str) -> int:
+        with self._lock:
+            self._arm_epochs[arm] = self._arm_epochs.get(arm, 0) + 1
+            return self._arm_epochs[arm]
+
+    def get_or_create_fixture(
+        self,
+        workload_id: str,
+        seed: int,
+        arm: str,
+        trial_index: int,
+    ) -> ReplayCaseFixture:
+        key = (seed, workload_id, arm, trial_index)
+        with self._lock:
+            if key in self._fixtures:
+                return self._fixtures[key].clone()
+
+            epoch = self.get_epoch_for_arm(arm)
+            fixture = self._build_case_fixture(workload_id, seed, arm, trial_index, epoch)
+            self._fixtures[key] = fixture
+            return fixture.clone()
+
+    def _build_case_fixture(
+        self,
+        workload_id: str,
+        seed: int,
+        arm: str,
+        trial_index: int,
+        epoch: int,
+    ) -> ReplayCaseFixture:
+        rng = np.random.default_rng(seed + trial_index * 1000 + epoch * 100)
+        base_tool_delay = 20.0 + float(rng.uniform(0.0, 5.0))
+        model_delay = 25.0 + float(rng.uniform(0.0, 5.0))
+
+        tool_latencies: dict[str, float] = {}
+        tool_responses: dict[str, Any] = {}
+        trace_events: list[str] = ["CASE_START", "LLM_DECISION_START", "LLM_DECISION_END"]
+        side_effects: dict[str, Any] = {}
+        tokens = TokenUsage(
+            prompt_tokens=150 + trial_index,
+            completion_tokens=50,
+            total_tokens=200 + trial_index,
+            cost_usd=0.001,
+        )
+
+        if workload_id == "W1":
+            for i in range(5):
+                t_name = f"server_metric_{i}"
+                tool_latencies[t_name] = base_tool_delay
+                tool_responses[t_name] = {"metric": "cpu", "server_id": f"srv_{i}", "load": 50}
+                trace_events.append(f"TOOL_CALL_{t_name}")
+            prompt = f"Dispatch fanout metric queries for trial {trial_index} (seed={seed})"
+            expected_output = {"status": "success", "total_load": 250, "server_count": 5}
+            metadata = {"workload_id": "W1", "trial_index": trial_index, "seed": seed, "arm": arm, "epoch": epoch}
+
+        elif workload_id == "W2":
+            tool_latencies["fetch_user"] = base_tool_delay
+            tool_responses["fetch_user"] = {"user_id": f"u_{trial_index}", "name": "Alice"}
+            tool_latencies["fetch_orders"] = base_tool_delay
+            tool_responses["fetch_orders"] = {"orders": [{"id": "ord_101", "total": 99.0}]}
+            trace_events.extend(["TOOL_CALL_fetch_user", "TOOL_CALL_fetch_orders"])
+            prompt = f"Execute user orders chain for user u_{trial_index} (seed={seed})"
+            expected_output = {
+                "user": {"user_id": f"u_{trial_index}", "name": "Alice"},
+                "orders": {"orders": [{"id": "ord_101", "total": 99.0}]},
+                "status": "compiled_complete",
+                "fused": True,
+            }
+            metadata = {
+                "workload_id": "W2",
+                "trial_index": trial_index,
+                "workflow_id": "user_orders",
+                "seed": seed,
+                "arm": arm,
+                "epoch": epoch,
+            }
+
+        elif workload_id == "W3":
+            tool_latencies["read_customer_state"] = base_tool_delay
+            tool_responses["read_customer_state"] = {"customer_id": f"cust_{trial_index}", "risk_score": 10}
+            tool_latencies["audit_transaction"] = base_tool_delay
+            tool_responses["audit_transaction"] = {"customer_id": f"cust_{trial_index}", "audited": True}
+            trace_events.extend(["TOOL_CALL_read_customer_state", "TOOL_CALL_audit_transaction"])
+            prompt = f"Execute branching customer check for cust_{trial_index} (seed={seed})"
+            expected_output = {"status": "approved", "customer_id": f"cust_{trial_index}"}
+            metadata = {"workload_id": "W3", "trial_index": trial_index, "seed": seed, "arm": arm, "epoch": epoch}
+
+        elif workload_id == "W4":
+            key_id = f"item_{trial_index % 10}"
+            tool_latencies["pricing_lookup"] = base_tool_delay
+            tool_responses["pricing_lookup"] = {"sku": key_id, "price": 49.99}
+            trace_events.append("TOOL_CALL_pricing_lookup")
+            prompt = f"Lookup price for {key_id} (seed={seed})"
+            expected_output = {"sku": key_id, "price": 49.99}
+            metadata = {"workload_id": "W4", "trial_index": trial_index, "seed": seed, "arm": arm, "epoch": epoch}
+
+        elif workload_id == "W5":
+            tool_latencies["stream_query_data"] = base_tool_delay + 10.0
+            tool_responses["stream_query_data"] = {"status": "success", "count": 100}
+            trace_events.append("TOOL_CALL_stream_query_data")
+            prompt = f"Stream query dataset for trial {trial_index} (seed={seed})"
+            expected_output = {"status": "success", "count": 100}
+            metadata = {"workload_id": "W5", "trial_index": trial_index, "seed": seed, "arm": arm, "epoch": epoch}
+
+        elif workload_id == "W6":
+            tool_latencies["sandbox_compute"] = base_tool_delay + 5.0
+            tool_responses["sandbox_compute"] = {"result": 55}
+            trace_events.append("TOOL_CALL_sandbox_compute")
+            prompt = f"Run sandbox compute task for trial {trial_index} (seed={seed})"
+            expected_output = {"result": 55}
+            metadata = {"workload_id": "W6", "trial_index": trial_index, "seed": seed, "arm": arm, "epoch": epoch}
+
+        elif workload_id == "W7":
+            idemp_key = f"tx_replay_{trial_index:04d}"
+            tool_latencies["execute_fund_transfer"] = base_tool_delay + 5.0
+            tool_responses["execute_fund_transfer"] = {"status": "transferred", "idempotency_key": idemp_key}
+            side_effects["balance"] = 1000.0 - (trial_index + 1) * 100.0
+            trace_events.append("TOOL_CALL_execute_fund_transfer")
+            prompt = f"Execute approved fund transfer tx_{trial_index} (seed={seed})"
+            expected_output = {"status": "transferred", "idempotency_key": idemp_key}
+            metadata = {
+                "workload_id": "W7",
+                "trial_index": trial_index,
+                "seed": seed,
+                "arm": arm,
+                "epoch": epoch,
+                "idempotency_key": idemp_key,
+            }
+
+        else:  # E5a
+            tool_latencies["bytecode_transport_tool"] = base_tool_delay
+            tool_responses["bytecode_transport_tool"] = {"status": "done", "trial": trial_index}
+            trace_events.append("TOOL_CALL_bytecode_transport_tool")
+            prompt = f"Serialize action bytecode for trial {trial_index} (seed={seed})"
+            expected_output = {"status": "done", "trial": trial_index}
+            metadata = {"workload_id": "E5a", "trial_index": trial_index, "seed": seed, "arm": arm, "epoch": epoch}
+
+        trace_events.append("CASE_END")
+
+        case_id = f"{workload_id}_s{seed}_{arm}_ep{epoch}_t{trial_index:04d}"
+        fixture = ReplayCaseFixture(
+            case_id=case_id,
+            seed=seed,
+            workload_id=workload_id,
+            arm=arm,
+            epoch=epoch,
+            trial_index=trial_index,
+            tool_latencies=tool_latencies,
+            model_latency_ms=model_delay,
+            tool_responses=tool_responses,
+            trace_events=trace_events,
+            tokens=tokens,
+            side_effects=side_effects,
+            prompt=prompt,
+            expected_output=expected_output,
+            metadata=metadata,
+            _frozen=False,
+        )
+        return fixture.freeze()
+
+
 class ReplayBackend:
     """Deterministic virtual-clock replay backend generating immutable paired workload fixtures."""
 
@@ -223,11 +454,13 @@ class ReplayBackend:
         evidence_level: EvidenceLevel = EvidenceLevel.REPLAY_INTEGRATION,
         clock: Clock | None = None,
         seed: int = 42,
+        fixture_manager: ReplayFixtureManager | None = None,
     ):
         self.evidence_level = evidence_level
         self.clock = clock or VirtualClock()
         self.seed = seed
         self.rng = np.random.default_rng(seed)
+        self.fixture_manager = fixture_manager or ReplayFixtureManager()
         self._workloads: dict[str, Any] = {
             "W1": W1IndependentWorkload(),
             "W2": W2ChainsWorkload(),
@@ -243,100 +476,54 @@ class ReplayBackend:
         self.seed = seed
         self.rng = np.random.default_rng(seed)
 
-    def generate_task(self, workload_id: str, trial_index: int = 0, seed: int | None = None) -> Task:
-        """Constructs an immutable Task with seeded parameters and strict validator."""
+    def generate_task(
+        self, workload_id: str, trial_index: int = 0, seed: int | None = None, arm: str = "baseline"
+    ) -> Task:
+        """Constructs an immutable Task with seeded parameters from arm-isolated fixtures."""
         eff_seed = seed if seed is not None else self.seed
-        if workload_id == "W1":
-            return Task(
-                task_id=f"w1_replay_s{eff_seed}_t{trial_index:04d}",
-                prompt=f"Dispatch fanout metric queries for trial {trial_index} (seed={eff_seed})",
-                expected_output={"status": "success", "total_load": 250, "server_count": 5},
-                metadata={"workload_id": "W1", "trial_index": trial_index, "seed": eff_seed},
-            )
-        elif workload_id == "W2":
-            return Task(
-                task_id=f"w2_replay_s{eff_seed}_t{trial_index:04d}",
-                prompt=f"Execute user orders chain for user u_{trial_index} (seed={eff_seed})",
-                context={"user_id": f"u_{trial_index}"},
-                expected_output={
-                    "user": {"user_id": f"u_{trial_index}", "name": "Alice"},
-                    "orders": {"orders": [{"id": "ord_101", "total": 99.0}]},
-                    "status": "compiled_complete",
-                    "fused": True,
-                },
-                metadata={
-                    "workload_id": "W2",
-                    "trial_index": trial_index,
-                    "workflow_id": "user_orders",
-                    "seed": eff_seed,
-                },
-            )
-        elif workload_id == "W3":
-            return Task(
-                task_id=f"w3_replay_s{eff_seed}_t{trial_index:04d}",
-                prompt=f"Execute branching customer check for cust_{trial_index} (seed={eff_seed})",
-                expected_output={"status": "approved", "customer_id": f"cust_{trial_index}"},
-                metadata={"workload_id": "W3", "trial_index": trial_index, "seed": eff_seed},
-            )
-        elif workload_id == "W4":
-            key_id = f"item_{trial_index % 10}"
-            return Task(
-                task_id=f"w4_replay_s{eff_seed}_t{trial_index:04d}",
-                prompt=f"Lookup price for {key_id} (seed={eff_seed})",
-                expected_output={"sku": key_id, "price": 49.99},
-                metadata={"workload_id": "W4", "trial_index": trial_index, "seed": eff_seed},
-            )
-        elif workload_id == "W5":
-            return Task(
-                task_id=f"w5_replay_s{eff_seed}_t{trial_index:04d}",
-                prompt=f"Stream query dataset for trial {trial_index} (seed={eff_seed})",
-                expected_output={"status": "success", "count": 100},
-                metadata={"workload_id": "W5", "trial_index": trial_index, "seed": eff_seed},
-            )
-        elif workload_id == "W6":
-            return Task(
-                task_id=f"w6_replay_s{eff_seed}_t{trial_index:04d}",
-                prompt=f"Run sandbox compute task for trial {trial_index} (seed={eff_seed})",
-                expected_output={"result": 55},
-                metadata={"workload_id": "W6", "trial_index": trial_index, "seed": eff_seed},
-            )
-        elif workload_id == "W7":
+        fixture = self.fixture_manager.get_or_create_fixture(
+            workload_id=workload_id,
+            seed=eff_seed,
+            arm=arm,
+            trial_index=trial_index,
+        )
+        task_meta = dict(fixture.metadata)
+        task_params: dict[str, Any] = {}
+        if workload_id == "W7":
             idemp_key = f"tx_replay_{trial_index:04d}"
-            grant = ApprovalGrant.create(
-                "execute_fund_transfer", {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key}
-            )
-            return Task(
-                task_id=f"w7_replay_s{eff_seed}_t{trial_index:04d}",
-                prompt=f"Execute approved fund transfer tx_{trial_index} (seed={eff_seed})",
-                parameters={"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key},
-                expected_output={"status": "transferred", "idempotency_key": idemp_key},
-                metadata={
-                    "workload_id": "W7",
-                    "trial_index": trial_index,
-                    "approval_grant": grant,
-                    "seed": eff_seed,
-                },
-            )
-        else:
-            return Task(
-                task_id=f"e5a_replay_s{eff_seed}_t{trial_index:04d}",
-                prompt=f"Serialize action bytecode for trial {trial_index} (seed={eff_seed})",
-                expected_output={"status": "done", "trial": trial_index},
-                metadata={"workload_id": "E5a", "trial_index": trial_index, "seed": eff_seed},
-            )
+            task_params = {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key}
+            grant = ApprovalGrant.create("execute_fund_transfer", task_params)
+            task_meta["approval_grant"] = grant
+
+        return Task(
+            task_id=fixture.case_id,
+            prompt=fixture.prompt,
+            context={"user_id": f"u_{trial_index}"} if workload_id == "W2" else {},
+            parameters=task_params,
+            expected_output=copy.deepcopy(fixture.expected_output),
+            metadata=task_meta,
+        )
 
     def create_workload_environment(
-        self, workload_id: str, trial_index: int = 0
+        self, workload_id: str, trial_index: int = 0, arm: str = "baseline"
     ) -> tuple[ToolRegistry, BaseLLMAdapter]:
         """Creates paired tool registry and replay model adapter for the trial."""
         registry = ToolRegistry()
         clock = self.clock or VirtualClock()
         registry.clock = clock  # type: ignore[attr-defined]
+        fixture = self.fixture_manager.get_or_create_fixture(
+            workload_id=workload_id,
+            seed=self.seed,
+            arm=arm,
+            trial_index=trial_index,
+        )
 
         if workload_id == "W1":
             for i in range(5):
-                spec = ToolSpec(name=f"server_metric_{i}", is_read_only=True, is_idempotent=True)
-                registry.register(ReplayToolAdapter(f"server_metric_{i}", spec, default_latency_ms=20.0, clock=clock))
+                t_name = f"server_metric_{i}"
+                lat = fixture.tool_latencies.get(t_name, 20.0)
+                spec = ToolSpec(name=t_name, is_read_only=True, is_idempotent=True)
+                registry.register(ReplayToolAdapter(t_name, spec, default_latency_ms=lat, clock=clock))
             calls = [
                 ToolCall(name=f"server_metric_{i}", arguments={"metric": "cpu", "server_id": f"srv_{i}"})
                 for i in range(5)
@@ -346,21 +533,30 @@ class ReplayBackend:
                 LLMDecision(
                     reasoning="Synthesizing metrics",
                     tool_calls=[],
-                    final_answer={"status": "success", "total_load": 250, "server_count": 5},
+                    final_answer=dict(fixture.expected_output),
                 ),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=25.0, clock=clock)
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=fixture.model_latency_ms, clock=clock)
             return registry, model
 
         elif workload_id == "W2":
             spec_user = ToolSpec(name="fetch_user", is_read_only=True, is_idempotent=True)
             spec_orders = ToolSpec(name="fetch_orders", is_read_only=True, is_idempotent=True)
+            u_lat = fixture.tool_latencies.get("fetch_user", 20.0)
+            o_lat = fixture.tool_latencies.get("fetch_orders", 20.0)
             registry.register(
                 ReplayToolAdapter(
                     "fetch_user",
                     spec_user,
-                    [{"output": {"user_id": f"u_{trial_index}", "name": "Alice"}, "latency_ms": 20.0}],
-                    default_latency_ms=20.0,
+                    [
+                        {
+                            "output": fixture.tool_responses.get(
+                                "fetch_user", {"user_id": f"u_{trial_index}", "name": "Alice"}
+                            ),
+                            "latency_ms": u_lat,
+                        }
+                    ],
+                    default_latency_ms=u_lat,
                     clock=clock,
                 )
             )
@@ -368,8 +564,15 @@ class ReplayBackend:
                 ReplayToolAdapter(
                     "fetch_orders",
                     spec_orders,
-                    [{"output": {"orders": [{"id": "ord_101", "total": 99.0}]}, "latency_ms": 20.0}],
-                    default_latency_ms=20.0,
+                    [
+                        {
+                            "output": fixture.tool_responses.get(
+                                "fetch_orders", {"orders": [{"id": "ord_101", "total": 99.0}]}
+                            ),
+                            "latency_ms": o_lat,
+                        }
+                    ],
+                    default_latency_ms=o_lat,
                     clock=clock,
                 )
             )
@@ -386,22 +589,21 @@ class ReplayBackend:
                 LLMDecision(
                     reasoning="Complete",
                     tool_calls=[],
-                    final_answer={
-                        "user": {"user_id": f"u_{trial_index}", "name": "Alice"},
-                        "orders": {"orders": [{"id": "ord_101", "total": 99.0}]},
-                        "status": "compiled_complete",
-                        "fused": True,
-                    },
+                    final_answer=dict(fixture.expected_output),
                 ),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=25.0, clock=clock)
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=fixture.model_latency_ms, clock=clock)
             return registry, model
 
         elif workload_id == "W3":
             spec_read = ToolSpec(name="read_customer_state", is_read_only=True, is_idempotent=True)
             spec_audit = ToolSpec(name="audit_transaction", is_read_only=True, is_idempotent=True)
-            registry.register(ReplayToolAdapter("read_customer_state", spec_read, default_latency_ms=25.0, clock=clock))
-            registry.register(ReplayToolAdapter("audit_transaction", spec_audit, default_latency_ms=25.0, clock=clock))
+            r_lat = fixture.tool_latencies.get("read_customer_state", 25.0)
+            a_lat = fixture.tool_latencies.get("audit_transaction", 25.0)
+            registry.register(
+                ReplayToolAdapter("read_customer_state", spec_read, default_latency_ms=r_lat, clock=clock)
+            )
+            registry.register(ReplayToolAdapter("audit_transaction", spec_audit, default_latency_ms=a_lat, clock=clock))
 
             spec_call = ToolCall(
                 name="read_customer_state",
@@ -413,53 +615,59 @@ class ReplayBackend:
                 LLMDecision(
                     reasoning="Evaluating risk",
                     tool_calls=[],
-                    final_answer={"status": "approved", "customer_id": f"cust_{trial_index}"},
+                    final_answer=dict(fixture.expected_output),
                 ),
             ]
             model = ReplayLLMAdapter(
-                decisions=decisions, draft_prediction=spec_call, decision_delay_ms=25.0, clock=clock
+                decisions=decisions, draft_prediction=spec_call, decision_delay_ms=fixture.model_latency_ms, clock=clock
             )
             return registry, model
 
         elif workload_id == "W4":
+            p_lat = fixture.tool_latencies.get("pricing_lookup", 25.0)
             spec = ToolSpec(name="pricing_lookup", is_read_only=True, is_idempotent=True)
-            registry.register(ReplayToolAdapter("pricing_lookup", spec, default_latency_ms=25.0, clock=clock))
+            registry.register(ReplayToolAdapter("pricing_lookup", spec, default_latency_ms=p_lat, clock=clock))
             key_id = f"item_{trial_index % 10}"
             call = ToolCall(name="pricing_lookup", arguments={"sku": key_id})
             decisions = [
                 LLMDecision(reasoning="Looking up cached price", tool_calls=[call]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"sku": key_id, "price": 49.99}),
+                LLMDecision(reasoning="Done", tool_calls=[], final_answer=dict(fixture.expected_output)),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=25.0, clock=clock)
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=fixture.model_latency_ms, clock=clock)
             return registry, model
 
         elif workload_id == "W5":
+            s_lat = fixture.tool_latencies.get("stream_query_data", 30.0)
             spec = ToolSpec(
                 name="stream_query_data", is_read_only=True, is_idempotent=True, commit_horizon_args=["query", "limit"]
             )
-            registry.register(ReplayToolAdapter("stream_query_data", spec, default_latency_ms=30.0, clock=clock))
+            registry.register(ReplayToolAdapter("stream_query_data", spec, default_latency_ms=s_lat, clock=clock))
             call = ToolCall(name="stream_query_data", arguments={"query": "SELECT * FROM metrics", "limit": 100})
             decisions = [
                 LLMDecision(reasoning="Querying streaming dataset", tool_calls=[call]),
                 LLMDecision(
-                    reasoning="Synthesizing dataset", tool_calls=[], final_answer={"status": "success", "count": 100}
+                    reasoning="Synthesizing dataset", tool_calls=[], final_answer=dict(fixture.expected_output)
                 ),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=35.0, stream_chunks_count=4, clock=clock)
+            model = ReplayLLMAdapter(
+                decisions=decisions, decision_delay_ms=fixture.model_latency_ms, stream_chunks_count=4, clock=clock
+            )
             return registry, model
 
         elif workload_id == "W6":
+            c_lat = fixture.tool_latencies.get("sandbox_compute", 25.0)
             spec = ToolSpec(name="sandbox_compute", is_read_only=True, is_idempotent=True)
-            registry.register(ReplayToolAdapter("sandbox_compute", spec, default_latency_ms=25.0, clock=clock))
+            registry.register(ReplayToolAdapter("sandbox_compute", spec, default_latency_ms=c_lat, clock=clock))
             call = ToolCall(name="sandbox_compute", arguments={"op": "fib", "n": 10})
             decisions = [
                 LLMDecision(reasoning="Computing sandbox output", tool_calls=[call]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"result": 55}),
+                LLMDecision(reasoning="Done", tool_calls=[], final_answer=dict(fixture.expected_output)),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=25.0, clock=clock)
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=fixture.model_latency_ms, clock=clock)
             return registry, model
 
         elif workload_id == "W7":
+            f_lat = fixture.tool_latencies.get("execute_fund_transfer", 25.0)
             spec = ToolSpec(
                 name="execute_fund_transfer",
                 is_read_only=False,
@@ -467,7 +675,7 @@ class ReplayBackend:
                 requires_approval=True,
                 is_idempotent=True,
             )
-            registry.register(ReplayToolAdapter("execute_fund_transfer", spec, default_latency_ms=25.0, clock=clock))
+            registry.register(ReplayToolAdapter("execute_fund_transfer", spec, default_latency_ms=f_lat, clock=clock))
             idemp_key = f"tx_replay_{trial_index:04d}"
             call_args = {"recipient": "Alice", "amount": 100.0, "idempotency_key": idemp_key}
             call = ToolCall(
@@ -479,22 +687,23 @@ class ReplayBackend:
                 LLMDecision(
                     reasoning="Completed transfer",
                     tool_calls=[],
-                    final_answer={"status": "transferred", "idempotency_key": idemp_key},
+                    final_answer=dict(fixture.expected_output),
                 ),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=25.0, clock=clock)
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=fixture.model_latency_ms, clock=clock)
             return registry, model
 
         else:
             # E5a Bytecode transport
+            b_lat = fixture.tool_latencies.get("bytecode_transport_tool", 20.0)
             spec = ToolSpec(name="bytecode_transport_tool", is_read_only=True, is_idempotent=True)
-            registry.register(ReplayToolAdapter("bytecode_transport_tool", spec, default_latency_ms=20.0, clock=clock))
+            registry.register(ReplayToolAdapter("bytecode_transport_tool", spec, default_latency_ms=b_lat, clock=clock))
             call = ToolCall(
                 name="bytecode_transport_tool", arguments={"payload_id": trial_index, "data": f"content_{trial_index}"}
             )
             decisions = [
                 LLMDecision(reasoning="Bytecode transport dispatch", tool_calls=[call]),
-                LLMDecision(reasoning="Done", tool_calls=[], final_answer={"status": "done", "trial": trial_index}),
+                LLMDecision(reasoning="Done", tool_calls=[], final_answer=dict(fixture.expected_output)),
             ]
-            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=25.0, clock=clock)
+            model = ReplayLLMAdapter(decisions=decisions, decision_delay_ms=fixture.model_latency_ms, clock=clock)
             return registry, model
