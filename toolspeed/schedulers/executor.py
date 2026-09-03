@@ -651,6 +651,8 @@ class ToolExecutor:
                 res.finished_at = self._now_s()
                 res.execution_time_ns = self._now_ns() - start_ns
                 res.execution_time_ms = exec_duration_ms
+                if lease is not None:
+                    res.metadata["queue_delay_ms"] = lease.queue_delay_ms
 
                 # Publish result to idempotency store if reserved
                 if idempotency_store_key:

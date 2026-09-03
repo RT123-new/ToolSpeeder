@@ -50,15 +50,20 @@ class ThreadingLocalTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServe
 class LocalHTTPServer:
     """Embedded lightweight multithreaded HTTP server for local network loopback benchmarking."""
 
-    def __init__(self, port: int = 0) -> None:
+    def __init__(self, port: int = 0, latency_s: float = 0.02) -> None:
         self.port = port
+        self.latency_s = latency_s
         self.server: ThreadingLocalTCPServer | None = None
         self.thread: threading.Thread | None = None
         self._started = threading.Event()
 
     def start(self) -> None:
+        latency = self.latency_s
+
         class ShardHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:
+                if latency > 0:
+                    time.sleep(latency)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -234,7 +239,9 @@ class LocalWallClockBackend:
     def __del__(self) -> None:
         self.cleanup()
 
-    def generate_task(self, workload_id: str, trial_index: int = 0, seed: int | None = None) -> Task:
+    def generate_task(
+        self, workload_id: str, trial_index: int = 0, seed: int | None = None, arm: str = "baseline"
+    ) -> Task:
         """Constructs an immutable Task with seeded parameters and strict validator."""
         eff_seed = seed if seed is not None else self.seed
         if workload_id == "W1":

@@ -46,14 +46,14 @@ class TestMultiSeedLoops(unittest.IsolatedAsyncioTestCase):
         harness = BenchmarkHarness(config=cfg)
 
         # Deliberately sabotage backend to return static unseeded tasks (simulating the Sep 2 bug)
-        def static_task(workload_id: str, trial_index: int = 0, seed: int | None = None) -> Task:
+        def static_task(workload_id: str, trial_index: int = 0, seed: int | None = None, arm: str = "baseline") -> Task:
             return Task(
                 task_id=f"static_task_{trial_index}",
                 prompt="static prompt",
                 expected_output={"status": "success"},
             )
 
-        harness.backend.generate_task = static_task  # type: ignore[method-assign]
+        harness.backend.generate_task = static_task  # type: ignore[method-assign,assignment]
 
         with self.assertRaises(ValueError) as ctx:
             await harness.run_multi_seed_benchmark(seeds=seeds, trials=2)

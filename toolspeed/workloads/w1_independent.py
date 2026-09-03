@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -10,12 +11,14 @@ import numpy as np
 from toolspeed.adapters.base import BaseToolAdapter
 from toolspeed.adapters.mock_tools import MockToolAdapter, MockToolConfig
 from toolspeed.core.types import (
+    EventType,
     ExecutionTrace,
     FunctionValidator,
     TaskInstance,
     TaskValidator,
     WorkloadSpec,
 )
+from toolspeed.schedulers.base import BaseScheduler, SchedulerConfig
 from toolspeed.workloads.base import BaseWorkload
 
 
@@ -133,3 +136,100 @@ class W1IndependentWorkload(BaseWorkload):
             return True, "Validation passed", {"total_load": output.get("total_load")}
 
         return FunctionValidator(_validate)
+
+
+@dataclass(frozen=True)
+class W1ConcurrencyPressurePoint:
+    concurrency_limit: int
+    baseline_duration_ms: float
+    candidate_duration_ms: float
+    speedup: float
+    candidate_queue_time_ms: float
+
+
+@dataclass
+class W1ConcurrencySweepReport:
+    points: list[W1ConcurrencyPressurePoint]
+
+    def verify_concurrency_pressure_invariants(self) -> tuple[bool, str]:
+        """Proves speedup diminishes as limit approaches 1, and queue time decreases with higher limits."""
+        if not self.points:
+            return False, "No concurrency points evaluated"
+
+        sorted_points = sorted(self.points, key=lambda p: p.concurrency_limit)
+        limits = [p.concurrency_limit for p in sorted_points]
+        speedups = [p.speedup for p in sorted_points]
+        queue_times = [p.candidate_queue_time_ms for p in sorted_points]
+
+        # 1. Speedup at limit=1 must be strictly lower than at highest limit
+        if speedups[-1] <= speedups[0]:
+            return (
+                False,
+                f"Speedup at limit={limits[-1]} ({speedups[-1]:.2f}x) does not exceed limit={limits[0]} ({speedups[0]:.2f}x)",
+            )
+
+        # 2. Speedup at limit=1 diminishes towards 1.0x (<= 1.8x)
+        p1 = next((p for p in sorted_points if p.concurrency_limit == 1), None)
+        if p1 is not None and p1.speedup > 1.8:
+            return False, f"Speedup at limit=1 did not diminish ({p1.speedup:.2f}x; expected ~1.0x)"
+
+        # 3. Queue time at limit=1 must be greater than at highest limit
+        if queue_times[0] <= queue_times[-1]:
+            return (
+                False,
+                f"Queue time at limit=1 ({queue_times[0]:.2f}ms) is not greater than at limit={limits[-1]} ({queue_times[-1]:.2f}ms)",
+            )
+
+        return True, "All W1 concurrency pressure invariants hold."
+
+
+async def evaluate_w1_concurrency_pressure(
+    backend: Any,
+    baseline_cls: type[BaseScheduler],
+    candidate_cls: type[BaseScheduler],
+    limits: Sequence[int] = (1, 2, 4, 8, 16),
+    trial_index: int = 0,
+) -> W1ConcurrencySweepReport:
+    """Evaluates W1 under concurrency-limit pressure across limits [1, 2, 4, 8, 16]."""
+    points: list[W1ConcurrencyPressurePoint] = []
+
+    for limit in limits:
+        task_b = backend.generate_task("W1", trial_index=trial_index, arm="baseline")
+        task_c = backend.generate_task("W1", trial_index=trial_index, arm="candidate")
+
+        tools_b, model_b = backend.create_workload_environment("W1", trial_index=trial_index, arm="baseline")
+        tools_c, model_c = backend.create_workload_environment("W1", trial_index=trial_index, arm="candidate")
+
+        cfg_b = SchedulerConfig(concurrency_limit=limit)
+        cfg_c = SchedulerConfig(concurrency_limit=limit)
+
+        sched_b = baseline_cls(cfg_b)
+        sched_c = candidate_cls(cfg_c)
+
+        task_b_model = task_b.to_model_task() if hasattr(task_b, "to_model_task") else task_b
+        task_c_model = task_c.to_model_task() if hasattr(task_c, "to_model_task") else task_c
+
+        res_b = await sched_b.execute(task_b_model, model_b, tools_b)
+        res_c = await sched_c.execute(task_c_model, model_c, tools_c)
+
+        dur_b = res_b.total_duration_ms
+        dur_c = res_c.total_duration_ms
+        speedup = dur_b / dur_c if dur_c > 0 else 1.0
+
+        q_time_c = sum(
+            e.duration_ms for e in res_c.events if e.event_type in (EventType.RATE_LIMIT_DELAY, "rate_limit_delay")
+        )
+        if q_time_c == 0.0:
+            q_time_c = sum(r.metadata.get("queue_delay_ms", 0.0) for r in res_c.tool_results)
+
+        points.append(
+            W1ConcurrencyPressurePoint(
+                concurrency_limit=limit,
+                baseline_duration_ms=dur_b,
+                candidate_duration_ms=dur_c,
+                speedup=speedup,
+                candidate_queue_time_ms=q_time_c,
+            )
+        )
+
+    return W1ConcurrencySweepReport(points=points)
