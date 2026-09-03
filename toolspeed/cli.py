@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from typing import Any
 import numpy as np
 
 from toolspeed.benchmarks.harness import BenchmarkConfig, BenchmarkHarness
+from toolspeed.core.protocol import load_frozen_protocol
 from toolspeed.core.types import EvidenceLevel, VerdictState, compute_file_sha256
 from toolspeed.experiments.e1_dag_runner import E1DAGExperiment
 from toolspeed.experiments.e2_fusion_runner import E2FusionExperiment
@@ -112,6 +114,15 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     return 0
 
 
+def is_git_working_tree_dirty() -> bool:
+    """Returns True if the git working tree has uncommitted modifications or untracked files."""
+    try:
+        res = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, check=False)
+        return bool(res.stdout.strip())
+    except Exception:
+        return True
+
+
 def cmd_benchmark(args: argparse.Namespace) -> int:
     """Run real paired benchmark suite on genuine Replay or Local wall-clock backends."""
     backend_mode = args.backend.lower()
@@ -119,32 +130,96 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     out_dir = Path(args.out or f"artifacts/{backend_mode}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    default_trials = 200 if backend_mode == "local" else 1000
-    trials = args.trials if args.trials is not None else default_trials
+    protocol_name = getattr(args, "protocol", "tool-speed-v1.3-draft.json")
+    try:
+        protocol = load_frozen_protocol(protocol_name)
+    except Exception as exc:
+        print(f"❌ Failed to load protocol '{protocol_name}': {exc}")
+        return 1
+
+    mode = getattr(args, "mode", "exploratory").lower()
+    if mode not in ("smoke", "exploratory", "confirmatory"):
+        print(f"❌ Invalid execution mode '{mode}'. Choose from: smoke, exploratory, confirmatory")
+        return 1
+
+    # Strict validation for confirmatory mode
+    if mode == "confirmatory":
+        if not protocol.is_frozen or protocol.status != "prospectively_frozen":
+            print(
+                f"❌ Confirmatory mode requires a prospectively frozen protocol (status='prospectively_frozen', is_frozen=True).\n"
+                f"Got status='{protocol.status}', is_frozen={protocol.is_frozen}. Retrospective repair and draft protocols are strictly rejected."
+            )
+            return 1
+
+        min_trials = 1000 if backend_mode == "replay" else 200
+        eff_trials = args.trials if args.trials is not None else min_trials
+        if eff_trials < min_trials:
+            print(
+                f"❌ Confirmatory mode requires >= {min_trials} trials per seed for {backend_mode} backend. Specified: {eff_trials}"
+            )
+            return 1
+
+        # Confirmatory seeds requirement: >= 3 distinct seeds, no retrospective seeds
+        protocol_seeds_dict = getattr(protocol, "seeds_dict", None)
+        if getattr(args, "seeds", None):
+            conf_seeds = [int(s.strip()) for s in args.seeds.split(",")]
+        elif protocol_seeds_dict is not None and "confirmatory" in protocol_seeds_dict:
+            conf_seeds = list(protocol_seeds_dict["confirmatory"])
+        else:
+            conf_seeds = [s for s in protocol.seeds if s not in {42, 137, 2026}]
+
+        if len(conf_seeds) < 3:
+            print(f"❌ Confirmatory mode requires >= 3 distinct seeds. Found {len(conf_seeds)}: {conf_seeds}")
+            return 1
+        if len(conf_seeds) != len(set(conf_seeds)):
+            print(f"❌ Confirmatory seeds must be unique. Found duplicates: {conf_seeds}")
+            return 1
+        if set(conf_seeds).intersection({42, 137, 2026}):
+            print("❌ Confirmatory mode strictly forbids reusing retrospective seeds (42, 137, 2026).")
+            return 1
+
+        if is_git_working_tree_dirty():
+            print("❌ Confirmatory mode requires a clean git working tree with zero uncommitted changes.")
+            return 1
+
+        seeds_list = conf_seeds
+        trials = eff_trials
+    elif mode == "smoke":
+        trials = args.trials if args.trials is not None else protocol.smoke_trials
+        seeds_list = [args.seed] if args.seed is not None else [protocol.seeds[0]]
+    else:  # exploratory
+        default_trials = 200 if backend_mode == "local" else 1000
+        trials = args.trials if args.trials is not None else default_trials
+        protocol_seeds_dict = getattr(protocol, "seeds_dict", None)
+        if getattr(args, "seeds", None):
+            seeds_list = [int(s.strip()) for s in args.seeds.split(",")]
+        elif protocol_seeds_dict is not None and "exploratory" in protocol_seeds_dict:
+            seeds_list = list(protocol_seeds_dict["exploratory"])
+        else:
+            seeds_list = protocol.seeds[:3] if len(protocol.seeds) >= 3 else [args.seed or 101]
+
+    seed_val = seeds_list[0] if seeds_list else (args.seed or 101)
 
     print("\n=======================================================")
-    print(f"🚀 ToolSpeed Paired Benchmark Suite ({backend_mode.upper()} Backend)")
+    print(f"🚀 ToolSpeed Paired Benchmark Suite ({backend_mode.upper()} Backend, Mode: {mode.upper()})")
     print("=======================================================")
     print(
-        f"Evidence Level: {evidence_level.value} | Trials: {trials} per condition | Seed: {args.seed} | Out: {out_dir}\n"
-    )
-
-    seeds_list = (
-        [int(s.strip()) for s in args.seeds.split(",")]
-        if getattr(args, "seeds", None)
-        else [args.seed, args.seed + 1, args.seed + 2]
+        f"Protocol: {protocol.plan_id} (v{protocol.plan_version}) | Mode: {mode.upper()} | "
+        f"Evidence Level: {evidence_level.value} | Trials: {trials} per condition | Seeds: {seeds_list} | Out: {out_dir}\n"
     )
 
     config = BenchmarkConfig(
         trials_per_condition=trials,
-        seed=args.seed,
+        seed=seed_val,
         seeds=seeds_list,
         evidence_level=evidence_level,
         concurrency_limit=args.concurrency,
         include_negative_controls=True,
+        protocol=protocol,
+        mode=mode,
     )
 
-    harness = BenchmarkHarness(config=config)
+    harness = BenchmarkHarness(config=config, protocol=protocol)
     result = asyncio.run(harness.run_full_benchmark())
 
     # Save benchmark bundle reports directly
@@ -533,13 +608,27 @@ def main(argv: list[str] | None = None) -> int:
     p_bm = subparsers.add_parser("benchmark", help="Run real paired benchmark suite on Replay or Local backends")
     p_bm.add_argument("--backend", "-b", choices=["replay", "local"], default="replay", help="Execution backend")
     p_bm.add_argument(
+        "--protocol",
+        "-p",
+        type=str,
+        default="tool-speed-v1.3-draft.json",
+        help="Path or name of authoritative protocol file",
+    )
+    p_bm.add_argument(
+        "--mode",
+        "-m",
+        choices=["smoke", "exploratory", "confirmatory"],
+        default="exploratory",
+        help="Benchmark execution mode (smoke, exploratory, confirmatory)",
+    )
+    p_bm.add_argument(
         "--trials",
         "-n",
         type=int,
         default=None,
         help="Number of trials per condition (defaults: replay=1000, local=200)",
     )
-    p_bm.add_argument("--seed", "-s", type=int, default=20260825, help="Random seed")
+    p_bm.add_argument("--seed", "-s", type=int, default=None, help="Random seed")
     p_bm.add_argument(
         "--seeds",
         type=str,

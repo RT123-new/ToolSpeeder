@@ -120,6 +120,7 @@ class BenchmarkProtocol:
     amendment_ledger: list[dict[str, Any]]
     raw_json: str
     protocol_hash: str
+    seeds_dict: dict[str, list[int]] | None = None
 
 
 # Recognized registered schedulers and codecs
@@ -435,6 +436,7 @@ def load_frozen_protocol(plan_path: str | Path | None = None) -> BenchmarkProtoc
         amendment_ledger=list(data.get("amendment_ledger", [])),
         raw_json=raw_text,
         protocol_hash=protocol_hash,
+        seeds_dict=seeds_raw if isinstance(seeds_raw, dict) else None,
     )
 
 
