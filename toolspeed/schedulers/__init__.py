@@ -42,6 +42,7 @@ from toolspeed.schedulers.executor import (
 from toolspeed.schedulers.phase2_cache import (
     CacheEntry,
     CacheScheduler,
+    Phase2CacheScheduler,
     ToolResultCache,
 )
 
@@ -66,6 +67,7 @@ __all__ = [
     "JITFusionScheduler",
     "NativeParallelScheduler",
     "OracleDAGScheduler",
+    "Phase2CacheScheduler",
     "RateLimitExceededError",
     "SchedulerConfig",
     "SchemaValidationError",

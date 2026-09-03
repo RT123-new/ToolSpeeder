@@ -224,6 +224,7 @@ class CacheScheduler(BaseScheduler):
         shared_cache: ToolResultCache | None = None,
         cache_enabled: bool | None = None,
         ttl_seconds: float | None = None,
+        cache: ToolResultCache | None = None,
     ) -> None:
         cfg = config or SchedulerConfig(cache_enabled=True)
         if cache_enabled is not None:
@@ -232,7 +233,7 @@ class CacheScheduler(BaseScheduler):
             cfg.cache_enabled = True
         super().__init__(cfg)
         actual_ttl = ttl_seconds or self.config.cache_ttl_seconds
-        self.cache = shared_cache or ToolResultCache(default_ttl_seconds=actual_ttl)
+        self.cache = cache or shared_cache or ToolResultCache(default_ttl_seconds=actual_ttl)
 
     async def _execute_tool_with_cache(
         self,
@@ -321,3 +322,6 @@ class CacheScheduler(BaseScheduler):
                 ctx.record_tool_result(res)
 
         return "Max turns reached without final answer."
+
+
+Phase2CacheScheduler = CacheScheduler

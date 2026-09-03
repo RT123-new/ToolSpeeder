@@ -23,7 +23,12 @@ from toolspeed.workloads.w3_branching import (
     W3SpeculationSweepReport,
     evaluate_w3_speculation_failure_sweep,
 )
-from toolspeed.workloads.w4_locality import W4LocalityWorkload
+from toolspeed.workloads.w4_locality import (
+    W4CacheEvictionPoint,
+    W4CacheEvictionSweepReport,
+    W4LocalityWorkload,
+    evaluate_w4_cache_eviction_pressure,
+)
 from toolspeed.workloads.w5_large_payloads import W5LargePayloadsWorkload
 from toolspeed.workloads.w6_cold_start import W6ColdStartWorkload
 from toolspeed.workloads.w7_side_effects import W7SideEffectsWorkload
@@ -42,6 +47,8 @@ __all__ = [
     "W3DraftInjectingAdapter",
     "W3SpeculationFailurePoint",
     "W3SpeculationSweepReport",
+    "W4CacheEvictionPoint",
+    "W4CacheEvictionSweepReport",
     "W4LocalityWorkload",
     "W5LargePayloadsWorkload",
     "W6ColdStartWorkload",
@@ -49,5 +56,6 @@ __all__ = [
     "evaluate_w1_concurrency_pressure",
     "evaluate_w2_compilation_vs_step_by_step",
     "evaluate_w3_speculation_failure_sweep",
+    "evaluate_w4_cache_eviction_pressure",
     "execute_compiled_plan",
 ]
