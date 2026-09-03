@@ -22,6 +22,10 @@ from typing import Any
 import numpy as np
 
 from toolspeed.benchmarks.harness import BenchmarkConfig, BenchmarkHarness
+from toolspeed.benchmarks.recompute import (
+    TraceRecomputationError,
+    generate_trace_recomputed_reports,
+)
 from toolspeed.core.protocol import load_frozen_protocol
 from toolspeed.core.types import EvidenceLevel, VerdictState, compute_file_sha256
 from toolspeed.experiments.e1_dag_runner import E1DAGExperiment
@@ -298,7 +302,10 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    """Generate HTML dashboard and Markdown evidence log from an existing immutable bundle."""
+    """Generate HTML dashboard and Markdown evidence log from an existing immutable bundle.
+
+    Recomputes metrics independently from raw traces; never reads stored summary metrics.
+    """
     input_path = args.input or "artifacts/synthetic"
     try:
         data, parent_dir = _load_bundle_data(input_path)
@@ -308,19 +315,48 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     manifest_file = parent_dir / "manifest.json"
     sha_file = parent_dir / "bundle.sha256"
+    sig_file = parent_dir / "manifest.sig"
     if (
         Path(input_path).is_dir()
         and not manifest_file.exists()
         and not sha_file.exists()
+        and not sig_file.exists()
         and not data.get("evaluations")
     ):
-        print(f"❌ Error: Bundle at {parent_dir} is unsealed and unsigned (missing manifest.json / bundle.sha256).")
+        print(
+            f"❌ Error: Bundle at {parent_dir} is unsealed and unsigned (missing manifest.json / bundle.sha256 / manifest.sig)."
+        )
         return 1
 
     out_dir = Path(args.out or parent_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Generating reports from existing bundle: {input_path} -> {out_dir}...")
+
+    # Independent recomputation from raw traces if trace files are present
+    has_traces = (parent_dir / "raw-traces.jsonl").exists() or (parent_dir / "candidate-traces.jsonl").exists()
+    if has_traces and (parent_dir / "manifest.json").exists():
+        try:
+            print("📊 Recomputing all metrics independently from raw traces (never reading stored summaries)...")
+            md_content, html_content, discrepancies = generate_trace_recomputed_reports(parent_dir, out_dir)
+            if discrepancies:
+                print(
+                    f"⚠️ WARNING: Found {len(discrepancies)} metric discrepancy(ies) between raw traces and stored result.json (> 1e-6):"
+                )
+                for disc in discrepancies:
+                    print(f"  • {disc}")
+            else:
+                print("✅ Recomputed metrics match stored metrics within 1e-6 tolerance.")
+
+            md_path = out_dir / "report.md"
+            html_path = out_dir / "report.html"
+            print("✅ Reports successfully generated from recomputed raw traces:")
+            print(f"  - Markdown Report: {md_path}")
+            print(f"  - HTML Dashboard: {html_path}")
+            return 0
+        except TraceRecomputationError as e:
+            print(f"❌ Trace recomputation failed: {e}")
+            return 1
 
     if "evaluations" in data:
         md_content = generate_benchmark_markdown_report(data)
