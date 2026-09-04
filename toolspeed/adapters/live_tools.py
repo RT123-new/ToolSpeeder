@@ -193,6 +193,56 @@ class SafeSubprocessSandbox(BaseToolAdapter):
             cost_usd=0.0005,
         )
 
+    async def _terminate_process_group(self, proc: asyncio.subprocess.Process, grace_period_s: float = 0.5) -> None:
+        """Gracefully terminates process group with SIGTERM, then escalates to SIGKILL after grace period.
+
+        Guarantees the process exits before returning, leaving zero orphan processes.
+        """
+        if proc.returncode is not None:
+            return
+
+        pid = proc.pid
+        try:
+            pgid = os.getpgid(pid)
+        except ProcessLookupError:
+            await proc.wait()
+            return
+        except Exception:
+            pgid = None
+
+        # 1. Send SIGTERM to process group
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            await proc.wait()
+            return
+        except Exception:
+            pass
+
+        # 2. Wait up to grace period for graceful shutdown
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace_period_s)
+            return
+        except (asyncio.TimeoutError, TimeoutError):
+            pass
+
+        # 3. Escalate to SIGKILL to process group
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception:
+            pass
+
+        # 4. Await complete exit before returning (no orphan processes)
+        await proc.wait()
+
     async def execute(self, call: ToolCall) -> ToolResult:
         start_ns = time.perf_counter_ns()
         command = call.arguments.get("command", "")
@@ -250,11 +300,7 @@ class SafeSubprocessSandbox(BaseToolAdapter):
             )
         except asyncio.TimeoutError:
             if proc and proc.returncode is None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except Exception:
-                    proc.kill()
-                await proc.wait()
+                await self._terminate_process_group(proc, grace_period_s=0.5)
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
@@ -267,22 +313,11 @@ class SafeSubprocessSandbox(BaseToolAdapter):
             )
         except asyncio.CancelledError:
             if proc and proc.returncode is None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-                await proc.wait()
+                await self._terminate_process_group(proc, grace_period_s=0.5)
             raise
         except Exception as ex:
             if proc and proc.returncode is None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except Exception:
-                    proc.kill()
-                await proc.wait()
+                await self._terminate_process_group(proc, grace_period_s=0.5)
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,

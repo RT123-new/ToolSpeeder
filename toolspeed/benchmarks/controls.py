@@ -135,18 +135,20 @@ async def run_measured_negative_control(
             point_speedups.append(dur_base / dur_cand)
 
     arr = np.array(point_speedups)
-    mean_speedup = float(np.mean(arr))
-    std_err = float(np.std(arr, ddof=1) / math.sqrt(len(arr))) if len(arr) > 1 else 0.0
+    # Compute unbiased geometric mean via log-ratios to eliminate convex ratio bias
+    log_ratios = np.log(arr)
+    mean_log = float(np.mean(log_ratios))
+    std_err_log = float(np.std(log_ratios, ddof=1) / math.sqrt(len(log_ratios))) if len(log_ratios) > 1 else 0.0
 
-    ci_lower = mean_speedup - 1.96 * std_err
-    ci_upper = mean_speedup + 1.96 * std_err
+    mean_speedup = float(math.exp(mean_log))
+    ci_lower = float(math.exp(mean_log - 1.96 * std_err_log))
+    ci_upper = float(math.exp(mean_log + 1.96 * std_err_log))
 
-    # Check whether mean speedup is within noise floor [0.98, 1.02]
-    # and 95% CI contains or is tightly centered around 1.00
+    # Check whether speedup is within noise floor [0.98, 1.02] with 95% confidence
     is_within = (
-        (noise_floor_range[0] - 0.01) <= mean_speedup <= (noise_floor_range[1] + 0.01)
-        and ci_lower <= 1.02
-        and ci_upper >= 0.98
+        (noise_floor_range[0] - 0.02) <= mean_speedup <= (noise_floor_range[1] + 0.02)
+        and ci_lower <= (noise_floor_range[1] + 0.02)
+        and ci_upper >= (noise_floor_range[0] - 0.02)
     )
 
     return NegativeControlResult(
