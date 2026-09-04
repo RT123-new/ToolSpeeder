@@ -148,9 +148,9 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
 
     # Strict validation for confirmatory mode
     if mode == "confirmatory":
-        if not protocol.is_frozen or protocol.status != "prospectively_frozen":
+        if not protocol.is_frozen or protocol.status not in ("prospectively_frozen", "FROZEN"):
             print(
-                f"❌ Confirmatory mode requires a prospectively frozen protocol (status='prospectively_frozen', is_frozen=True).\n"
+                f"❌ Confirmatory mode requires a prospectively frozen protocol (status in ['prospectively_frozen', 'FROZEN'], is_frozen=True).\n"
                 f"Got status='{protocol.status}', is_frozen={protocol.is_frozen}. Retrospective repair and draft protocols are strictly rejected."
             )
             return 1
