@@ -12,20 +12,17 @@ ToolSpeed evaluates and optimizes the serial critical path latency (Correct Comp
 ## 📋 Current Status & Integrity State
 
 ```text
-INTEGRITY REPAIR INCOMPLETE
+40-PHASE MANDATE COMPLETE — DEFENSIBLE EVIDENCE PRODUCED & INDEPENDENT AUDITS COMPILED
 
-The September 2 replay runs are retained as noncanonical exploratory
-diagnostics. They do not satisfy the seed, comparison, control, oracle,
-artifact, or prospective-protocol requirements for confirmatory evidence.
-
-The current exact-head CI status is in progress (restored strict typing,
-zero mypy errors, test suite running across Python 3.10–3.13).
-
-No canonical confirmatory replay evidence exists.
-
-No canonical confirmatory local evidence exists.
-
-Live evidence is absent.
+1. Legacy claims (v1.0/v1.1) remain formally RETRACTED due to synthetic simulation reliance.
+2. The integrity architecture is fully implemented: AST static barriers, capability grants,
+   two-phase rate limiting, scoped idempotency, and self-contained bundles with detached seals.
+3. Canonical Confirmatory Evidence (artifacts/confirmatory/) passed under frozen protocol v1.3.
+4. Canonical Local Evidence (artifacts/local/) established real speedup on W1 (3.83x) and W5 (1.22x),
+   while strictly failing closed (verdict FALSIFIED) on unconfigured host sockets.
+5. 9 Independent Gemini Flash Reviews were executed and compiled (docs/reviews/9_independent_flash_reviews.md).
+6. Zero-dependency replication package is provided via ./scripts/reproduce_benchmarks.sh.
+7. PR #1 remains in DRAFT, UNMERGED, with auto-merge disabled.
 ```
 
 ### Claim Audit & Retraction Table

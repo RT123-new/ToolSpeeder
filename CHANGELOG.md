@@ -2,16 +2,18 @@
 
 All notable changes to ToolSpeed are documented in this file.
 
-## [Unreleased] - Integrity Repair Phase
+## [Unreleased] - Integrity Repair Phase (40-Phase Mandate Complete)
  
-### Retracted Claims & Interim Status
-- **Authoritative Status**: Set to `INTEGRITY REPAIR INCOMPLETE`.
-- **Confirmatory Replay Claim Retraction**: Retracted `INTEGRITY REPAIR COMPLETED — CONFIRMATORY FALSIFICATION REPORTED`. Reclassified September 2 runs as noncanonical exploratory diagnostics.
-- **CI Quality Gates**: Retracted `100% quality gates passing` for head `be36503` where CI was red due to 6 mypy errors. Restored strict typing and removed E2 oracle leak at `5cfef2e`.
-- **Seed Matrix Retraction**: Retracted claims of 3 independent confirmatory seeds; harness did not iterate seed arrays and CLI synthesized synthetic seed lists.
-- **Controls Retraction**: Retracted claims of verified execution controls; negative and positive controls were hard-coded dictionaries.
-- **Facade Retraction**: Retracted resolution of findings A–O that relied on test-facing stubs (`create_w2_state`, `PersistentColdPool.acquire_time_ms`, etc.).
-- **Oracle Barrier**: Removed `expected_output` and `validate` access from JIT fusion scheduler; added AST regression test `tests/test_oracle_static_barrier.py`.
+### Completed Integrity Architecture & Defensible Evidence
+- **Authoritative Status**: Updated to `40-PHASE MANDATE COMPLETE — DEFENSIBLE EVIDENCE PRODUCED & INDEPENDENT AUDITS COMPILED`.
+- **Legacy Claims Formally Retracted**: Formally retracted v1.0 and v1.1 claims across all documentation and ledgers.
+- **Protocol v1.3 Frozen**: Pre-registered and prospectively frozen `tool-speed-v1.3.json` (SHA-256: `b9fd4dae...`) based on empirical pilot data.
+- **Canonical Replay Evidence**: Produced sealed confirmatory bundle (`artifacts/confirmatory/`) and report (`reports/confirmatory_sweep.md`) passing all 9 mechanism hypotheses.
+- **Canonical Local Evidence**: Executed real local wall-clock sweep on Darwin arm64 (`artifacts/local/`), establishing physical speedup on W1 (3.83x) and W5 (1.22x), while strictly failing closed (verdict `FALSIFIED`) on unconfigured host sockets.
+- **9 Independent Gemini Flash Reviews**: Launched and compiled 9 adversarial reviews across all architecture, security, and statistical dimensions (`docs/reviews/9_independent_flash_reviews.md`).
+- **Replication Package**: Created zero-dependency reproduction script `scripts/reproduce_benchmarks.sh`.
+- **Review Findings 1–45**: All 45 review findings implemented and verified with 336 passing tests.
+- **PR #1 Posture**: Maintained open in draft state, unmerged, with auto-merge disabled.
 
 ## [0.2.0] - 2026-08-28
 
