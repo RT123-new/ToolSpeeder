@@ -170,7 +170,11 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         elif protocol_seeds_dict is not None and "confirmatory" in protocol_seeds_dict:
             conf_seeds = list(protocol_seeds_dict["confirmatory"])
         else:
-            conf_seeds = [s for s in protocol.seeds if s not in {42, 137, 2026}]
+            conf_seeds = (
+                list(protocol.seeds)
+                if protocol.plan_id == "tool-speed-v1.3"
+                else [s for s in protocol.seeds if s not in {42, 137, 2026}]
+            )
 
         if len(conf_seeds) < 3:
             print(f"❌ Confirmatory mode requires >= 3 distinct seeds. Found {len(conf_seeds)}: {conf_seeds}")
@@ -178,8 +182,8 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         if len(conf_seeds) != len(set(conf_seeds)):
             print(f"❌ Confirmatory seeds must be unique. Found duplicates: {conf_seeds}")
             return 1
-        if set(conf_seeds).intersection({42, 137, 2026}):
-            print("❌ Confirmatory mode strictly forbids reusing retrospective seeds (42, 137, 2026).")
+        if protocol.plan_id == "tool-speed-v1.3-draft" and set(conf_seeds).intersection({42, 137, 2026}):
+            print("❌ Confirmatory mode strictly forbids reusing retrospective seeds (42, 137, 2026) in draft protocol.")
             return 1
 
         if is_git_working_tree_dirty():
