@@ -183,7 +183,9 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             print(f"❌ Confirmatory seeds must be unique. Found duplicates: {conf_seeds}")
             return 1
         if protocol.plan_id == "tool-speed-v1.3-draft" and set(conf_seeds).intersection({42, 137, 2026}):
-            print("❌ Confirmatory mode strictly forbids reusing retrospective seeds (42, 137, 2026) in draft protocol.")
+            print(
+                "❌ Confirmatory mode strictly forbids reusing retrospective seeds (42, 137, 2026) in draft protocol."
+            )
             return 1
 
         if is_git_working_tree_dirty():
@@ -445,7 +447,9 @@ def cmd_falsify(args: argparse.Namespace) -> int:
         for wl, c_list in c_by_wl.items():
             b_list = b_by_wl.get(wl, [])
             c_lat = [float(x.get("ccl_ms") or x.get("total_duration_ms") or 100.0) for x in c_list]
-            b_lat = [float(x.get("ccl_ms") or x.get("total_duration_ms") or 100.0) for x in b_list] or [100.0] * len(c_lat)
+            b_lat = [float(x.get("ccl_ms") or x.get("total_duration_ms") or 100.0) for x in b_list] or [100.0] * len(
+                c_lat
+            )
             c_succ = [bool(x.get("success", False)) for x in c_list]
             b_succ = [bool(x.get("success", True)) for x in b_list] or [True] * len(c_succ)
 
