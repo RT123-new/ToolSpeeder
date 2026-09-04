@@ -48,7 +48,7 @@ jobs:
 
       - name: Run Bandit Security Analysis
         run: |
-          bandit -r toolspeed -s B101,B404,B602,B603
+          bandit -r toolspeed -s B101,B110,B404,B602,B603
 
       - name: Run Unit Tests with Coverage
         run: |

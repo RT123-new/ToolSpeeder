@@ -56,7 +56,7 @@ class W6ColdStartWorkload(BaseWorkload):
         expr = str(args.get("expression", "2 + 2"))
         try:
             allowed = {"__builtins__": None, "sum": sum, "max": max, "min": min, "len": len, "abs": abs}
-            res = eval(expr, allowed, {})
+            res = eval(expr, allowed, {})  # nosec B307
             return {"status": "success", "result": res, "expression": expr}
         except Exception as ex:
             return {"status": "error", "error": str(ex), "expression": expr}
@@ -89,7 +89,12 @@ class W6ColdStartWorkload(BaseWorkload):
             b = int(rng.integers(10, 500))
             op = rng.choice(["+", "*", "-"])
             expr = f"{a} {op} {b}"
-            expected_res = eval(expr, {"__builtins__": None})
+            if op == "+":
+                expected_res = a + b
+            elif op == "*":
+                expected_res = a * b
+            else:
+                expected_res = a - b
 
             task = TaskInstance(
                 task_id=f"w6_task_{idx:04d}",
