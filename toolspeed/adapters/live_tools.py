@@ -55,7 +55,7 @@ class AsyncSQLiteTool(BaseToolAdapter):
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
             tables = [row[0] for row in cursor.fetchall()]
             for tbl in tables:
-                cursor.execute(f"SELECT * FROM {tbl}")
+                cursor.execute(f"SELECT * FROM {tbl}")  # nosec B608
                 rows = cursor.fetchall()
                 snapshot[tbl] = [dict(r) if isinstance(r, sqlite3.Row) else list(r) for r in rows]
         finally:
