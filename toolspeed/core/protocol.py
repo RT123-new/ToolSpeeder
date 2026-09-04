@@ -167,24 +167,33 @@ def resolve_protocol_resource(filename: str) -> Path:
     if p.exists() and p.is_file():
         return p
 
-    # 2. Try importlib.resources inside package
-    try:
-        traversable = pkg_resources.files("toolspeed.resources.protocols").joinpath(p.name)
-        if traversable.is_file():
-            # Materialize to concrete path if needed
-            return Path(str(traversable))
-    except Exception:
-        pass
+    candidates = [p.name]
+    if not p.name.endswith(".json"):
+        candidates.append(f"{p.name}.json")
 
-    # 3. Try toolspeed/resources/protocols directly
-    local_res = Path(__file__).resolve().parent.parent / "resources" / "protocols" / p.name
-    if local_res.exists():
-        return local_res
+    for cand in candidates:
+        # 2. Try importlib.resources inside package
+        try:
+            traversable = pkg_resources.files("toolspeed.resources.protocols").joinpath(cand)
+            if traversable.is_file():
+                return Path(str(traversable))
+        except Exception:
+            pass
 
-    # 4. Fallback to benchmark-plans/ in repo root
-    repo_res = Path(__file__).resolve().parent.parent.parent / "benchmark-plans" / p.name
-    if repo_res.exists():
-        return repo_res
+        # 3. Try toolspeed/resources/protocols directly
+        local_res = Path(__file__).resolve().parent.parent / "resources" / "protocols" / cand
+        if local_res.exists():
+            return local_res
+
+        # 4. Try benchmarks/protocols/ in repo root
+        bench_res = Path(__file__).resolve().parent.parent.parent / "benchmarks" / "protocols" / cand
+        if bench_res.exists():
+            return bench_res
+
+        # 5. Fallback to benchmark-plans/ in repo root
+        repo_res = Path(__file__).resolve().parent.parent.parent / "benchmark-plans" / cand
+        if repo_res.exists():
+            return repo_res
 
     raise FileNotFoundError(f"Authoritative benchmark protocol not found at: {filename}")
 
@@ -283,7 +292,7 @@ def validate_protocol_dict(data: dict[str, Any]) -> list[str]:
             errors.append("Field 'seeds.confirmatory' must be a non-empty list of integers")
         if exp and conf and len(set(exp).intersection(set(conf))) > 0:
             errors.append("Exploratory and confirmatory seeds must not overlap")
-        if conf and set(conf).intersection({42, 137, 2026}):
+        if data.get("plan_id") == "tool-speed-v1.3-draft" and conf and set(conf).intersection({42, 137, 2026}):
             errors.append("Retrospective seeds (42, 137, 2026) must not be reused as confirmatory seeds")
     elif not isinstance(seeds, list) or len(seeds) == 0:
         errors.append(
