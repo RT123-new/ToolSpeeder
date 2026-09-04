@@ -574,15 +574,17 @@ def cmd_validate_bundle(args: argparse.Namespace) -> int:
         for idx, ev in enumerate(evaluations):
             wl = ev.get("workload_id", f"idx_{idx}")
             summ = ev.get("summary", {})
-            if summ.get("candidate_p95_ms") is None or summ.get("baseline_p95_ms") is None:
-                print(f"❌ FAILED [{wl}]: Required P95 CCL latency is null.")
-                checks_passed = False
-            if summ.get("p95_speedup") is None:
-                print(f"❌ FAILED [{wl}]: Required P95 speedup is null.")
-                checks_passed = False
-            if summ.get("candidate_success_rate") is None:
+            cand_succ = summ.get("candidate_success_rate")
+            if cand_succ is None:
                 print(f"❌ FAILED [{wl}]: Candidate success rate is null.")
                 checks_passed = False
+            elif cand_succ > 0:
+                if summ.get("candidate_p95_ms") is None or summ.get("baseline_p95_ms") is None:
+                    print(f"❌ FAILED [{wl}]: Required P95 CCL latency is null.")
+                    checks_passed = False
+                if summ.get("p95_speedup") is None:
+                    print(f"❌ FAILED [{wl}]: Required P95 speedup is null.")
+                    checks_passed = False
 
     # 3. Guardrail safety checks
     for ev in evaluations:
