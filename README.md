@@ -1,112 +1,116 @@
-# ⚡ ToolSpeeder
+# ⚡ ToolSpeed (ToolSpeeder)
 
-**High-Performance AI Agent Tool-Call Latency Optimization & Falsification Framework**
+**Scientific Benchmark Suite & Runtime Optimization Schedulers for AI Agent Tool Calling**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-93%20passed-brightgreen.svg)]()
-[![Hypothesis Status](https://img.shields.io/badge/hypothesis-confirmed-success.svg)]()
 
-ToolSpeeder implements, evaluates, and empirically tests mechanisms for shortening or eliminating the serial critical path between model reasoning and tool execution in autonomous AI agents.
+ToolSpeed evaluates and optimizes the serial critical path latency (Correct Completion Latency, CCL) between model reasoning and tool execution in autonomous AI agent systems.
 
 ---
 
-## 🎯 Key Optimization Mechanisms (E1 – E5)
+## 📋 Current Status & Integrity State
 
-1. **E1 — Dynamic DAG Parallelism Scheduler**: Analyzes tool argument bindings and dynamic data dependencies (`$node.field`), scheduling ready calls in concurrent waves with token-bucket rate limiting and concurrency backpressure.
-2. **E2 — Programmatic / JIT Workflow Fusion**: Compiles repetitive multi-step agent reasoning chains into deterministic local kernels, bypassing model round-trips while preserving runtime deoptimization fallback when invariants fail.
-3. **E3 — Confidence-Gated Speculative Reads**: Uses fast auxiliary draft predictors to launch read-only queries while the primary reasoning model generates thoughts. Features active task cancellation, single-slot contention handling, and calibrated confidence thresholds.
-4. **E4 — Commit-Horizon Streaming Early Dispatch**: Intercepts streaming model tokens and dispatches tools immediately upon locking the tool name and immutable required arguments, cutting decode wait times before full JSON completion.
-5. **E5 — Action Bytecode Engine**: Replaces verbose JSON syntax with compact typed binary action tokens, accelerating tool token decode generation by up to $6\times$.
-6. **Phase 2 Caching & Prewarming**: Semantic/exact tool result caching with explicit freshness TTL contracts and predictive container/sandbox prewarming.
-7. **Unified Composite Scheduler**: Integrates all mechanisms into an adaptive agent runtime.
+```text
+40-PHASE MANDATE COMPLETE — DEFENSIBLE EVIDENCE PRODUCED & INDEPENDENT AUDITS COMPILED
+
+1. Legacy claims (v1.0/v1.1) remain formally RETRACTED due to synthetic simulation reliance.
+2. The integrity architecture is fully implemented: AST static barriers, capability grants,
+   two-phase rate limiting, scoped idempotency, and self-contained bundles with detached seals.
+3. Canonical Confirmatory Evidence (artifacts/confirmatory/) passed under frozen protocol v1.3.
+4. Canonical Local Evidence (artifacts/local/) established real speedup on W1 (3.83x) and W5 (1.22x),
+   while strictly failing closed (verdict FALSIFIED) on unconfigured host sockets.
+5. 9 Independent Gemini Flash Reviews were executed and compiled (docs/reviews/9_independent_flash_reviews.md).
+6. Zero-dependency replication package is provided via ./scripts/reproduce_benchmarks.sh.
+7. PR #1 remains in DRAFT, UNMERGED, with auto-merge disabled.
+```
+
+### Claim Audit & Retraction Table
+
+| Claim | Prior Location | Verified State | Corrected Wording | Evidence |
+| :--- | :--- | :--- | :--- | :--- |
+| "INTEGRITY REPAIR COMPLETED — CONFIRMATORY FALSIFICATION REPORTED" | PR #1 Body, Status | **RETRACTED** | `INTEGRITY REPAIR INCOMPLETE` | CI was red at `be36503`; E2 oracle leak; controls hard-coded; protocol unverified. |
+| "100% quality gates passing" | PR #1 Body | **RETRACTED** | CI failed across all Python versions at `be36503`. Restored locally at `5cfef2e`. | GitHub Actions run `33682319407`. |
+| "Confirmatory empirical benchmark (3 seeds)" | PR #1 Body, Status | **RETRACTED** | Noncanonical exploratory diagnostics. | Harness did not loop seeds; CLI synthesized artificial seed arrays. |
+| "Recomputed directly from raw traces" | PR #1 Body, `cli.py` | **RETRACTED** | Evaluated from stored summaries with weak fallbacks. | `cli.py:316-368` uses fallback latencies, default success, tests only 1.0x. |
+| "Cryptographically sealed canonical evidence" | PR #1 Body, `report.py` | **RETRACTED** | Unsealed/inconsistent manifests; excluded by `.gitignore`. | `raw_trace_hash` covers candidate only; `result_hash` missing from embedded manifest. |
+| "All findings A–O resolved" | PR #1 Body | **RETRACTED** | Partially patched via test-facing facades. | Methods like `create_w2_state` and `PersistentColdPool.acquire_time_ms` were stubs. |
+| "True execution controls" | PR #1 Body, `harness.py` | **RETRACTED** | Hard-coded literal return values. | `run_negative_controls()` returned literal 1.0 and 2.0 dictionaries without running arms. |
+| "W7 safety verified" | PR #1 Body | **RETRACTED** | Unverified mock tool responses without durable ledger. | Tools returned static dicts; no account balance or state transition ledger existed. |
+| "E5a codec falsified" | PR #1 Body | **RETRACTED** | Unmeasured; scheduler compared against scheduler. | `codec_bench.py` was a 21-line stub; no codec vs JSON round-trip measured. |
 
 ---
 
-## 📊 Workload Evaluation Matrix (W1 – W7)
+## 🔬 Evidence Taxonomy & Scientific Hierarchy
 
-Evaluated across 7 canonical workload families:
+ToolSpeed strictly classifies experimental data and claims under four discrete evidence levels:
 
-| ID | Workload Family | Baseline $P_{95}$ | ToolSpeeder $P_{95}$ | Speedup | CCL Reduction |
-|:---|:---|:---:|:---:|:---:|:---:|
-| **W1** | Independent Fan-Out Reads | 4,742 ms | 2,649 ms | **1.79x** | **44.1%** |
-| **W2** | Deterministic Dependent Chains | 6,411 ms | 4,800 ms | **1.34x** | **25.1%** |
-| **W3** | Branching / Dynamic Workflows | 2,276 ms | 1,876 ms | **1.21x** | **17.6%** |
-| **W4** | Repeated High-Locality Plans | 5,478 ms | 3,364 ms | **1.63x** | **38.6%** |
-| **W5** | Large Arguments & Heavy Results | 2,874 ms | 2,050 ms | **1.40x** | **28.7%** |
-| **W6** | Sandbox / Container Cold Starts | 3,753 ms | 2,295 ms | **1.64x** | **38.9%** |
-| **W7** | Side-Effects with Approvals | 2,272 ms | 1,903 ms | **1.19x** | **16.3%** |
-
-*All results measured via Correct Completion Latency (CCL), strictly excluding failed tasks from latency percentiles.*
+1. **`SYNTHETIC`**: Mathematical simulation models evaluating theoretical limits and hypothesis boundaries. Real-world claims are marked **`INCONCLUSIVE`**.
+2. **`REPLAY_INTEGRATION`**: Real scheduler code executing deterministic virtual-delay adapters on canonical workload traces (W1–W7, E5a).
+3. **`LOCAL_WALL_CLOCK`**: Real scheduler code executing local controlled tools (SQLite databases, mock HTTP servers, local file I/O, and local subprocess primitives).
+4. **`LIVE_PRODUCTION`**: Real schedulers connected to live cloud LLM APIs and third-party remote endpoints (scoped as future work).
 
 ---
 
-## 🚀 Quick Start
+## 🎯 Optimization Schedulers (E1 – E5)
 
-### Installation
+1. **E1 — Dynamic DAG Scheduler (`DAGScheduler`)**: Dependency discovery and cycle detection; executes ready tool waves concurrently with dependency data binding.
+2. **E2 — Declarative JIT Fusion (`JITFusionScheduler`)**: Declarative AST (`DeclarativeWorkflow`, `WorkflowNode`, `WorkflowInvariant`) executed locally with side-effect tracking and fallback deoptimization.
+3. **E3 — Speculative Reads (`SpeculativeReadScheduler`)**: Concurrent draft prediction during model reasoning, multi-call matching across decision steps, and cancellation-safe task lifecycles.
+4. **E4 — Commit-Horizon Streaming (`CommitHorizonScheduler`)**: Incremental streaming parser (`IncrementalCommitParser`) early-dispatching read-only tools upon argument closure.
+5. **E5a — Action Bytecode Codec (`ActionBytecodeScheduler`)**: Binary transport codec (`ActionBytecodeCodec`) for efficient tool payload serialization.
+6. **Phase 2 Caching (`CacheScheduler`)**: TTL-aware exact and normalized parameter caching with domain-level invalidation upon mutative actions.
+7. **Composite Pipeline (`CompositeScheduler`)**: Unified execution coordinating DAG scheduling, caching, speculation, and streaming commit horizons.
 
-ToolSpeeder runs with zero mandatory external dependencies (built on Python Standard Library + NumPy):
+---
 
+## 🚀 CLI Commands & Workflows
+
+### 1. Run Benchmark Suite
+Executes schedulers on backends (`replay` or `local`), produces bundles with provenance manifests, and computes paired bootstrap confidence intervals.
 ```bash
-git clone https://github.com/RT123-new/ToolSpeeder.git
-cd ToolSpeeder
+# Trace Replay Backend (>= 1,000 trials per seed required for verdict eligibility)
+toolspeed benchmark --protocol benchmark-plans/tool-speed-v1.1.json --backend replay --mode smoke --out artifacts/replay
+
+# Local Wall-Clock Backend (>= 200 trials per seed required for verdict eligibility)
+toolspeed benchmark --protocol benchmark-plans/tool-speed-v1.1.json --backend local --mode smoke --out artifacts/local
 ```
 
-### Running Benchmarks & CLI
-
+### 2. Validate Benchmark Bundle
+Verifies structural schema, code git SHA, SHA-256 integrity hashes, trial counts, and paired evaluations:
 ```bash
-# Run comprehensive benchmark suite across all workloads W1-W7 (50,000 trials)
-python3 -m toolspeed.cli benchmark --trials 50000 --out results
+toolspeed validate-bundle --input artifacts/replay
+```
 
-# Run scientific hypothesis falsification evaluator
-python3 -m toolspeed.cli falsify
+### 3. Evaluate Hypothesis Falsification
+Evaluates an existing benchmark bundle against statistical falsification criteria:
+```bash
+# Returns exit code 0 (passed), 1 (falsified), or 2 (inconclusive)
+toolspeed falsify --input artifacts/replay
+```
 
-# Run a specific experiment (e1, e2, e3, e4, or e5)
-python3 -m toolspeed.cli run --experiment e1 --trials 10000
+### 4. Generate Reports from Bundles
+Renders Markdown and interactive HTML dashboards directly from existing bundles without rerunning simulations:
+```bash
+toolspeed report --input artifacts/replay --out artifacts/replay-render
+```
 
-# Generate Evidence Log, SVGs, and interactive HTML dashboard
-python3 -m toolspeed.cli report --out results
+### 5. Run Synthetic Analytical Simulation
+```bash
+toolspeed simulate --experiment all --trials 1000 --out artifacts/synthetic
+```
 
-# Run the full unit & adversarial test suite
-python3 -m unittest discover -s tests -v
+### 6. Run Test Suite
+```bash
+uv run coverage erase && uv run coverage run -m pytest -q
 ```
 
 ---
 
-## 🛡️ Guardrails & Adversarial Hardening
+## 🛡️ Runtime Safety & Operational Boundaries
 
-ToolSpeeder tracks and enforces:
-- **Strict Metric Integrity**: Latency percentiles never incorporate failed or invalid task completions.
-- **Async Concurrency Safety**: Zero dangling tasks or leaked coroutines upon speculative cancellation.
-- **Cyclic Deadlock Defense**: Detects circular dependency graphs and fails fast.
-- **Deoptimization Resilience**: Fused kernels catching runtime exceptions automatically deoptimize back to interactive reasoning.
-- **Side-Effect Protection**: Strict approval gates and idempotency key caching for mutative tools.
-- **Rate-Limiter Backpressure**: Token-bucket 429 simulation and peak concurrency tracking.
-
----
-
-## 📁 Repository Structure
-
-```
-toolspeed/
-├── core/             # Nanosecond profiler, guardrails, rate limiters, types
-├── adapters/         # Simulated & live async tools (SQLite, Subprocess, HTTP, Files)
-├── workloads/        # W1-W7 canonical benchmark workload generators
-├── schedulers/       # B1-B5 baselines, E1-E5 mechanisms, Cache, and Composite
-├── experiments/      # Statistical runners, hypothesis falsification checkers
-└── visualization/    # Standalone SVG vector charts, HTML dashboard, Markdown logs
-
-tests/
-├── test_core.py          # Core types and profiler tests
-├── test_adapters.py      # Mock and live adapters tests
-├── test_workloads.py     # Workload correctness and validation tests
-├── test_schedulers.py    # Baseline & experimental scheduler tests
-├── test_experiments.py   # Statistical runner & CLI tests
-└── test_adversarial.py   # 15 red-team adversarial attack tests
-```
-
----
-
-## 📄 License
-
-This project is licensed under the [MIT License](LICENSE).
+- **Execution Routing**: Schedulers route tool calls through `ToolExecutor`.
+- **Approval Gating**: Mutative tools require explicit approval. Schedulers cannot self-authorize.
+- **Shared Idempotency Store**: Deduplicates execution of side-effecting operations across task lifecycles.
+- **Controlled Local Execution**: Local subprocess and file operations execute in temporary workspaces with timeout limits (controlled benchmark tools, not hardened multi-tenant sandboxes).
+- **Cancellation Safety**: Cancelled child tasks are caught and handled cleanly across Python 3.10–3.13.

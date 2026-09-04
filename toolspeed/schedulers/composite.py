@@ -2,23 +2,26 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set, Tuple
 import asyncio
 import copy
+import json
 import time
+from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, StreamingChunk, ToolRegistry
-from toolspeed.core.types import EventType, ToolCall, ToolResult, ToolSpec
-from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig
-from toolspeed.schedulers.e1_dag_scheduler import DAGNode, ToolDAG
-from toolspeed.schedulers.e2_jit_fusion import FusedKernel, JITFusionScheduler
+from toolspeed.core.types import EventType, ToolCall, ToolResult
+from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig, cancel_and_await
+from toolspeed.schedulers.e1_dag_scheduler import DAGNode, DAGScheduler, ToolDAG
+from toolspeed.schedulers.e2_jit_fusion import JITFusionScheduler
+from toolspeed.schedulers.e3_speculation import SpeculativeScheduler
+from toolspeed.schedulers.e4_commit_horizon import CommitHorizonScheduler, IncrementalCommitParser
 from toolspeed.schedulers.e5_action_bytecode import ActionBytecodeCodec
 from toolspeed.schedulers.phase2_cache import ToolResultCache
 
 
 class CompositeScheduler(BaseScheduler):
-    """Unified Composite Optimizer combining all latency reduction mechanisms:
-    
+    """Unified Composite Optimizer combining all verified latency reduction mechanisms:
+
     1. Predictive Prewarming for cold-start tools / sandboxes
     2. Exact & Semantic Result Caching with Freshness Contracts
     3. JIT Workflow Fusion for recognized sub-plans with Deopt Fallback
@@ -30,8 +33,8 @@ class CompositeScheduler(BaseScheduler):
 
     def __init__(
         self,
-        config: Optional[SchedulerConfig] = None,
-        shared_cache: Optional[ToolResultCache] = None,
+        config: SchedulerConfig | None = None,
+        shared_cache: ToolResultCache | None = None,
     ) -> None:
         cfg = config or SchedulerConfig(
             cache_enabled=True,
@@ -41,78 +44,67 @@ class CompositeScheduler(BaseScheduler):
             commit_horizon_enabled=True,
             jit_fusion_enabled=True,
             action_bytecode_enabled=True,
+            prewarmed=True,
         )
         super().__init__(cfg)
         self.cache = shared_cache or ToolResultCache(default_ttl_seconds=cfg.cache_ttl_seconds)
+        self.e1_dag_scheduler = DAGScheduler(cfg)
         self.jit_scheduler = JITFusionScheduler(cfg)
+        self.e2_fusion_scheduler = self.jit_scheduler
+        self.e3_spec_scheduler = SpeculativeScheduler(cfg)
+        self.e4_commit_scheduler = CommitHorizonScheduler(cfg)
         self.bytecode_codec = ActionBytecodeCodec()
+
+        # Measured overhead of composite dispatch itself
+        self.last_dispatch_overhead_ns: int = 0
+        self.total_dispatch_overhead_ns: int = 0
+        self.dispatch_count: int = 0
+
+    def delegate_fanout(self) -> DAGScheduler:
+        """Returns real E1 delegate for independent fanout."""
+        return self.e1_dag_scheduler
+
+    def delegate_pipeline_sequence(self) -> JITFusionScheduler:
+        """Returns real E2 delegate for recognized pipeline sequences."""
+        return self.e2_fusion_scheduler
+
+    def delegate_speculative(self) -> SpeculativeScheduler:
+        """Returns real E3 delegate for speculative first-branch."""
+        return self.e3_spec_scheduler
+
+    def delegate_streaming(self) -> CommitHorizonScheduler:
+        """Returns real E4 delegate for streaming early actions."""
+        return self.e4_commit_scheduler
+
+    def delegate_cache(self) -> ToolResultCache:
+        """Returns real Cache delegate for repeat queries with zero mutations."""
+        return self.cache
+
+    def get_dispatch_overhead(self) -> dict[str, Any]:
+        """Returns measured composite dispatch overhead statistics."""
+        return {
+            "last_overhead_ns": self.last_dispatch_overhead_ns,
+            "total_overhead_ns": self.total_dispatch_overhead_ns,
+            "dispatch_count": self.dispatch_count,
+            "mean_overhead_ns": (self.total_dispatch_overhead_ns / max(1, self.dispatch_count)),
+        }
+
+    def has_cache_lookup_in_dispatch_path(self) -> bool:
+        """Returns whether read tool calls visibly route through cache lookup."""
+        return self.config.cache_enabled
 
     def prewarm_tools(self, tools: ToolRegistry) -> None:
         """Prewarms all cold-start sandbox adapters."""
+        if not self.config.prewarmed:
+            return
         for spec in tools.list_specs():
             adapter = tools.get(spec.name)
             if adapter and hasattr(adapter, "prewarm"):
                 adapter.prewarm()
 
-    async def _execute_single_tool(
-        self,
-        ctx: ExecutionContext,
-        call: ToolCall,
-        tools: ToolRegistry,
-        is_speculative: bool = False,
-    ) -> ToolResult:
-        adapter = tools.get(call.name)
-        if not adapter:
-            return ToolResult(call_id=call.call_id, name=call.name, error=f"Tool {call.name} not found")
-
-        # Invalidation on mutation / side effects
-        if adapter.spec.side_effects or not adapter.spec.is_read_only:
-            self.cache.invalidate_tool(call.name)
-
-        # Cache lookup for read-only tools
-        if self.config.cache_enabled and adapter.spec.is_read_only and not is_speculative:
-            cached_out, hit, is_fresh = self.cache.get(call.name, call.arguments)
-            if hit:
-                ctx.profiler.record_event(
-                    EventType.CACHE_HIT if is_fresh else EventType.CACHE_FRESHNESS_VIOLATION,
-                    details={"tool": call.name, "is_fresh": is_fresh},
-                )
-                ctx.guardrails.record_cache_event(hit=True, is_fresh=is_fresh)
-                return ToolResult(
-                    call_id=call.call_id,
-                    name=call.name,
-                    output=cached_out,
-                    cached=True,
-                    execution_time_ms=1.0,
-                )
-            else:
-                ctx.guardrails.record_cache_event(hit=False)
-
-        # Dispatch tool
-        ctx.guardrails.record_tool_dispatch(adapter.spec, call, is_speculative=is_speculative)
-        span_name = f"{'spec_' if is_speculative else ''}tool_{call.call_id}"
-        ctx.profiler.start_span(span_name)
-        ctx.guardrails.record_concurrency_enter()
-
-        try:
-            await ctx.rate_limiter.acquire()
-            try:
-                res = await adapter.execute(call)
-            finally:
-                ctx.rate_limiter.release()
-                ctx.guardrails.record_concurrency_exit()
-        except asyncio.CancelledError:
-            ctx.profiler.record_event(EventType.TOOL_CANCELLED, details={"call_id": call.call_id})
-            return ToolResult(call_id=call.call_id, name=call.name, cancelled=True, error="Cancelled", is_error=True)
-        except Exception as e:
-            res = ToolResult(call_id=call.call_id, name=call.name, error=str(e), is_error=True)
-
-        ctx.profiler.end_span(span_name, EventType.TOOL_END)
-
-        if self.config.cache_enabled and res.is_success and adapter.spec.is_read_only:
-            self.cache.put(call.name, call.arguments, res.output, self.config.cache_ttl_seconds)
-
-        return res
+    @staticmethod
+    def _canonical_key(tool_name: str, arguments: dict[str, Any]) -> str:
+        return f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
 
     async def _execute_internal(
         self,
@@ -125,95 +117,114 @@ class CompositeScheduler(BaseScheduler):
 
         # 2. Register tools with Bytecode Codec
         for spec in tools.list_specs():
-            self.bytecode_codec.register_tool(spec.name, spec.required_args or list(spec.parameters.get("properties", {}).keys()))
+            self.bytecode_codec.register_tool(
+                spec.name,
+                spec.required_args or list(spec.parameters.get("properties", {}).keys()),
+            )
 
         # 3. JIT Fusion Check
         if self.config.jit_fusion_enabled:
-            for kernel in self.jit_scheduler._compiled_kernels.values():
-                if kernel.match_fn(ctx):
-                    ctx.profiler.record_event(EventType.JIT_FUSION_START, details={"kernel": kernel.name})
-                    try:
-                        res, is_ok = await kernel.execute_fn(ctx, tools)
-                    except Exception:
-                        res, is_ok = None, False
+            t_jit_0 = time.perf_counter_ns()
+            wf = self.jit_scheduler._match_workflow(ctx)
+            jit_overhead = time.perf_counter_ns() - t_jit_0
+            self.last_dispatch_overhead_ns = jit_overhead
+            self.total_dispatch_overhead_ns += jit_overhead
+            self.dispatch_count += 1
+            if wf is not None:
+                ctx.profiler.record_event(
+                    EventType.JIT_FUSION_START,
+                    details={"workflow": wf.workflow_id, "dispatch_overhead_ns": jit_overhead},
+                )
+                res = await self.jit_scheduler._execute_internal(ctx, model, tools)
+                if res is not None:
+                    return res
 
-                    if is_ok:
-                        if ctx.task.validator is not None or ctx.task.expected_output is not None:
-                            if ctx.task.validate(res):
-                                ctx.profiler.record_event(EventType.JIT_FUSION_SUCCESS, details={"kernel": kernel.name})
-                                return res
-                            else:
-                                is_ok = False
-                        else:
-                            ctx.profiler.record_event(EventType.JIT_FUSION_SUCCESS, details={"kernel": kernel.name})
-                            return res
-
-                    # Deoptimization
-                    ctx.profiler.record_event(EventType.JIT_FUSION_DEOPT, details={"kernel": kernel.name})
-                    ctx.guardrails.record_deopt()
-                    break
-
-        spec_task: Optional[asyncio.Task[ToolResult]] = None
-        in_flight_commit: Dict[str, Tuple[asyncio.Task[ToolResult], ToolCall, Dict[str, Any]]] = {}
-        active_dag_tasks: Set[asyncio.Task] = set()
+        spec_task: asyncio.Task[ToolResult] | None = None
+        draft_task: asyncio.Task[ToolCall | None] | None = None
+        in_flight_commit: dict[str, tuple[asyncio.Task[ToolResult], ToolCall, dict[str, Any]]] = {}
+        active_dag_tasks: dict[asyncio.Task[ToolResult], DAGNode] = {}
 
         try:
-            # Main Reactive Loop combining Speculation + Commit Horizon + Action Bytecode + DAG Execution
             for turn in range(ctx.config.max_turns):
                 ctx.step_count = turn + 1
 
-                # Speculative Prediction
-                spec_call: Optional[ToolCall] = None
+                # 4. Speculative Prediction concurrently with Streaming Generation
+                spec_call: ToolCall | None = None
                 if self.config.speculation_enabled:
-                    try:
-                        predicted = await model.predict_draft(ctx.task, ctx.history, tools.list_specs())
-                        if predicted and predicted.speculation_confidence >= self.config.speculation_confidence_threshold:
-                            t_adapter = tools.get(predicted.name)
-                            if t_adapter and t_adapter.spec.is_read_only and not t_adapter.spec.side_effects:
-                                spec_call = predicted
-                                spec_call.is_speculative = True
-                                ctx.profiler.record_event(EventType.SPECULATION_START, details={"tool": predicted.name})
-                                spec_task = asyncio.create_task(
-                                    self._execute_single_tool(ctx, predicted, tools, is_speculative=True)
-                                )
-                    except Exception:
-                        spec_task = None
+                    draft_task = asyncio.create_task(
+                        model.predict_draft(ctx.agent_task, ctx.history, tools.list_specs())
+                    )
 
-                # Streaming Generation with Commit Horizon & Action Bytecode
                 ctx.profiler.start_span(f"composite_turn_{turn}")
-                in_flight_commit.clear()
-                collected_chunks: List[StreamingChunk] = []
-                final_calls: List[ToolCall] = []
-                reasoning_parts: List[str] = []
+                collected_chunks: list[StreamingChunk] = []
+                final_calls: list[ToolCall] = []
+                reasoning_parts: list[str] = []
 
-                async for chunk in model.stream_decision(ctx.task, ctx.history, tools.list_specs()):
+                async for chunk in model.stream_decision(ctx.agent_task, ctx.history, tools.list_specs()):
                     collected_chunks.append(chunk)
                     if chunk.delta_text:
                         reasoning_parts.append(chunk.delta_text)
 
+                    # Check if draft prediction is ready
+                    if draft_task and draft_task.done() and not draft_task.cancelled() and spec_task is None:
+                        try:
+                            predicted = draft_task.result()
+                            if (
+                                predicted is not None
+                                and predicted.speculation_confidence >= self.config.speculation_confidence_threshold
+                            ):
+                                spec_adapter = tools.get(predicted.name or predicted.tool_name)
+                                if (
+                                    spec_adapter
+                                    and spec_adapter.spec.is_read_only
+                                    and not spec_adapter.spec.side_effects
+                                    and not spec_adapter.spec.requires_approval
+                                    and spec_adapter.spec.is_idempotent
+                                ):
+                                    spec_call = predicted
+                                    spec_call.is_speculative = True
+                                    ctx.profiler.record_event(
+                                        EventType.SPECULATION_START, details={"tool": predicted.name}
+                                    )
+                                    spec_task = asyncio.create_task(
+                                        ctx.executor.execute(predicted, is_speculative=True)
+                                    )
+                        except Exception:
+                            spec_task = None
+                            spec_call = None
+
+                    # Early commit horizon dispatch
                     if self.config.commit_horizon_enabled:
                         for early_call in chunk.commit_horizon_ready:
-                            if early_call.call_id not in in_flight_commit:
-                                # If early call matches speculative call, attach speculative task
-                                if spec_call and spec_call.name == early_call.name and spec_call.arguments == early_call.arguments and spec_task:
-                                    in_flight_commit[early_call.call_id] = (spec_task, early_call, copy.deepcopy(early_call.arguments))
-                                else:
-                                    early_call.committed_early = True
-                                    snapshot = copy.deepcopy(early_call.arguments)
-                                    ctx.profiler.record_event(EventType.COMMIT_HORIZON_REACHED, details={"tool": early_call.name})
-                                    t = asyncio.create_task(self._execute_single_tool(ctx, early_call, tools))
-                                    in_flight_commit[early_call.call_id] = (t, early_call, snapshot)
+                            cid = early_call.call_id
+                            if cid not in in_flight_commit:
+                                adapter = tools.get(early_call.name or early_call.tool_name)
+                                if adapter:
+                                    committed = IncrementalCommitParser.try_commit_call(
+                                        adapter.spec,
+                                        early_call,
+                                        chunk.raw_json_fragment,
+                                    )
+                                    if committed is not None:
+                                        early_call.committed_early = True
+                                        snapshot = copy.deepcopy(early_call.arguments)
+                                        ctx.profiler.record_event(
+                                            EventType.COMMIT_HORIZON_REACHED,
+                                            details={
+                                                "tool": early_call.name,
+                                                "fingerprint": committed.semantic_fingerprint,
+                                            },
+                                        )
+                                        t = asyncio.create_task(ctx.executor.execute(early_call))
+                                        in_flight_commit[cid] = (t, early_call, snapshot)
 
                     if chunk.is_final and chunk.parsed_tool_calls:
-                        for pc in chunk.parsed_tool_calls:
-                            for ec_id, (_, ec, _) in in_flight_commit.items():
-                                if pc.name == ec.name and pc.arguments == ec.arguments:
-                                    pc.call_id = ec.call_id
-                                    pc.committed_early = True
-                                    break
                         final_calls = chunk.parsed_tool_calls
 
                 ctx.profiler.end_span(f"composite_turn_{turn}", EventType.MODEL_END)
+
+                if draft_task and not draft_task.done():
+                    await cancel_and_await(draft_task)
 
                 last_meta = collected_chunks[-1].metadata if collected_chunks else {}
                 final_ans = last_meta.get("final_answer")
@@ -222,113 +233,252 @@ class CompositeScheduler(BaseScheduler):
 
                 decision = LLMDecision(
                     reasoning="".join(reasoning_parts),
-                    tool_calls=final_calls or [c for _, c, _ in in_flight_commit.values()],
-                    final_answer=final_ans if not (final_calls or in_flight_commit) else None,
+                    tool_calls=final_calls,
+                    final_answer=final_ans if not final_calls else None,
                     output_tokens=len(collected_chunks),
                 )
                 ctx.record_model_decision(decision)
 
-                if decision.is_final:
+                if decision.is_final and (decision.final_answer is not None or not decision.tool_calls):
                     if spec_task and not spec_task.done():
-                        spec_task.cancel()
+                        await cancel_and_await(spec_task)
                         ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
+                    for t, _, _ in in_flight_commit.values():
+                        await cancel_and_await(t)
+                    in_flight_commit.clear()
                     return decision.final_answer or "Composite execution complete."
 
                 # Action Bytecode tracking
                 if self.config.action_bytecode_enabled:
                     for c in decision.tool_calls:
-                        encoded = self.bytecode_codec.encode(c)
-                        ctx.profiler.record_event(EventType.BYTECODE_ENCODE, details={"bytes": len(encoded)})
+                        try:
+                            encoded = self.bytecode_codec.encode(c)
+                            ctx.profiler.record_event(EventType.BYTECODE_ENCODE, details={"bytes": len(encoded)})
+                        except Exception:
+                            pass
 
                 # Resolve Speculation
+                matching_spec_idx = -1
+                if spec_call and spec_task:
+                    for idx, c in enumerate(decision.tool_calls):
+                        if (c.name or c.tool_name) == (
+                            spec_call.name or spec_call.tool_name
+                        ) and c.arguments == spec_call.arguments:
+                            matching_spec_idx = idx
+                            break
+
                 spec_hit = False
-                for c in decision.tool_calls:
-                    if spec_call and spec_call.name == c.name and spec_call.arguments == c.arguments:
-                        spec_hit = True
-                        break
-                if spec_task and not spec_hit:
+                spec_hit_res: ToolResult | None = None
+                if matching_spec_idx >= 0 and spec_task is not None:
+                    try:
+                        if spec_task.done():
+                            spec_hit_res = spec_task.result()
+                        else:
+                            spec_hit_res = await spec_task
+                        if spec_hit_res.is_success:
+                            spec_hit = True
+                            ctx.guardrails.record_speculation_resolved(hit=True)
+                    except Exception:
+                        spec_hit = False
+                    finally:
+                        spec_task = None
+                elif spec_task is not None:
                     if not spec_task.done():
-                        spec_task.cancel()
+                        await cancel_and_await(spec_task)
                         ctx.guardrails.record_speculation_resolved(hit=False, cancelled=True)
                     else:
                         ctx.guardrails.record_speculation_resolved(hit=False, cancelled=False)
-                elif spec_hit:
-                    ctx.guardrails.record_speculation_resolved(hit=True)
+                    spec_task = None
 
-                # Check for argument mutations on commit-horizon early dispatches
+                # Build DAG for turn execution with single dispatch ownership
                 dag = ToolDAG()
-                active_dag_tasks.clear()
-                dispatched_task_map: Dict[asyncio.Task, DAGNode] = {}
+                dag.register_calls(decision.tool_calls)
 
-                for c in decision.tool_calls:
+                # Detect cycles
+                cycle = dag.detect_cycles()
+                if cycle:
+                    ctx.profiler.record_event(
+                        EventType.GUARDRAIL_VIOLATION,
+                        details={"error": f"Cycle detected in composite scheduler: {cycle}"},
+                    )
+                    for n_id in cycle:
+                        if n_id in dag.nodes:
+                            dag.nodes[n_id].status = "failed"
+                            res_err = ToolResult(
+                                call_id=n_id,
+                                name=dag.nodes[n_id].call.name,
+                                tool_name=dag.nodes[n_id].call.name,
+                                error=f"Cycle: {' -> '.join(cycle)}",
+                                is_error=True,
+                            )
+                            dag.nodes[n_id].result = res_err
+                            ctx.record_tool_result(res_err)
+
+                # Attach in-flight commit horizon tasks or speculative hit
+                active_dag_tasks.clear()
+                for idx, c in enumerate(decision.tool_calls):
                     ctx.tool_calls.append(c)
-                    node = dag.add_call(c)
+                    node = dag.nodes.get(c.call_id)
+                    if not node or node.status == "failed":
+                        continue
+
+                    # Speculative hit reuse
+                    if idx == matching_spec_idx and spec_hit and spec_hit_res is not None:
+                        node.status = "completed"
+                        spec_hit_res.call_id = c.call_id
+                        node.result = spec_hit_res
+                        ctx.record_tool_result(spec_hit_res)
+                        continue
+
+                    # Early commit horizon matching
                     if c.call_id in in_flight_commit:
-                        task, dispatched_call, snapshot = in_flight_commit[c.call_id]
-                        if c.arguments != snapshot:
-                            if not task.done():
-                                task.cancel()
+                        task, early_call, snapshot = in_flight_commit.pop(c.call_id)
+                        if c.arguments != snapshot or (c.name or c.tool_name) != (
+                            early_call.name or early_call.tool_name
+                        ):
+                            await cancel_and_await(task)
                             ctx.profiler.record_event(
                                 EventType.GUARDRAIL_VIOLATION,
                                 details={"error": "Semantic mutation after commit horizon", "tool": c.name},
                             )
-                            # Node remains pending in DAG to re-execute with correct arguments
                         else:
                             node.status = "running"
-                            active_dag_tasks.add(task)
-                            dispatched_task_map[task] = node
 
-                # Wait for ready DAG nodes
+                            async def _wrap_early(t: asyncio.Task[ToolResult] = task, n: DAGNode = node) -> ToolResult:
+                                try:
+                                    res = await t
+                                except Exception:
+                                    res = await ctx.executor.execute(n.call)
+                                n.result = res
+                                n.status = "completed" if res.is_success else "failed"
+                                ctx.record_tool_result(res)
+                                return res
+
+                            active_dag_tasks[asyncio.create_task(_wrap_early())] = node
+
+                for t, _, _ in in_flight_commit.values():
+                    await cancel_and_await(t)
+                in_flight_commit.clear()
+
+                # Dynamic DAG execution
                 while not dag.is_complete():
                     ready_nodes = dag.get_ready_nodes()
+
+                    for node in dag.nodes.values():
+                        if node.status == "failed" and node.result is None:
+                            res_f = ToolResult(
+                                call_id=node.node_id,
+                                name=node.call.name,
+                                error=node.error or "Parent failed",
+                                is_error=True,
+                            )
+                            node.result = res_f
+                            ctx.record_tool_result(res_f)
+
                     for node in ready_nodes:
-                        resolved = dag.resolve_arguments(node)
-                        node.call.arguments = resolved
+                        resolved, err = dag.resolve_node_arguments(node)
+                        if err:
+                            res = ToolResult(
+                                call_id=node.call.call_id,
+                                name=node.call.name,
+                                error=err,
+                                is_error=True,
+                            )
+                            node.result = res
+                            node.status = "failed"
+                            ctx.record_tool_result(res)
+                            continue
+
+                        node.call.arguments = resolved or {}
                         node.status = "running"
-                        t = asyncio.create_task(self._execute_single_tool(ctx, node.call, tools))
-                        active_dag_tasks.add(t)
-                        dispatched_task_map[t] = node
+
+                        async def _exec_node(n: DAGNode = node) -> ToolResult:
+                            call_name = n.call.name or n.call.tool_name
+                            adapter = tools.get(call_name)
+                            is_read = (
+                                bool(adapter.spec.is_read_only and not adapter.spec.side_effects) if adapter else False
+                            )
+
+                            if is_read and self.config.cache_enabled:
+                                t_c_0 = time.perf_counter_ns()
+                                cached_val, hit, _ = self.cache.get(call_name, n.call.arguments)
+                                c_overhead = time.perf_counter_ns() - t_c_0
+                                self.last_dispatch_overhead_ns = c_overhead
+                                self.total_dispatch_overhead_ns += c_overhead
+                                self.dispatch_count += 1
+                                if hit:
+                                    ctx.profiler.record_event(
+                                        EventType.CACHE_HIT,
+                                        details={"tool": call_name, "dispatch_overhead_ns": c_overhead},
+                                    )
+                                    res = ToolResult(
+                                        call_id=n.call.call_id,
+                                        name=call_name,
+                                        tool_name=call_name,
+                                        output=cached_val,
+                                        result=cached_val,
+                                        is_error=False,
+                                        execution_time_ns=1_000,
+                                    )
+                                    n.result = res
+                                    n.status = "completed"
+                                    ctx.record_tool_result(res)
+                                    return res
+
+                            res = await ctx.executor.execute(n.call)
+                            n.result = res
+                            n.status = "completed" if res.is_success else "failed"
+                            ctx.record_tool_result(res)
+
+                            if res.is_success and self.config.cache_enabled:
+                                if is_read:
+                                    self.cache.put(
+                                        call_name,
+                                        n.call.arguments,
+                                        res.output if res.output is not None else res.result,
+                                    )
+                                else:
+                                    self.cache.invalidate_tool(call_name)
+
+                            return res
+
+                        active_dag_tasks[asyncio.create_task(_exec_node())] = node
 
                     if not active_dag_tasks:
-                        for node in dag.nodes.values():
-                            if node.status == "pending":
-                                node.status = "failed"
+                        for n in dag.nodes.values():
+                            if n.status == "pending":
+                                n.status = "failed"
                         break
 
-                    done, pending = await asyncio.wait(active_dag_tasks, return_when=asyncio.FIRST_COMPLETED)
-                    active_dag_tasks = pending
-                    for finished_task in done:
-                        try:
-                            res = finished_task.result()
-                        except (asyncio.CancelledError, Exception) as ex:
-                            res = ToolResult(call_id="task_err", is_error=True, error=str(ex))
-                        ctx.record_tool_result(res)
-                        node = dispatched_task_map.get(finished_task)
-                        if node:
-                            node.result = res
-                            node.status = "completed" if res.is_success else "failed"
-                        else:
-                            for n in dag.nodes.values():
-                                if n.call.call_id == res.call_id:
-                                    n.result = res
-                                    n.status = "completed" if res.is_success else "failed"
-
-                if active_dag_tasks:
-                    remaining_results = await asyncio.gather(*active_dag_tasks, return_exceptions=True)
-                    for r in remaining_results:
-                        if isinstance(r, ToolResult):
-                            ctx.record_tool_result(r)
+                    done, _pending = await asyncio.wait(
+                        active_dag_tasks.keys(),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for t in done:
+                        node_done = active_dag_tasks.pop(t)
+                        if not t.cancelled():
+                            exc = t.exception()
+                            if exc is not None and node_done.result is None:
+                                res_exc = ToolResult(
+                                    call_id=node_done.node_id,
+                                    name=node_done.call.name,
+                                    error=f"Exception: {exc}",
+                                    is_error=True,
+                                )
+                                node_done.result = res_exc
+                                node_done.status = "failed"
+                                ctx.record_tool_result(res_exc)
 
             return "Max turns reached without final answer."
+
         finally:
-            tasks_to_cancel = list(active_dag_tasks)
             if spec_task and not spec_task.done():
-                tasks_to_cancel.append(spec_task)
+                await cancel_and_await(spec_task)
+            if draft_task and not draft_task.done():
+                await cancel_and_await(draft_task)
             for t, _, _ in in_flight_commit.values():
-                if not t.done():
-                    tasks_to_cancel.append(t)
-            for t in tasks_to_cancel:
-                if not t.done():
-                    t.cancel()
-            if tasks_to_cancel:
-                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+                await cancel_and_await(t)
+            in_flight_commit.clear()
+            for t in list(active_dag_tasks.keys()):
+                await cancel_and_await(t)
+            active_dag_tasks.clear()

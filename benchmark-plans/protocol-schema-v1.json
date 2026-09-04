@@ -1,0 +1,183 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ToolSpeedBenchmarkProtocol",
+  "type": "object",
+  "required": [
+    "plan_id",
+    "plan_version",
+    "status",
+    "workload_fixture_version",
+    "required_metric_policy_version",
+    "evidence_levels",
+    "seeds",
+    "trials_per_seed_replay",
+    "trials_per_seed_local",
+    "smoke_trials",
+    "bootstrap_resamples",
+    "bootstrap_ci",
+    "warmup_policy",
+    "missing_data_policy",
+    "central_hypothesis",
+    "mechanisms",
+    "controls"
+  ],
+  "properties": {
+    "plan_id": {
+      "type": "string"
+    },
+    "plan_version": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "workload_fixture_version": {
+      "type": "string"
+    },
+    "required_metric_policy_version": {
+      "type": "string"
+    },
+    "evidence_levels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "seeds": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      }
+    },
+    "trials_per_seed_replay": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "trials_per_seed_local": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "smoke_trials": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "bootstrap_resamples": {
+      "type": "integer",
+      "minimum": 100
+    },
+    "bootstrap_ci": {
+      "type": "number",
+      "minimum": 0.5,
+      "maximum": 1.0
+    },
+    "warmup_policy": {
+      "type": "object",
+      "required": [
+        "trials",
+        "symmetric",
+        "isolated",
+        "excluded_from_evidence"
+      ],
+      "properties": {
+        "trials": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "symmetric": {
+          "type": "boolean"
+        },
+        "isolated": {
+          "type": "boolean"
+        },
+        "excluded_from_evidence": {
+          "type": "boolean"
+        }
+      }
+    },
+    "missing_data_policy": {
+      "type": "string"
+    },
+    "central_hypothesis": {
+      "type": "object",
+      "required": [
+        "name",
+        "description",
+        "aggregation_rule"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "aggregation_rule": {
+          "type": "string"
+        }
+      }
+    },
+    "amendment_ledger": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "version",
+          "date",
+          "changes"
+        ],
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "mechanisms": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object"
+      }
+    },
+    "controls": {
+      "type": "object",
+      "required": [
+        "negative_controls",
+        "positive_sensitivity_control"
+      ],
+      "properties": {
+        "negative_controls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "description",
+              "expected_p95_speedup_range"
+            ]
+          }
+        },
+        "positive_sensitivity_control": {
+          "type": "object",
+          "required": [
+            "id",
+            "description",
+            "injected_speedup",
+            "expected_p95_speedup_range"
+          ]
+        }
+      }
+    }
+  }
+}

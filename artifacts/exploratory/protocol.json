@@ -1,0 +1,336 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "plan_id": "tool-speed-v1.3-draft",
+  "plan_version": "1.3.0-draft",
+  "status": "prospective_draft",
+  "is_frozen": false,
+  "author": "ToolSpeed Integrity Engineering Group",
+  "date": "2026-09-03",
+  "git_sha_at_authoring": "3b20d83af6fad8055e8c2544ba136952c134b91c",
+  "purpose": "Prospective protocol defining machine-evaluable confirmatory evaluation rules, independent seed matrices, strict execution boundaries, and true paired control arms.",
+  "previous_protocol_reference": "tool-speed-v1.2-draft",
+  "description": "Authoritative prospective benchmark protocol specification v1.3 draft for ToolSpeeder empirical evaluation.",
+  "workload_fixture_version": "1.3.0",
+  "required_metric_policy_version": "3.0.0",
+  "evidence_levels": [
+    "replay_integration",
+    "local_wall_clock"
+  ],
+  "supported_execution_modes": [
+    "smoke",
+    "exploratory",
+    "confirmatory"
+  ],
+  "seeds": {
+    "exploratory": [
+      101,
+      103,
+      107
+    ],
+    "confirmatory": [
+      7001,
+      7013,
+      7019
+    ]
+  },
+  "trials_per_seed": {
+    "replay_integration": 1000,
+    "local_wall_clock": 200
+  },
+  "smoke_trials_per_seed": 10,
+  "timing_sources": {
+    "replay_integration": "virtual_clock",
+    "local_wall_clock": "monotonic_wall_clock"
+  },
+  "warmup_policy": {
+    "trials": 5,
+    "symmetric": true,
+    "isolated": true,
+    "excluded_from_evidence": true
+  },
+  "statistical_rules": {
+    "bootstrap_resamples": 2000,
+    "bootstrap_ci": 0.95,
+    "confidence_bound_rule": "one_sided_lower_bound_exceeds_threshold",
+    "pairing_rule": "stratified_paired_index_bootstrap",
+    "multiplicity_policy": "holm_bonferroni",
+    "paired_difference": true,
+    "p_value_threshold": 0.05,
+    "min_trials_per_seed": {
+      "replay_integration": 1000,
+      "local_wall_clock": 200
+    }
+  },
+  "required_metrics": [
+    "p95_ccl_ms",
+    "p95_speedup",
+    "p99_ccl_ms",
+    "candidate_success_rate",
+    "baseline_success_rate",
+    "relative_success_delta",
+    "cost_multiplier",
+    "memory_high_water_mark_mb",
+    "safety_violations_count"
+  ],
+  "hypothesis_verdict_rules": {
+    "pass_rule": "All primary mechanisms exceed P95 speedup threshold with 95% bootstrap lower bound, zero unapproved side effects, zero duplicate mutations, and candidate success rate non-inferior to baseline.",
+    "falsified_rule": "One or more active mechanisms fail P95 speedup efficacy threshold, regress safety invariants, or show statistically significant success rate drop.",
+    "inconclusive_rule": "Missing required metrics, trial count below minimum, unsealed artifact bundle, or unexecuted control arms."
+  },
+  "missing_data_rule": "strict_fail_closed_inconclusive",
+  "failure_handling": {
+    "unsuccessful_trial_ccl_policy": "conditional_on_both_success",
+    "success_rate_difference_test": "paired_difference_ci_lower_bound_non_inferior"
+  },
+  "cost_rule": "candidate_cost_over_baseline_under_threshold",
+  "safety_rule": "zero_unapproved_zero_duplicate_exact_state_diff",
+  "stop_rule": "deterministic_complete_trial_matrix",
+  "amendment_process": "new_version_with_unbroken_history_and_rationale",
+  "central_hypothesis": {
+    "name": "ToolSpeeder Mechanism Attribution and Latency Efficacy",
+    "description": "Every active candidate mechanism significantly reduces P95 CCL over its pre-registered primary attribution baseline without safety violations, cost divergence, or success rate drops.",
+    "aggregation_rule": "conjunction_all_primary_mechanisms"
+  },
+  "mechanisms": {
+    "W1": {
+      "name": "Dynamic Execution Graph Parallelism (E1)",
+      "mechanism_type": "execution_graph_parallelism",
+      "candidate": "DAGScheduler",
+      "primary_attribution_baseline": "DAGScheduler_serial_ablation",
+      "practical_baseline": "NativeParallelScheduler",
+      "reference_paper": "W1 Independent DAG Parallelism",
+      "description": "Evaluates DAG scheduling parallelism over serial DAG execution.",
+      "thresholds": {
+        "min_p95_speedup_efficacy": 1.25,
+        "min_candidate_success_rate": 0.99,
+        "max_allowable_success_drop": 0.0,
+        "min_p99_speedup_non_regression": 0.95,
+        "max_cost_multiplier": 1.05,
+        "max_unapproved_side_effects": 0,
+        "max_duplicate_commits": 0
+      }
+    },
+    "W2": {
+      "name": "Programmatic Tool / JIT Fusion (E2)",
+      "mechanism_type": "fused_serial_pipeline",
+      "candidate": "JITFusionScheduler",
+      "primary_attribution_baseline": "JITFusionScheduler_fusion_disabled",
+      "practical_baseline": "SyncReActScheduler",
+      "reference_paper": "W2 Programmatic Tool Chains",
+      "description": "Evaluates compiled tool fusion execution over un-fused multi-turn roundtrips.",
+      "thresholds": {
+        "min_p95_speedup_efficacy": 1.30,
+        "min_candidate_success_rate": 0.99,
+        "max_allowable_success_drop": 0.0,
+        "min_p99_speedup_non_regression": 0.95,
+        "max_cost_multiplier": 1.05,
+        "max_unapproved_side_effects": 0,
+        "max_duplicate_commits": 0
+      }
+    },
+    "W3": {
+      "name": "Speculative Read Dispatch (E3)",
+      "mechanism_type": "speculative_read_dispatch",
+      "candidate": "SpeculativeReadScheduler",
+      "primary_attribution_baseline": "SpeculativeReadScheduler_speculation_disabled",
+      "practical_baseline": "SyncReActScheduler",
+      "reference_paper": "W3 Speculative Reads",
+      "description": "Evaluates speculative tool read execution over reactive wait.",
+      "thresholds": {
+        "min_p95_speedup_efficacy": 1.20,
+        "min_candidate_success_rate": 0.99,
+        "max_allowable_success_drop": 0.0,
+        "min_p99_speedup_non_regression": 0.95,
+        "max_cost_multiplier": 1.25,
+        "max_unapproved_side_effects": 0,
+        "max_duplicate_commits": 0
+      }
+    },
+    "W4": {
+      "name": "Locality-Sensitive Result Caching (Phase 2 Cache)",
+      "mechanism_type": "locality_caching",
+      "candidate": "CacheScheduler",
+      "primary_attribution_baseline": "CacheScheduler_caching_disabled",
+      "practical_baseline": "SyncReActScheduler",
+      "reference_paper": "W4 Tool Locality Caching",
+      "description": "Evaluates bounded LRU tool caching over redundant tool execution.",
+      "thresholds": {
+        "min_p95_speedup_efficacy": 1.25,
+        "min_candidate_success_rate": 0.99,
+        "max_allowable_success_drop": 0.0,
+        "min_p99_speedup_non_regression": 0.95,
+        "max_cost_multiplier": 1.05,
+        "max_unapproved_side_effects": 0,
+        "max_duplicate_commits": 0
+      }
+    },
+    "W5": {
+      "name": "Streaming Commit Horizon Dispatch (E4)",
+      "mechanism_type": "streaming_commit_horizon",
+      "candidate": "CommitHorizonScheduler",
+      "primary_attribution_baseline": "CommitHorizonScheduler_commit_horizon_disabled",
+      "practical_baseline": "SyncReActScheduler",
+      "reference_paper": "W5 Commit Horizons",
+      "description": "Evaluates early tool dispatch at character commit boundary over end-of-stream dispatch.",
+      "thresholds": {
+        "min_p95_speedup_efficacy": 1.15,
+        "min_candidate_success_rate": 0.99,
+        "max_allowable_success_drop": 0.0,
+        "min_p99_speedup_non_regression": 0.95,
+        "max_cost_multiplier": 1.05,
+        "max_unapproved_side_effects": 0,
+        "max_duplicate_commits": 0
+      }
+    },
+    "W6": {
+      "name": "Predictive Sandbox Prewarming",
+      "mechanism_type": "cold_start_pool_prewarming",
+      "candidate": "PersistentPrewarmedPool",
+      "primary_attribution_baseline": "PersistentColdPool",
+      "practical_baseline": "PersistentColdPool",
+      "reference_paper": "W6 Cold-Start Mitigation",
+      "description": "Evaluates prewarmed container slots over on-demand initialization.",
+      "thresholds": {
+        "min_p95_speedup_efficacy": 1.20,
+        "min_candidate_success_rate": 0.99,
+        "max_allowable_success_drop": 0.0,
+        "min_p99_speedup_non_regression": 0.95,
+        "max_cost_multiplier": 1.15,
+        "max_unapproved_side_effects": 0,
+        "max_duplicate_commits": 0
+      }
+    },
+    "W7_SAFETY": {
+      "name": "Transactional Authority Safety Invariant",
+      "mechanism_type": "safety_invariant_gate",
+      "candidate": "TransactionalAuthorityScheduler",
+      "primary_attribution_baseline": "TransactionalAuthorityScheduler",
+      "practical_baseline": "SyncReActScheduler",
+      "reference_paper": "W7 Authority Boundary Safety",
+      "description": "Proves zero unapproved side effects and zero duplicate mutations under concurrent execution.",
+      "thresholds": {
+        "min_p95_speedup_efficacy": 1.00,
+        "min_candidate_success_rate": 1.00,
+        "max_allowable_success_drop": 0.0,
+        "min_p99_speedup_non_regression": 0.95,
+        "max_cost_multiplier": 1.10,
+        "max_unapproved_side_effects": 0,
+        "max_duplicate_commits": 0
+      }
+    },
+    "W7_LATENCY": {
+      "name": "Transactional Authority Latency Overhead Bound",
+      "mechanism_type": "transactional_authority_overhead",
+      "candidate": "TransactionalAuthorityScheduler",
+      "primary_attribution_baseline": "SyncReActScheduler",
+      "practical_baseline": "SyncReActScheduler",
+      "reference_paper": "W7 Authority Overhead",
+      "description": "Verifies that transactional authority verification overhead does not exceed latency budget.",
+      "thresholds": {
+        "min_p95_speedup_efficacy": 0.90,
+        "min_candidate_success_rate": 0.99,
+        "max_allowable_success_drop": 0.0,
+        "min_p99_speedup_non_regression": 0.85,
+        "max_cost_multiplier": 1.10,
+        "max_unapproved_side_effects": 0,
+        "max_duplicate_commits": 0
+      }
+    },
+    "E5a": {
+      "name": "Action Bytecode Transport Wire Codec",
+      "mechanism_type": "transport_codec",
+      "candidate": "ActionBytecodeCodec",
+      "primary_attribution_baseline": "CanonicalJSONCodec",
+      "practical_baseline": "CanonicalJSONCodec",
+      "reference_paper": "E5a Action Bytecode Serialization",
+      "description": "Evaluates compact action bytecode serialization vs Canonical JSON under symmetric policies.",
+      "thresholds": {
+        "min_p95_speedup_efficacy": 1.20,
+        "min_candidate_success_rate": 1.00,
+        "max_allowable_success_drop": 0.0,
+        "min_p99_speedup_non_regression": 0.95,
+        "max_cost_multiplier": 1.00,
+        "max_unapproved_side_effects": 0,
+        "max_duplicate_commits": 0,
+        "min_compression_ratio": 1.15,
+        "max_decode_error_rate": 0.0
+      }
+    },
+    "E5b": {
+      "name": "Direct Action Token Generation",
+      "status": "UNIMPLEMENTED",
+      "mechanism_type": "model_action_tokens",
+      "candidate": "DirectActionTokenModel",
+      "primary_attribution_baseline": "StandardTextGenerationModel",
+      "practical_baseline": "StandardTextGenerationModel",
+      "reference_paper": "E5b Action Tokens",
+      "description": "Unimplemented mechanism for upstream token generation (marked UNIMPLEMENTED).",
+      "thresholds": {
+        "min_p95_speedup_efficacy": 1.00,
+        "min_candidate_success_rate": 1.00,
+        "max_allowable_success_drop": 0.0,
+        "min_p99_speedup_non_regression": 1.00,
+        "max_cost_multiplier": 1.00,
+        "max_unapproved_side_effects": 0,
+        "max_duplicate_commits": 0
+      }
+    }
+  },
+  "controls": {
+    "negative_controls": [
+      {
+        "id": "E1_identity_parallelism_disabled",
+        "description": "Identity control comparing DAGScheduler(parallel=False) vs DAGScheduler(parallel=False) expecting null speedup (~1.0x).",
+        "baseline_cls": "DAGScheduler_serial_ablation",
+        "candidate_cls": "DAGScheduler_serial_ablation",
+        "expected_p95_speedup_range": [0.95, 1.05]
+      },
+      {
+        "id": "E2_identity_fusion_disabled",
+        "description": "Identity control comparing un-fused execution vs itself expecting null speedup (~1.0x).",
+        "baseline_cls": "SyncReActScheduler",
+        "candidate_cls": "SyncReActScheduler",
+        "expected_p95_speedup_range": [0.95, 1.05]
+      },
+      {
+        "id": "E3_identity_speculation_disabled",
+        "description": "Identity control comparing non-speculative execution vs itself expecting null speedup (~1.0x).",
+        "baseline_cls": "SpeculativeReadScheduler_speculation_disabled",
+        "candidate_cls": "SpeculativeReadScheduler_speculation_disabled",
+        "expected_p95_speedup_range": [0.95, 1.05]
+      },
+      {
+        "id": "E4_identity_early_dispatch_disabled",
+        "description": "Identity control comparing end-of-stream dispatch vs itself expecting null speedup (~1.0x).",
+        "baseline_cls": "CommitHorizonScheduler_commit_horizon_disabled",
+        "candidate_cls": "CommitHorizonScheduler_commit_horizon_disabled",
+        "expected_p95_speedup_range": [0.95, 1.05]
+      },
+      {
+        "id": "Cache_identity_disabled",
+        "description": "Identity control comparing cache-disabled execution vs itself expecting null speedup (~1.0x).",
+        "baseline_cls": "CacheScheduler_caching_disabled",
+        "candidate_cls": "CacheScheduler_caching_disabled",
+        "expected_p95_speedup_range": [0.95, 1.05]
+      }
+    ],
+    "positive_sensitivity_control": {
+      "id": "Positive_sensitivity_injected_50ms_delay",
+      "description": "Positive sensitivity control injecting 50ms latency into baseline to prove harness detects genuine speedup.",
+      "injected_delay_ms": 50.0,
+      "expected_p95_speedup_range": [1.80, 2.20]
+    }
+  },
+  "amendment_ledger": [
+    {
+      "version": "1.3.0-draft",
+      "date": "2026-09-03",
+      "changes": [
+        "Created prospective protocol draft v1.3 with fresh unrevealed seeds for exploratory (101, 103, 107) and confirmatory (7001, 7013, 7019) phases.",
+        "Specified required execution modes: smoke, exploratory, confirmatory.",
+        "Added explicit machine-evaluable hypothesis verdict rules and required metrics without defaults.",
+        "Upgraded JSON schema to Draft 2020-12 with additionalProperties: false throughout."
+      ]
+    }
+  ]
+}

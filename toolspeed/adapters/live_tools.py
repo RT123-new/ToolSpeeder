@@ -3,34 +3,66 @@
 from __future__ import annotations
 
 import asyncio
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 import os
-from pathlib import Path
+import signal
 import sqlite3
-import subprocess
 import tempfile
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
-import urllib.request
 import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any
 
 from toolspeed.adapters.base import BaseToolAdapter, ToolSchema
 from toolspeed.core.types import ToolCall, ToolResult
 
 
 class AsyncSQLiteTool(BaseToolAdapter):
-    """Real local asynchronous SQLite database query executor."""
+    """Real local asynchronous SQLite database query executor using parameterized queries in threadpool."""
 
-    def __init__(self, db_path: str = ":memory:", name: str = "sqlite_executor"):
+    def __init__(self, db_path: str = ":memory:", name: str = "sqlite_executor", initial_sql: str | None = None):
         self._db_path = db_path
         self._name = name
+        self._initial_sql = initial_sql
         self._lock = asyncio.Lock()
-        self._conn: Optional[sqlite3.Connection] = None
+        self._conn: sqlite3.Connection | None = None
         if db_path == ":memory:":
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
+            if initial_sql:
+                self._conn.executescript(initial_sql)
+                self._conn.commit()
+
+    def clone(self) -> AsyncSQLiteTool:
+        """Creates an independent clone of this SQLite instance with identical schema/data."""
+        dump = ""
+        if self._conn:
+            dump = "\n".join(self._conn.iterdump())
+        elif self._db_path and os.path.exists(self._db_path):
+            with sqlite3.connect(self._db_path) as c:
+                dump = "\n".join(c.iterdump())
+        return AsyncSQLiteTool(db_path=":memory:", name=self._name, initial_sql=dump or self._initial_sql)
+
+    def get_state_snapshot(self) -> dict[str, Any]:
+        """Returns snapshot of current tables and row contents."""
+        conn = self._conn or sqlite3.connect(self._db_path)
+        cursor = conn.cursor()
+        snapshot: dict[str, Any] = {}
+        try:
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            tables = [row[0] for row in cursor.fetchall()]
+            for tbl in tables:
+                cursor.execute(f"SELECT * FROM {tbl}")  # nosec B608
+                rows = cursor.fetchall()
+                snapshot[tbl] = [dict(r) if isinstance(r, sqlite3.Row) else list(r) for r in rows]
+        finally:
+            cursor.close()
+            if self._conn is None:
+                conn.close()
+        return snapshot
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -80,6 +112,7 @@ class AsyncSQLiteTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error="Missing required 'query' argument.",
                 is_error=True,
@@ -92,6 +125,7 @@ class AsyncSQLiteTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=result,
                 error=None,
                 is_error=False,
@@ -102,6 +136,7 @@ class AsyncSQLiteTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error=str(ex),
                 is_error=True,
@@ -116,12 +151,12 @@ class AsyncSQLiteTool(BaseToolAdapter):
 
 
 class SafeSubprocessSandbox(BaseToolAdapter):
-    """Local safe subprocess executor with strict timeout, cwd isolation, and output capture."""
+    """Local safe subprocess executor with strict timeout, cwd isolation, process tree termination, and output capture."""
 
     def __init__(
         self,
         name: str = "subprocess_sandbox",
-        sandbox_dir: Optional[str] = None,
+        sandbox_dir: str | None = None,
         default_timeout_s: float = 10.0,
         max_output_bytes: int = 100_000,
     ):
@@ -129,11 +164,18 @@ class SafeSubprocessSandbox(BaseToolAdapter):
         self._sandbox_dir = sandbox_dir or tempfile.mkdtemp(prefix="toolspeed_sandbox_")
         self._default_timeout_s = default_timeout_s
         self._max_output_bytes = max_output_bytes
+        self._active_procs: dict[str, asyncio.subprocess.Process] = {}
         os.makedirs(self._sandbox_dir, exist_ok=True)
 
     @property
     def sandbox_dir(self) -> str:
         return self._sandbox_dir
+
+    def is_process_tree_terminated(self, call_id: str) -> bool:
+        proc = self._active_procs.get(call_id)
+        if proc is None:
+            return True
+        return proc.returncode is not None
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -151,30 +193,55 @@ class SafeSubprocessSandbox(BaseToolAdapter):
             cost_usd=0.0005,
         )
 
-    def _sync_run(self, command: str, timeout_s: float) -> dict[str, Any]:
-        env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "LANG": "en_US.UTF-8",
-            "LC_ALL": "en_US.UTF-8",
-            "PYTHONUNBUFFERED": "1",
-        }
-        res = subprocess.run(
-            command,
-            shell=True,
-            cwd=self._sandbox_dir,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            env=env,
-        )
-        stdout = res.stdout[: self._max_output_bytes]
-        stderr = res.stderr[: self._max_output_bytes]
-        return {
-            "exit_code": res.returncode,
-            "stdout": stdout,
-            "stderr": stderr,
-            "truncated": len(res.stdout) > self._max_output_bytes,
-        }
+    async def _terminate_process_group(self, proc: asyncio.subprocess.Process, grace_period_s: float = 0.5) -> None:
+        """Gracefully terminates process group with SIGTERM, then escalates to SIGKILL after grace period.
+
+        Guarantees the process exits before returning, leaving zero orphan processes.
+        """
+        if proc.returncode is not None:
+            return
+
+        pid = proc.pid
+        try:
+            pgid = os.getpgid(pid)
+        except ProcessLookupError:
+            await proc.wait()
+            return
+        except Exception:
+            pgid = None
+
+        # 1. Send SIGTERM to process group
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            await proc.wait()
+            return
+        except Exception:
+            pass
+
+        # 2. Wait up to grace period for graceful shutdown
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace_period_s)
+            return
+        except (asyncio.TimeoutError, TimeoutError):
+            pass
+
+        # 3. Escalate to SIGKILL to process group
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception:
+            pass
+
+        # 4. Await complete exit before returning (no orphan processes)
+        await proc.wait()
 
     async def execute(self, call: ToolCall) -> ToolResult:
         start_ns = time.perf_counter_ns()
@@ -185,39 +252,76 @@ class SafeSubprocessSandbox(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error="Missing required 'command' argument.",
                 is_error=True,
                 execution_time_ns=time.perf_counter_ns() - start_ns,
             )
 
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8",
+            "PYTHONUNBUFFERED": "1",
+        }
+
+        proc: asyncio.subprocess.Process | None = None
         try:
-            res_dict = await asyncio.to_thread(self._sync_run, command, timeout_s)
-            is_error = res_dict["exit_code"] != 0
-            error_msg = res_dict["stderr"] if is_error else None
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                cwd=self._sandbox_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                start_new_session=True,
+            )
+            self._active_procs[call.call_id] = proc
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+            stdout = stdout_bytes[: self._max_output_bytes].decode("utf-8", errors="replace")
+            stderr = stderr_bytes[: self._max_output_bytes].decode("utf-8", errors="replace")
+            res_dict = {
+                "exit_code": proc.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": len(stdout_bytes) > self._max_output_bytes,
+            }
+            is_error = proc.returncode != 0
+            error_msg = stderr if is_error else None
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=res_dict,
                 error=error_msg,
                 is_error=is_error,
                 execution_time_ns=time.perf_counter_ns() - start_ns,
                 cost_usd=0.0005,
             )
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
+            if proc and proc.returncode is None:
+                await self._terminate_process_group(proc, grace_period_s=0.5)
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error=f"Command timed out after {timeout_s}s",
                 is_error=True,
                 execution_time_ns=time.perf_counter_ns() - start_ns,
                 cost_usd=0.0005,
             )
+        except asyncio.CancelledError:
+            if proc and proc.returncode is None:
+                await self._terminate_process_group(proc, grace_period_s=0.5)
+            raise
         except Exception as ex:
+            if proc and proc.returncode is None:
+                await self._terminate_process_group(proc, grace_period_s=0.5)
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error=str(ex),
                 is_error=True,
@@ -231,7 +335,7 @@ class AsyncLocalFileIOTool(BaseToolAdapter):
 
     def __init__(
         self,
-        base_dir: Optional[str] = None,
+        base_dir: str | None = None,
         name: str = "file_io",
     ):
         self._name = name
@@ -244,7 +348,7 @@ class AsyncLocalFileIOTool(BaseToolAdapter):
 
     def _resolve_safe(self, rel_path: str) -> Path:
         target = (self._base_dir / rel_path).resolve()
-        if not str(target).startswith(str(self._base_dir)):
+        if target != self._base_dir and self._base_dir not in target.parents:
             raise ValueError(f"Path traversal detected: '{rel_path}' is outside sandbox base dir.")
         return target
 
@@ -265,7 +369,7 @@ class AsyncLocalFileIOTool(BaseToolAdapter):
             cost_usd=0.00005,
         )
 
-    def _sync_op(self, action: str, path_str: str, content: Optional[str]) -> Any:
+    def _sync_op(self, action: str, path_str: str, content: str | None) -> Any:
         target = self._resolve_safe(path_str)
         if action == "read":
             if not target.exists() or not target.is_file():
@@ -290,6 +394,7 @@ class AsyncLocalFileIOTool(BaseToolAdapter):
                     target.unlink()
                 elif target.is_dir():
                     import shutil
+
                     shutil.rmtree(target)
                 return {"status": "deleted"}
             return {"status": "not_found"}
@@ -317,6 +422,7 @@ class AsyncLocalFileIOTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=res,
                 error=None,
                 is_error=False,
@@ -327,6 +433,7 @@ class AsyncLocalFileIOTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error=str(ex),
                 is_error=True,
@@ -384,9 +491,11 @@ class MockHTTPServer:
     def __init__(self, host: str = "127.0.0.1", port: int = 0):
         self.host = host
         self.port = port
-        self.routes: dict[Tuple[str, str], Tuple[int, Any, float]] = {}  # (method, path) -> (status, response_body, delay_s)
-        self._server: Optional[HTTPServer] = None
-        self._thread: Optional[threading.Thread] = None
+        self.routes: dict[
+            tuple[str, str], tuple[int, Any, float]
+        ] = {}  # (method, path) -> (status, response_body, delay_s)
+        self._server: HTTPServer | None = None
+        self._thread: threading.Thread | None = None
 
     def add_route(self, method: str, path: str, response: Any, status_code: int = 200, delay_s: float = 0.0) -> None:
         self.routes[(method.upper(), path)] = (status_code, response, delay_s)
@@ -438,7 +547,9 @@ class AsyncHTTPClientTool(BaseToolAdapter):
             cost_usd=0.0002,
         )
 
-    def _sync_request(self, url: str, method: str, body: Optional[dict[str, Any]], headers: dict[str, str]) -> dict[str, Any]:
+    def _sync_request(
+        self, url: str, method: str, body: dict[str, Any] | None, headers: dict[str, str]
+    ) -> dict[str, Any]:
         target_url = url if url.startswith("http") else f"{self._base_url}/{url.lstrip('/')}"
         data_bytes = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(target_url, data=data_bytes, method=method)
@@ -482,6 +593,7 @@ class AsyncHTTPClientTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error="Missing required 'url' argument.",
                 is_error=True,
@@ -496,6 +608,7 @@ class AsyncHTTPClientTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=res_dict["body"],
                 error=error_msg,
                 is_error=is_error,
@@ -507,6 +620,7 @@ class AsyncHTTPClientTool(BaseToolAdapter):
             return ToolResult(
                 call_id=call.call_id,
                 tool_name=self._name,
+                name=self._name,
                 result=None,
                 error=str(ex),
                 is_error=True,

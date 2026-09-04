@@ -1,48 +1,71 @@
-"""Report and Artifact Generators for ToolSpeed.
-
-Generates:
-1. Markdown Evidence Log (matching research plan template)
-2. Interactive Standalone HTML Dashboard with embedded SVG charts
-3. JSON summary data files
-"""
+"""Report and Artifact Generators for ToolSpeed."""
 
 from __future__ import annotations
 
-from pathlib import Path
 import json
+import shutil
 import time
-from typing import Any, Dict, List, Optional, Union
+import uuid
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
+from toolspeed.benchmarks.bundle import capture_environment_metadata, get_current_git_commit
+from toolspeed.core.types import EvidenceLevel, compute_file_sha256, strict_json_dumps
 from toolspeed.experiments.full_suite import SuiteResult
-from toolspeed.experiments.runner import ExperimentResult
 from toolspeed.visualization.charts import (
-    generate_cdf_chart,
     generate_speedup_line_chart,
     generate_workload_bar_chart,
 )
 
+if TYPE_CHECKING:
+    from toolspeed.benchmarks.harness import BenchmarkRunResult
+
 
 def generate_markdown_evidence_log(suite_result: SuiteResult) -> str:
     """Generate comprehensive Markdown Evidence Log matching research plan template."""
-    lines: List[str] = [
+    ev_level = (
+        suite_result.evidence_level.value
+        if isinstance(suite_result.evidence_level, EvidenceLevel)
+        else str(suite_result.evidence_level)
+    )
+    lines: list[str] = [
         "# ToolSpeed — Evidence Log & Experiment Report",
         "",
         f"**Generated:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  ",
+        f"**Evidence Level:** `{ev_level}`  ",
         f"**Trials per condition:** {suite_result.trials:,}  ",
         f"**Random Seed:** {suite_result.seed}  ",
         f"**Total Suite Runtime:** {suite_result.total_runtime_sec:.2f}s  ",
-        "",
-        "## Executive Summary",
-        "",
-        f"- **Central Falsification Hypothesis:** {'**CONFIRMED / PASSED**' if suite_result.central_hypothesis_passed else '**FALSIFIED**'}",
-        f"- **Tested Mechanisms:** DAG Parallelism (E1), JIT Fusion (E2), Speculative Reads (E3), Commit Horizon (E4), Action Bytecode (E5).",
-        "- **Primary Metric:** Correct Completion Latency (CCL) at P50, P90, P95, and P99.",
-        "",
-        "## Canonical Evidence Log",
-        "",
-        "| Experiment | Tested | Succeeded | Failed | Still unproven | Next action |",
-        "|---|---|---|---|---|---|",
     ]
+
+    if suite_result.manifest:
+        m = suite_result.manifest
+        lines.extend(
+            [
+                f"**Git Commit:** `{m.commit_sha}` ({'dirty' if m.dirty else 'clean'})  ",
+                f"**Hardware / OS:** `{m.os_platform}` | Python `{m.python_version}`  ",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Executive Summary",
+            "",
+            f"- **Central Falsification Hypothesis:** {'**CONFIRMED / PASSED (Under Declared Evidence Level)**' if suite_result.central_hypothesis_passed else '**FALSIFIED**'}",
+            f"- **Evidence Level:** `{ev_level}`",
+            "- **Tested Mechanisms:** DAG Parallelism (E1), JIT Fusion (E2), Speculative Reads (E3), Commit Horizon (E4), Action Bytecode (E5).",
+            "- **Primary Metric:** Correct Completion Latency (CCL) at P50, P90, P95, and P99.",
+            "",
+            "> [!NOTE]",
+            f"> Evidence level `{ev_level}` results represent rigorous validation within this test environment. Synthetic simulations must not be conflated with empirical live network validation.",
+            "",
+            "## Canonical Evidence Log",
+            "",
+            "| Experiment | Tested | Succeeded | Failed | Still unproven | Next action |",
+            "|---|---|---|---|---|---|",
+        ]
+    )
 
     for row in suite_result.evidence_log:
         exp = row.get("experiment", "")
@@ -53,49 +76,58 @@ def generate_markdown_evidence_log(suite_result: SuiteResult) -> str:
         action = row.get("next_action", "")
         lines.append(f"| {exp} | {tested} | {succ} | {fail} | {unproven} | {action} |")
 
-    lines.extend([
-        "",
-        "## Workload Performance Matrix (W1 – W7)",
-        "",
-        "| Workload | Name | Baseline P95 | Candidate P95 | P95 Speedup | CCL Reduction | Status |",
-        "|---|---|---|---|---|---|---|",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Workload Performance Matrix (W1 – W7)",
+            "",
+            "| Workload | Name | Baseline P95 | Candidate P95 | P95 Speedup | CCL Reduction | Status | Level |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+    )
 
-    for w_id, w in suite_result.workloads.items():
+    for w in suite_result.workloads.values():
         status_badge = "✅ PASS" if w.central_hypothesis_passed else "❌ FAIL"
+        w_level = w.evidence_level.value if isinstance(w.evidence_level, EvidenceLevel) else str(w.evidence_level)
         lines.append(
-            f"| {w.workload_id} | {w.name} | {w.baseline_p95_ms:.1f}ms | {w.candidate_p95_ms:.1f}ms | {w.p95_speedup:.2f}x | {w.p95_reduction_pct:.1f}% | {status_badge} |"
+            f"| {w.workload_id} | {w.name} | {w.baseline_p95_ms:.1f}ms | {w.candidate_p95_ms:.1f}ms | {w.p95_speedup:.2f}x | {w.p95_reduction_pct:.1f}% | {status_badge} | `{w_level}` |"
         )
 
-    lines.extend([
-        "",
-        "## Detailed Experiment Results & Hypothesis Checks",
-        "",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Detailed Experiment Results & Hypothesis Checks",
+            "",
+        ]
+    )
 
-    for exp_id, exp_res in suite_result.experiments.items():
+    for exp_res in suite_result.experiments.values():
         verdict_badge = "PASSED" if exp_res.verdict.passed else "FALSIFIED"
-        lines.extend([
-            f"### {exp_res.title} [{verdict_badge}]",
-            "",
-            f"**Hypothesis:** {exp_res.verdict.hypothesis}  ",
-            f"**Summary:** {exp_res.verdict.summary}  ",
-            "",
-            "#### Hypothesis Evaluation Checks:",
-            "",
-            "| Check Name | Target | Measured | Status | Detail |",
-            "|---|---|---|---|---|",
-        ])
+        lines.extend(
+            [
+                f"### {exp_res.title} [{verdict_badge}]",
+                "",
+                f"**Hypothesis:** {exp_res.verdict.hypothesis}  ",
+                f"**Summary:** {exp_res.verdict.summary}  ",
+                "",
+                "#### Hypothesis Evaluation Checks:",
+                "",
+                "| Check Name | Target | Measured | Status | Detail |",
+                "|---|---|---|---|---|",
+            ]
+        )
 
         for c in exp_res.verdict.checks:
             c_badge = "✅ PASS" if c.passed else "❌ FAIL"
             lines.append(f"| `{c.name}` | {c.target} | {c.measured} | {c_badge} | {c.detail} |")
 
-        lines.extend([
-            "",
-            "#### Parameter Sweep Summary:",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "#### Parameter Sweep Summary:",
+                "",
+            ]
+        )
 
         if exp_res.rows:
             sample_keys = [
@@ -115,7 +147,7 @@ def generate_markdown_evidence_log(suite_result: SuiteResult) -> str:
             lines.append(f"| {header_str} |")
             lines.append(f"| {sep_str} |")
 
-            for r in exp_res.rows[:10]:  # show up to 10 rows
+            for r in exp_res.rows[:10]:
                 vals = []
                 for k in valid_keys:
                     val = r.get(k, "")
@@ -134,18 +166,29 @@ def generate_markdown_evidence_log(suite_result: SuiteResult) -> str:
 
 
 def generate_html_dashboard(suite_result: SuiteResult) -> str:
-    """Generate standalone interactive HTML dashboard with embedded SVGs and styling."""
-    # Render SVGs
-    # 1. Workload bar chart
+    """Generate standalone interactive HTML dashboard with embedded SVGs, styling, and provenance."""
+    ev_level = (
+        suite_result.evidence_level.value
+        if isinstance(suite_result.evidence_level, EvidenceLevel)
+        else str(suite_result.evidence_level)
+    )
+
     workload_items = [w.to_dict() for w in suite_result.workloads.values()]
     workload_svg = generate_workload_bar_chart(workload_items, width=800, height=360)
 
-    # 2. E1 Fan-out line chart
     e1 = suite_result.experiments.get("E1")
     if e1 and e1.rows:
         e1_series = {
-            "P50 Speedup": [(r["independent_calls"], r["p50_speedup"]) for r in e1.rows if isinstance(r["independent_calls"], (int, float))],
-            "P95 Speedup": [(r["independent_calls"], r["p95_speedup"]) for r in e1.rows if isinstance(r["independent_calls"], (int, float))],
+            "P50 Speedup": [
+                (r["independent_calls"], r["p50_speedup"])
+                for r in e1.rows
+                if isinstance(r["independent_calls"], (int, float))
+            ],
+            "P95 Speedup": [
+                (r["independent_calls"], r["p95_speedup"])
+                for r in e1.rows
+                if isinstance(r["independent_calls"], (int, float))
+            ],
         }
         e1_svg = generate_speedup_line_chart(
             "E1: DAG Parallel Fan-out Speedup vs Call Count",
@@ -158,12 +201,19 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
     else:
         e1_svg = ""
 
-    # 3. E2 Fusion line chart
     e2 = suite_result.experiments.get("E2")
     if e2 and e2.rows:
         e2_series = {
-            "P50 Speedup": [(r["dependent_steps"], r["p50_speedup"]) for r in e2.rows if isinstance(r["dependent_steps"], (int, float))],
-            "P95 Speedup": [(r["dependent_steps"], r["p95_speedup"]) for r in e2.rows if isinstance(r["dependent_steps"], (int, float))],
+            "P50 Speedup": [
+                (r["dependent_steps"], r["p50_speedup"])
+                for r in e2.rows
+                if isinstance(r["dependent_steps"], (int, float))
+            ],
+            "P95 Speedup": [
+                (r["dependent_steps"], r["p95_speedup"])
+                for r in e2.rows
+                if isinstance(r["dependent_steps"], (int, float))
+            ],
         }
         e2_svg = generate_speedup_line_chart(
             "E2: Workflow Fusion Speedup vs Dependent Steps",
@@ -176,16 +226,15 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
     else:
         e2_svg = ""
 
-    # 4. E3 Speculation line chart
     e3 = suite_result.experiments.get("E3")
     if e3 and e3.rows:
-        e3_modes = {}
+        e3_modes: dict[str, list[tuple[float, float]]] = {}
         for r in e3.rows:
             mode = r.get("contention_mode")
             acc = r.get("prediction_accuracy")
             spd = r.get("p50_speedup")
             if mode and acc is not None and spd is not None and mode != "confidence_gated":
-                e3_modes.setdefault(mode, []).append((acc, spd))
+                e3_modes.setdefault(mode, []).append((float(acc), float(spd)))
         e3_svg = generate_speedup_line_chart(
             "E3: Speculative Execution Latency Speedup by Contention Mode",
             "Prediction Accuracy",
@@ -197,7 +246,6 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
     else:
         e3_svg = ""
 
-    # 5. E4 Commit Horizon line chart
     e4 = suite_result.experiments.get("E4")
     if e4 and e4.rows:
         e4_series = {
@@ -215,12 +263,17 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
     else:
         e4_svg = ""
 
-    # Compute KPI statistics
-    all_speedups = [w.p95_speedup for w in suite_result.workloads.values()]
+    all_speedups = [w.p95_speedup for w in suite_result.workloads.values() if w.p95_speedup is not None]
     best_speedup = max(all_speedups) if all_speedups else 1.0
-    avg_red = sum(w.p95_reduction_pct for w in suite_result.workloads.values()) / max(1, len(suite_result.workloads))
+    valid_reds = [w.p95_reduction_pct for w in suite_result.workloads.values() if w.p95_reduction_pct is not None]
+    avg_red = sum(valid_reds) / max(1, len(valid_reds))
     passed_exps = sum(1 for exp in suite_result.experiments.values() if exp.verdict.passed)
     total_exps = len(suite_result.experiments)
+
+    manifest_info = ""
+    if suite_result.manifest:
+        m = suite_result.manifest
+        manifest_info = f"<span>Git: <code>{m.commit_sha[:8]}</code> ({'dirty' if m.dirty else 'clean'})</span> | <span>OS: {m.os_platform}</span>"
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -269,6 +322,7 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
     .badge-success {{ background: rgba(16, 185, 129, 0.2); color: var(--success); border: 1px solid var(--success); }}
     .badge-danger {{ background: rgba(239, 68, 68, 0.2); color: var(--danger); border: 1px solid var(--danger); }}
     .badge-primary {{ background: rgba(59, 130, 246, 0.2); color: var(--accent); border: 1px solid var(--accent); }}
+    .badge-level {{ background: rgba(245, 158, 11, 0.2); color: var(--warning); border: 1px solid var(--warning); }}
 
     .kpi-grid {{
       display: grid;
@@ -337,12 +391,12 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
       <div>
         <h1>⚡ ToolSpeed Latency & Falsification Dashboard</h1>
         <p style="color: var(--text-muted); font-size: 13px; margin-top: 4px;">
-          Empirical mechanisms for AI agent tool call acceleration & Critical-Path reduction
+          Evidence Level: <span class="badge badge-level">{ev_level}</span> | {manifest_info}
         </p>
       </div>
       <div>
-        <span class="badge {'badge-success' if suite_result.central_hypothesis_passed else 'badge-danger'}">
-          {'CENTRAL HYPOTHESIS: CONFIRMED' if suite_result.central_hypothesis_passed else 'CENTRAL HYPOTHESIS: FALSIFIED'}
+        <span class="badge {"badge-success" if suite_result.central_hypothesis_passed else "badge-danger"}">
+          {"CENTRAL HYPOTHESIS: PASS" if suite_result.central_hypothesis_passed else "CENTRAL HYPOTHESIS: FALSIFIED"}
         </span>
       </div>
     </header>
@@ -364,9 +418,9 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
         <div class="kpi-subtitle">E1-E5 Falsification checks passed</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-title">Trials Simulated</div>
+        <div class="kpi-title">Trials Evaluated</div>
         <div class="kpi-value">{suite_result.trials:,}</div>
-        <div class="kpi-subtitle">Per parameter variation (Seed: {suite_result.seed})</div>
+        <div class="kpi-subtitle">Evidence Level: {ev_level}</div>
       </div>
     </div>
 
@@ -387,7 +441,9 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
           </tr>
         </thead>
         <tbody>
-          {"".join(f'''
+          {
+        "".join(
+            f'''
           <tr>
             <td><strong>{w.workload_id}</strong></td>
             <td>{w.name}</td>
@@ -398,7 +454,10 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
             <td style="color: var(--success);">{w.p95_reduction_pct:.1f}%</td>
             <td><span class="badge {'badge-success' if w.central_hypothesis_passed else 'badge-danger'}">{'PASS' if w.central_hypothesis_passed else 'FAIL'}</span></td>
           </tr>
-          ''' for w in suite_result.workloads.values())}
+          '''
+            for w in suite_result.workloads.values()
+        )
+    }
         </tbody>
       </table>
     </div>
@@ -436,7 +495,9 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
           </tr>
         </thead>
         <tbody>
-          {"".join(f'''
+          {
+        "".join(
+            f'''
           <tr>
             <td><strong>{r.get("experiment", "")}</strong></td>
             <td><span class="badge badge-primary">{r.get("tested", "Yes")}</span></td>
@@ -445,13 +506,17 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
             <td style="color: var(--text-muted);">{r.get("still_unproven", "")}</td>
             <td>{r.get("next_action", "")}</td>
           </tr>
-          ''' for r in suite_result.evidence_log)}
+          '''
+            for r in suite_result.evidence_log
+        )
+    }
         </tbody>
       </table>
     </div>
 
     <footer>
-      <p>ToolSpeed — Autonomous Agent Latency & Optimization Framework | Generated in {suite_result.total_runtime_sec:.2f}s</p>
+      <p>ToolSpeed — Benchmark & Optimization Framework | Evidence Level: {ev_level} | Runtime: {
+        suite_result.total_runtime_sec:.2f}s</p>
     </footer>
   </div>
 </body>
@@ -460,37 +525,383 @@ def generate_html_dashboard(suite_result: SuiteResult) -> str:
     return html
 
 
-def generate_json_summary(suite_result: SuiteResult) -> Dict[str, Any]:
+def generate_json_summary(suite_result: SuiteResult) -> dict[str, Any]:
     """Generate structured JSON representation of suite results."""
     return suite_result.to_dict()
 
 
+def generate_benchmark_markdown_report(result: dict[str, Any] | Any) -> str:
+    """Generate Markdown report for paired benchmark run results."""
+    data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+    title = data.get("title", "ToolSpeed Paired Benchmark Suite")
+    ev_level = data.get("evidence_level", "replay_integration")
+    runtime = data.get("total_runtime_s", 0.0)
+    verdict = data.get("overall_verdict", "inconclusive")
+    manifest = data.get("manifest") or {}
+
+    lines = [
+        f"# {title}",
+        "",
+        f"**Generated:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  ",
+        f"**Evidence Level:** `{ev_level}`  ",
+        f"**Overall Verdict:** `{'PASSED' if verdict == 'passed' else ('FALSIFIED' if verdict == 'falsified' else 'INCONCLUSIVE')}`  ",
+        f"**Total Benchmark Runtime:** {runtime:.2f}s  ",
+    ]
+
+    if manifest:
+        lines.extend(
+            [
+                f"**Git Commit:** `{manifest.get('git_sha', 'unknown')}` ({'dirty' if manifest.get('git_dirty') else 'clean'})  ",
+                f"**Platform:** `{manifest.get('os_platform', '')}` | Python `{manifest.get('python_version', '')}`  ",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Paired Workload Evaluations (W1 – W7, E5a)",
+            "",
+            "| Workload | Comparison | Baseline P95 | Candidate P95 | P95 Speedup | Candidate Success | Status | 95% Bootstrap CI |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+    )
+
+    for e in data.get("evaluations", []):
+        wl = e.get("workload_id", "")
+        comp = f"{e.get('candidate_name', '')} vs {e.get('baseline_name', '')}"
+        summ = e.get("summary", {})
+        verd = e.get("verdict", {})
+        status = "✅ PASS" if verd.get("passed") else "❌ FAIL"
+        b95 = f"{summ.get('baseline_p95_ms', 0.0):.1f}ms" if summ.get("baseline_p95_ms") is not None else "null"
+        c95 = f"{summ.get('candidate_p95_ms', 0.0):.1f}ms" if summ.get("candidate_p95_ms") is not None else "null"
+        speedup = f"{summ.get('p95_speedup', 1.0):.2f}x" if summ.get("p95_speedup") is not None else "null"
+        succ = (
+            f"{summ.get('candidate_success_rate', 1.0):.1%}"
+            if summ.get("candidate_success_rate") is not None
+            else "null"
+        )
+        ci = summ.get("p95_reduction_ci")
+        ci_str = f"[{ci[0]:.1f}%, {ci[1]:.1f}%]" if ci and ci[0] is not None else "null"
+        lines.append(f"| {wl} | {comp} | {b95} | {c95} | {speedup} | {succ} | {status} | {ci_str} |")
+
+    neg = data.get("negative_controls", [])
+    if neg:
+        lines.extend(
+            [
+                "",
+                "## Negative Control Verification",
+                "",
+                "| Control | Measured Speedup | Null Check (~1.0x) | Detail |",
+                "|---|---|---|---|",
+            ]
+        )
+        for nc in neg:
+            c_name = nc.get("control", "")
+            sp = f"{nc.get('p95_speedup', 1.0):.2f}x"
+            null_pass = "✅ PASS" if nc.get("passed_expected_null") else "❌ FAIL"
+            detail = nc.get("detail", "")
+            lines.append(f"| {c_name} | {sp} | {null_pass} | {detail} |")
+
+    return "\n".join(lines)
+
+
+def generate_benchmark_html_dashboard(result: dict[str, Any] | Any) -> str:
+    """Generate HTML dashboard for paired benchmark run results."""
+    data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+    title = data.get("title", "ToolSpeed Paired Benchmark Suite")
+    ev_level = data.get("evidence_level", "replay_integration")
+    runtime = data.get("total_runtime_s", 0.0)
+    verdict = data.get("overall_verdict", "inconclusive")
+    evaluations = data.get("evaluations", [])
+
+    rows_html = ""
+    for e in evaluations:
+        summ = e.get("summary", {})
+        verd = e.get("verdict", {})
+        is_pass = verd.get("passed", False)
+        b95 = f"{summ.get('baseline_p95_ms', 0.0):.1f} ms" if summ.get("baseline_p95_ms") is not None else "null"
+        c95 = f"{summ.get('candidate_p95_ms', 0.0):.1f} ms" if summ.get("candidate_p95_ms") is not None else "null"
+        sp = f"{summ.get('p95_speedup', 1.0):.2f}x" if summ.get("p95_speedup") is not None else "null"
+        succ = (
+            f"{summ.get('candidate_success_rate', 1.0):.1%}"
+            if summ.get("candidate_success_rate") is not None
+            else "null"
+        )
+        rows_html += f"""
+        <tr>
+          <td><strong>{e.get("workload_id", "")}</strong></td>
+          <td>{e.get("candidate_name", "")} vs {e.get("baseline_name", "")}</td>
+          <td>{b95}</td>
+          <td>{c95}</td>
+          <td><strong>{sp}</strong></td>
+          <td>{succ}</td>
+          <td><span class="badge {"badge-success" if is_pass else "badge-danger"}">{"PASS" if is_pass else "FAIL"}</span></td>
+        </tr>
+        """
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{title}</title>
+  <style>
+    :root {{
+      --bg: #0d1117; --card-bg: #161b22; --border: #30363d;
+      --text: #c9d1d9; --text-muted: #8b949e; --accent: #58a6ff;
+      --success: #3fb950; --danger: #f85149;
+    }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); padding: 2rem; margin: 0; }}
+    .container {{ max-width: 1200px; margin: 0 auto; }}
+    .card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); text-align: left; }}
+    th {{ color: var(--text-muted); }}
+    .badge {{ padding: 0.25rem 0.6rem; border-radius: 12px; font-weight: bold; font-size: 0.85rem; }}
+    .badge-success {{ background: rgba(63, 185, 80, 0.2); color: var(--success); }}
+    .badge-danger {{ background: rgba(248, 81, 73, 0.2); color: var(--danger); }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>{title}</h1>
+    <p>Evidence Level: <code>{ev_level}</code> | Runtime: {runtime:.2f}s | Verdict: <strong>{verdict.upper()}</strong></p>
+    <div class="card">
+      <h2>Workload Performance Matrix</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Workload</th><th>Comparison</th><th>Baseline P95</th><th>Candidate P95</th><th>Speedup</th><th>Success</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows_html}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>"""
+    return html
+
+
+def save_benchmark_reports(
+    result: BenchmarkRunResult | dict[str, Any] | Any,
+    out_dir: str | Path,
+) -> dict[str, Path]:
+    """Atomically generate, hash, and persist canonical benchmark suite bundle with single manifest."""
+    final_out = Path(out_dir).resolve()
+    final_out.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = final_out.parent / f"{final_out.name}.staging_{uuid.uuid4().hex[:8]}"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+
+        # 1. Traces JSONL files & Cases
+        baseline_traces_path = staging_dir / "baseline-traces.jsonl"
+        candidate_traces_path = staging_dir / "candidate-traces.jsonl"
+        raw_traces_path = staging_dir / "raw-traces.jsonl"
+        controls_traces_path = staging_dir / "controls-traces.jsonl"
+        cases_path = staging_dir / "cases.jsonl"
+
+        with (
+            open(baseline_traces_path, "w", encoding="utf-8") as f_b,
+            open(candidate_traces_path, "w", encoding="utf-8") as f_c,
+            open(raw_traces_path, "w", encoding="utf-8") as f_raw,
+            open(cases_path, "w", encoding="utf-8") as f_cases,
+        ):
+            if hasattr(result, "evaluations") and result.evaluations:
+                for ev in result.evaluations:
+                    for idx, r_c in enumerate(ev.candidate_results):
+                        line_c = json.dumps(r_c.to_dict()) + "\n"
+                        f_c.write(line_c)
+                        f_raw.write(line_c)
+                        f_cases.write(
+                            json.dumps({"workload_id": ev.workload_id, "trial_index": idx, "task_id": r_c.task_id})
+                            + "\n"
+                        )
+                    for r_b in ev.baseline_results:
+                        f_b.write(json.dumps(r_b.to_dict()) + "\n")
+            else:
+                f_b.write(json.dumps({"info": "baseline_traces"}) + "\n")
+                f_c.write(json.dumps({"info": "candidate_traces"}) + "\n")
+                f_raw.write(json.dumps({"info": "raw_traces"}) + "\n")
+                f_cases.write(json.dumps({"info": "cases"}) + "\n")
+
+        with open(controls_traces_path, "w", encoding="utf-8") as f_ctrl:
+            if hasattr(result, "negative_controls") and result.negative_controls:
+                for nc in result.negative_controls:
+                    f_ctrl.write(json.dumps(nc) + "\n")
+            else:
+                f_ctrl.write(json.dumps({"info": "controls"}) + "\n")
+
+        # 2. Frozen protocol copies
+        protocol_path = staging_dir / "protocol.json"
+        bm_plan_path = staging_dir / "benchmark-plan.json"
+        if hasattr(result, "protocol") and result.protocol is not None and getattr(result.protocol, "raw_json", None):
+            proto_content = result.protocol.raw_json
+        else:
+            repo_protocol = Path("benchmark-plans/tool-speed-v1.1.json")
+            if not repo_protocol.exists():
+                repo_protocol = Path("benchmark-plans/tool-speed-v1.json")
+            if repo_protocol.exists():
+                proto_content = repo_protocol.read_text(encoding="utf-8")
+            else:
+                proto_content = json.dumps({"plan_id": "tool-speed-v1.1", "version": "1.1.0"}, indent=2)
+        protocol_path.write_text(proto_content, encoding="utf-8")
+        bm_plan_path.write_text(proto_content, encoding="utf-8")
+
+        # 2b. Provenance: git-commit.txt and environment.json
+        git_commit_sha = get_current_git_commit()
+        git_commit_path = staging_dir / "git-commit.txt"
+        git_commit_path.write_text(f"{git_commit_sha}\n", encoding="utf-8")
+
+        env_path = staging_dir / "environment.json"
+        env_meta = capture_environment_metadata()
+        env_path.write_text(strict_json_dumps(env_meta, indent=2), encoding="utf-8")
+
+        # 3. Compute early payload hashes
+        proto_hash = compute_file_sha256(protocol_path)
+        cases_hash = compute_file_sha256(cases_path)
+        c_trace_hash = compute_file_sha256(candidate_traces_path)
+        raw_trace_hash = compute_file_sha256(raw_traces_path)
+        b_trace_hash = compute_file_sha256(baseline_traces_path)
+        ctrl_trace_hash = compute_file_sha256(controls_traces_path)
+        git_commit_hash = compute_file_sha256(git_commit_path)
+        env_hash = compute_file_sha256(env_path)
+
+        # 4. Reports (MD and HTML)
+        md_path = staging_dir / "report.md"
+        md_content = generate_benchmark_markdown_report(result)
+        md_path.write_text(md_content, encoding="utf-8")
+
+        html_path = staging_dir / "report.html"
+        html_content = generate_benchmark_html_dashboard(result)
+        html_path.write_text(html_content, encoding="utf-8")
+
+        # 5. Falsification Verdict JSON
+        falsification_path = staging_dir / "falsification.json"
+        falsification_data = {
+            "title": data.get("title"),
+            "evidence_level": data.get("evidence_level"),
+            "overall_verdict": data.get("overall_verdict"),
+            "total_runtime_s": data.get("total_runtime_s"),
+            "verdicts": [
+                {
+                    "workload_id": e.get("workload_id"),
+                    "comparison": f"{e.get('candidate_name')} vs {e.get('baseline_name')}",
+                    "verdict": e.get("verdict"),
+                    "summary": e.get("summary"),
+                }
+                for e in data.get("evaluations", [])
+            ],
+        }
+        falsification_path.write_text(strict_json_dumps(falsification_data, indent=2), encoding="utf-8")
+
+        # 6. Update manifest with payload hashes
+        manifest = data.get("manifest") or {}
+        manifest["benchmark_plan_hash"] = proto_hash
+        manifest["benchmark_config_hash"] = proto_hash
+        manifest["workload_fixture_hash"] = cases_hash
+        manifest["cases_hash"] = cases_hash
+        manifest["fixture_manifest_hash"] = cases_hash
+        manifest["candidate_trace_hash"] = c_trace_hash
+        manifest["baseline_trace_hash"] = b_trace_hash
+        manifest["raw_trace_hash"] = raw_trace_hash
+        manifest["controls_trace_hash"] = ctrl_trace_hash
+        manifest["code_git_sha"] = git_commit_sha
+        manifest["trial_count"] = manifest.get(
+            "trial_count",
+            len(data.get("evaluations", [{}])[0].get("candidate_results", [])) if data.get("evaluations") else 0,
+        )
+
+        # 7. File hashes for all supporting bundle artifacts
+        file_hashes: dict[str, str] = {
+            "report.md": compute_file_sha256(md_path),
+            "report.html": compute_file_sha256(html_path),
+            "baseline-traces.jsonl": b_trace_hash,
+            "candidate-traces.jsonl": c_trace_hash,
+            "raw-traces.jsonl": raw_trace_hash,
+            "controls-traces.jsonl": ctrl_trace_hash,
+            "cases.jsonl": cases_hash,
+            "protocol.json": proto_hash,
+            "benchmark-plan.json": proto_hash,
+            "git-commit.txt": git_commit_hash,
+            "environment.json": env_hash,
+            "falsification.json": compute_file_sha256(falsification_path),
+        }
+        manifest["file_hashes"] = dict(file_hashes)
+        data["manifest"] = dict(manifest)
+
+        # 8. Write result.json and benchmark_result.json once
+        result_path = staging_dir / "result.json"
+        result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
+        res_hash = compute_file_sha256(result_path)
+
+        bm_result_path = staging_dir / "benchmark_result.json"
+        bm_result_path.write_text(strict_json_dumps(data, indent=2), encoding="utf-8")
+        bm_res_hash = compute_file_sha256(bm_result_path)
+
+        # 9. Set result_hash on external manifest and write manifest.json
+        manifest["result_hash"] = res_hash
+        manifest_path = staging_dir / "manifest.json"
+        manifest_path.write_text(strict_json_dumps(manifest, indent=2), encoding="utf-8")
+
+        # 9b. Detached seal manifest.sig
+        manifest_hash = compute_file_sha256(manifest_path)
+        manifest_sig_path = staging_dir / "manifest.sig"
+        manifest_sig_path.write_text(f"{manifest_hash}\n", encoding="utf-8")
+
+        # 10. Checksum bundle.sha256 file
+        all_checksums = dict(file_hashes)
+        all_checksums["result.json"] = res_hash
+        all_checksums["benchmark_result.json"] = bm_res_hash
+        all_checksums["manifest.json"] = manifest_hash
+        all_checksums["manifest.sig"] = compute_file_sha256(manifest_sig_path)
+        bundle_sha_path = staging_dir / "bundle.sha256"
+        checksum_lines = [f"{hash_val}  {fname}" for fname, hash_val in sorted(all_checksums.items())]
+        bundle_sha_path.write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
+
+        # 11. Atomic swap / move staging dir to final destination
+        if final_out.exists():
+            shutil.rmtree(final_out)
+        staging_dir.rename(final_out)
+
+        return {
+            "json": final_out / "result.json",
+            "markdown": final_out / "report.md",
+            "html": final_out / "report.html",
+            "manifest": final_out / "manifest.json",
+            "manifest_sig": final_out / "manifest.sig",
+            "bundle_sha": final_out / "bundle.sha256",
+        }
+    except Exception:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+
 def save_all_reports(
     suite_result: SuiteResult,
-    out_dir: Union[str, Path],
-) -> Dict[str, Path]:
-    """Generate and save all report artifacts (MD, HTML, JSON, CSVs, SVGs)."""
+    out_dir: str | Path,
+) -> dict[str, Path]:
+    """Generate and save all simulation report artifacts (MD, HTML, JSON, CSVs, SVGs)."""
     p_out = Path(out_dir)
     p_out.mkdir(parents=True, exist_ok=True)
 
-    # 1. JSON
     json_path = p_out / "summary_report.json"
     suite_result.save_json(json_path)
 
-    # 2. Markdown Evidence Log
     md_path = p_out / "EVIDENCE_LOG.md"
     md_content = generate_markdown_evidence_log(suite_result)
     md_path.write_text(md_content, encoding="utf-8")
 
-    # 3. HTML Dashboard
     html_path = p_out / "dashboard.html"
     html_content = generate_html_dashboard(suite_result)
     html_path.write_text(html_content, encoding="utf-8")
 
-    # 4. CSVs
     saved_csvs = suite_result.save_csvs(p_out)
 
-    # 5. SVGs
     charts_dir = p_out / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -499,46 +910,6 @@ def save_all_reports(
         generate_workload_bar_chart([w.to_dict() for w in suite_result.workloads.values()]),
         encoding="utf-8",
     )
-
-    # Save individual experiment charts
-    e1 = suite_result.experiments.get("E1")
-    if e1 and e1.rows:
-        e1_path = charts_dir / "e1_fanout.svg"
-        e1_series = {
-            "P50 Speedup": [(r["independent_calls"], r["p50_speedup"]) for r in e1.rows if isinstance(r["independent_calls"], (int, float))],
-            "P95 Speedup": [(r["independent_calls"], r["p95_speedup"]) for r in e1.rows if isinstance(r["independent_calls"], (int, float))],
-        }
-        e1_path.write_text(generate_speedup_line_chart("E1: DAG Parallel Fan-out Speedup", "Independent Calls", "Speedup Factor", e1_series), encoding="utf-8")
-
-    e2 = suite_result.experiments.get("E2")
-    if e2 and e2.rows:
-        e2_path = charts_dir / "e2_fusion.svg"
-        e2_series = {
-            "P50 Speedup": [(r["dependent_steps"], r["p50_speedup"]) for r in e2.rows if isinstance(r["dependent_steps"], (int, float))],
-            "P95 Speedup": [(r["dependent_steps"], r["p95_speedup"]) for r in e2.rows if isinstance(r["dependent_steps"], (int, float))],
-        }
-        e2_path.write_text(generate_speedup_line_chart("E2: Workflow Fusion Speedup", "Dependent Steps", "Speedup Factor", e2_series), encoding="utf-8")
-
-    e3 = suite_result.experiments.get("E3")
-    if e3 and e3.rows:
-        e3_path = charts_dir / "e3_speculation.svg"
-        e3_modes = {}
-        for r in e3.rows:
-            mode = r.get("contention_mode")
-            acc = r.get("prediction_accuracy")
-            spd = r.get("p50_speedup")
-            if mode and acc is not None and spd is not None and mode != "confidence_gated":
-                e3_modes.setdefault(mode, []).append((acc, spd))
-        e3_path.write_text(generate_speedup_line_chart("E3: Speculation Speedup by Contention Mode", "Prediction Accuracy", "P50 Speedup", e3_modes), encoding="utf-8")
-
-    e4 = suite_result.experiments.get("E4")
-    if e4 and e4.rows:
-        e4_path = charts_dir / "e4_commit.svg"
-        e4_series = {
-            "P95 CCL Speedup": [(r["commit_fraction"], r["p95_speedup"]) for r in e4.rows],
-            "P95 Tool-Start Speedup": [(r["commit_fraction"], r["tool_start_speedup_p95"]) for r in e4.rows],
-        }
-        e4_path.write_text(generate_speedup_line_chart("E4: Commit-Horizon Dispatch Speedup", "Commit Fraction", "Speedup Factor", e4_series), encoding="utf-8")
 
     artifacts = {
         "json": json_path,

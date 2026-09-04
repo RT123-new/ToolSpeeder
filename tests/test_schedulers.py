@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-import time
 import unittest
 
-from toolspeed.adapters.base import LLMDecision, StreamingChunk, ToolRegistry
+from toolspeed.adapters.base import LLMDecision, ToolRegistry
 from toolspeed.adapters.mock_models import MockScriptedLLM
 from toolspeed.adapters.mock_tools import (
     MockToolAdapter,
@@ -14,19 +12,18 @@ from toolspeed.adapters.mock_tools import (
 )
 from toolspeed.core.types import (
     EventType,
-    GuardrailMetrics,
     Task,
     ToolCall,
-    ToolResult,
     ToolSpec,
 )
-from toolspeed.schedulers.base import SchedulerConfig
 from toolspeed.schedulers.b1_sync_react import SyncReActScheduler
 from toolspeed.schedulers.b2_native_parallel import NativeParallelScheduler
 from toolspeed.schedulers.b4_oracle_dag import OracleDAGScheduler
 from toolspeed.schedulers.b5_handwritten import HandwrittenWorkflowScheduler
-from toolspeed.schedulers.e1_dag_scheduler import DAGScheduler, ToolDAG
-from toolspeed.schedulers.e2_jit_fusion import FusedKernel, JITFusionScheduler
+from toolspeed.schedulers.base import SchedulerConfig
+from toolspeed.schedulers.composite import CompositeScheduler
+from toolspeed.schedulers.e1_dag_scheduler import DAGScheduler
+from toolspeed.schedulers.e2_jit_fusion import JITFusionScheduler
 from toolspeed.schedulers.e3_speculation import SpeculativeReadScheduler
 from toolspeed.schedulers.e4_commit_horizon import CommitHorizonScheduler
 from toolspeed.schedulers.e5_action_bytecode import (
@@ -37,11 +34,9 @@ from toolspeed.schedulers.phase2_cache import (
     CacheScheduler,
     ToolResultCache,
 )
-from toolspeed.schedulers.composite import CompositeScheduler
 
 
 class TestToolSpeedSchedulers(unittest.TestCase):
-
     def setUp(self) -> None:
         self.registry = ToolRegistry()
         for tool in create_standard_mock_registry().values():
@@ -79,6 +74,8 @@ class TestToolSpeedSchedulers(unittest.TestCase):
         self.assertEqual(len(result.tool_calls), 1)
         self.assertEqual(len(result.tool_results), 1)
         self.assertFalse(result.tool_results[0].cached)
+        self.assertIsNotNone(result.ccl_ms)
+        assert result.ccl_ms is not None
         self.assertGreater(result.ccl_ms, 0.0)
 
     def test_b1_sync_react_sequential_ordering(self) -> None:
@@ -167,7 +164,11 @@ class TestToolSpeedSchedulers(unittest.TestCase):
         task = Task(
             prompt="Run compiled user fetch",
             context={"user_id": "42"},
-            expected_output={"user": {"user_id": "42", "name": "User_42", "tier": "gold"}, "orders": {"orders": [{"order_id": "ord_42_1", "total": 99.5}]}, "status": "compiled_complete"},
+            expected_output={
+                "user": {"user_id": "42", "name": "User_42", "tier": "gold"},
+                "orders": {"orders": [{"order_id": "ord_42_1", "total": 99.5}]},
+                "status": "compiled_complete",
+            },
         )
 
         llm = MockScriptedLLM()
@@ -216,7 +217,11 @@ class TestToolSpeedSchedulers(unittest.TestCase):
         task = Task(
             prompt="Fetch user profile and orders for user 123",
             context={"user_id": "123"},
-            expected_output={"user": {"user_id": "123", "name": "User_123", "tier": "gold"}, "orders": {"orders": [{"order_id": "ord_123_1", "total": 99.5}]}, "fused": True},
+            expected_output={
+                "user": {"user_id": "123", "name": "User_123", "tier": "gold"},
+                "orders": {"orders": [{"order_id": "ord_123_1", "total": 99.5}]},
+                "fused": True,
+            },
         )
 
         llm = MockScriptedLLM()
@@ -237,7 +242,9 @@ class TestToolSpeedSchedulers(unittest.TestCase):
         )
         custom_registry = ToolRegistry()
         custom_registry.register(error_tool)
-        custom_registry.register(self.registry.get("fetch_orders"))
+        fetch_orders = self.registry.get("fetch_orders")
+        assert fetch_orders is not None
+        custom_registry.register(fetch_orders)
 
         llm = MockScriptedLLM(
             decision_steps=[
@@ -269,17 +276,19 @@ class TestToolSpeedSchedulers(unittest.TestCase):
         """Test E3 speculative hit when draft predictor matches model decision."""
         llm = MockScriptedLLM(
             decision_steps=[
-                LLMDecision(
-                    tool_calls=[ToolCall(name="web_search", arguments={"query": "python performance"})]
-                ),
+                LLMDecision(tool_calls=[ToolCall(name="web_search", arguments={"query": "python performance"})]),
                 LLMDecision(final_answer="Search results analyzed"),
             ],
-            draft_predictor_fn=lambda task, hist: ToolCall(
-                name="web_search",
-                arguments={"query": "python performance"},
-                is_speculative=True,
-                speculation_confidence=0.95,
-            ) if len(hist) == 0 else None,
+            draft_predictor_fn=lambda task, hist: (
+                ToolCall(
+                    name="web_search",
+                    arguments={"query": "python performance"},
+                    is_speculative=True,
+                    speculation_confidence=0.95,
+                )
+                if len(hist) == 0
+                else None
+            ),
             simulated_decision_ms=30.0,
         )
 
@@ -301,9 +310,7 @@ class TestToolSpeedSchedulers(unittest.TestCase):
         """Test E3 cancels running speculative call if main model chooses different tool."""
         llm = MockScriptedLLM(
             decision_steps=[
-                LLMDecision(
-                    tool_calls=[ToolCall(name="fetch_user", arguments={"user_id": "abc"})]
-                ),
+                LLMDecision(tool_calls=[ToolCall(name="fetch_user", arguments={"user_id": "abc"})]),
                 LLMDecision(final_answer="Done"),
             ],
             draft_predictor_fn=lambda task, hist: ToolCall(
@@ -394,7 +401,7 @@ class TestToolSpeedSchedulers(unittest.TestCase):
         self.assertEqual(decoded.name, original.name)
         self.assertEqual(decoded.arguments["query"], original.arguments["query"])
 
-        json_len, bc_len, ratio = codec.calculate_compression_ratio(original)
+        _json_len, _bc_len, ratio = codec.calculate_compression_ratio(original)
         self.assertGreater(ratio, 1.5)  # Significant compression
 
     def test_e5_action_bytecode_scheduler(self) -> None:
@@ -427,10 +434,11 @@ class TestToolSpeedSchedulers(unittest.TestCase):
         out1, hit1, fresh1 = cache.get("web_search", {"query": "apple inc revenue"})
         self.assertTrue(hit1)
         self.assertTrue(fresh1)
+        assert out1 is not None
         self.assertEqual(out1["revenue"], 383e9)
 
         # Semantic match (different spacing / case)
-        out2, hit2, fresh2 = cache.get("web_search", {"query": "  Apple  INC   Revenue  "})
+        _out2, hit2, fresh2 = cache.get("web_search", {"query": "  Apple  INC   Revenue  "})
         self.assertTrue(hit2)
         self.assertTrue(fresh2)
 
@@ -438,12 +446,12 @@ class TestToolSpeedSchedulers(unittest.TestCase):
         """Test that executing a mutation tool invalidates related cached reads."""
         cache = ToolResultCache(default_ttl_seconds=60.0)
         cache.put("execute_payment", {"order_id": "ord_1", "amount": 50}, {"status": "paid"})
-        
+
         # Invalidate on write
         invalidated = cache.invalidate_tool("execute_payment")
         self.assertGreaterEqual(invalidated, 1)
 
-        out, hit, _ = cache.get("execute_payment", {"order_id": "ord_1", "amount": 50})
+        _out, hit, _ = cache.get("execute_payment", {"order_id": "ord_1", "amount": 50})
         self.assertFalse(hit)
 
     def test_phase2_cache_scheduler(self) -> None:
@@ -480,12 +488,16 @@ class TestToolSpeedSchedulers(unittest.TestCase):
                 ),
                 LLMDecision(final_answer="Composite test successful"),
             ],
-            draft_predictor_fn=lambda task, hist: ToolCall(
-                name="fetch_user",
-                arguments={"user_id": "comp_1"},
-                is_speculative=True,
-                speculation_confidence=0.90,
-            ) if len(hist) == 0 else None,
+            draft_predictor_fn=lambda task, hist: (
+                ToolCall(
+                    name="fetch_user",
+                    arguments={"user_id": "comp_1"},
+                    is_speculative=True,
+                    speculation_confidence=0.90,
+                )
+                if len(hist) == 0
+                else None
+            ),
             simulated_decision_ms=20.0,
             commit_horizon_fraction=0.3,
         )

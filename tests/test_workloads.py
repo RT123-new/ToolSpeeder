@@ -1,9 +1,8 @@
 """Unit tests for all 7 ToolSpeed workload families (W1 to W7)."""
 
-import asyncio
 import unittest
 
-from toolspeed.core.types import ExecutionTrace, ToolCall, ToolResult
+from toolspeed.core.types import ExecutionTrace, ToolCall
 from toolspeed.workloads import (
     W1IndependentWorkload,
     W2ChainsWorkload,
@@ -109,17 +108,30 @@ class TestWorkloadFamilies(unittest.IsolatedAsyncioTestCase):
             elif risk_score < 75:
                 s1_call = ToolCall(tool_name="request_stepup_auth", arguments={"tx_id": tx_id})
                 s1_res = await tools["request_stepup_auth"].execute(s1_call)
-                s2_call = ToolCall(tool_name="verify_stepup_response", arguments={"challenge_id": s1_res.result["challenge_id"], "code": "123456"})
+                s2_call = ToolCall(
+                    tool_name="verify_stepup_response",
+                    arguments={"challenge_id": s1_res.result["challenge_id"], "code": "123456"},
+                )
                 await tools["verify_stepup_response"].execute(s2_call)
                 calls.extend([s1_call, s2_call])
-                output = {"tx_id": tx_id, "branch": "medium", "final_status": "STEPUP_VERIFIED", "risk_score": risk_score}
+                output = {
+                    "tx_id": tx_id,
+                    "branch": "medium",
+                    "final_status": "STEPUP_VERIFIED",
+                    "risk_score": risk_score,
+                }
             else:
                 q_call = ToolCall(tool_name="quarantine_transaction", arguments={"tx_id": tx_id})
                 await tools["quarantine_transaction"].execute(q_call)
                 f_call = ToolCall(tool_name="notify_fraud_team", arguments={"tx_id": tx_id, "risk_score": risk_score})
                 await tools["notify_fraud_team"].execute(f_call)
                 calls.extend([q_call, f_call])
-                output = {"tx_id": tx_id, "branch": "high", "final_status": "QUARANTINED_AND_FLAGGED", "risk_score": risk_score}
+                output = {
+                    "tx_id": tx_id,
+                    "branch": "high",
+                    "final_status": "QUARANTINED_AND_FLAGGED",
+                    "risk_score": risk_score,
+                }
 
             trace = ExecutionTrace(task_id=task.task_id, tool_calls=calls, success=True)
             valid, msg, _ = validator.validate(task, output, trace)

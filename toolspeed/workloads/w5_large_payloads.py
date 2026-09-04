@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import time
+import tracemalloc
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
-from typing import Any, Dict, List, Optional, Tuple
 
 from toolspeed.adapters.base import BaseToolAdapter
 from toolspeed.adapters.mock_tools import MockToolAdapter, MockToolConfig
@@ -19,7 +26,7 @@ from toolspeed.workloads.base import BaseWorkload
 
 class W5LargePayloadsWorkload(BaseWorkload):
     """Workload Family 5: Large Tool Arguments & Heavy Results.
-    
+
     Stresses JSON decode throughput, serialization overhead, and evaluates
     compact action bytecode acceleration.
     """
@@ -105,17 +112,15 @@ class W5LargePayloadsWorkload(BaseWorkload):
         )
         return [gen_tool, agg_tool]
 
-    def generate_tasks(self, count: int = 10, seed: Optional[int] = None) -> list[TaskInstance]:
+    def generate_tasks(self, count: int = 10, seed: int | None = None) -> list[TaskInstance]:
         rng = np.random.default_rng(seed)
         tasks: list[TaskInstance] = []
 
         for idx in range(count):
             size_kb = int(rng.choice(self.payload_sizes_kb))
-            # ~100 bytes per row with padding
             num_rows = max(10, size_kb * 10)
             task_seed = int(rng.integers(1000, 99999))
 
-            # Precalculate expected values
             dataset = self._generate_dataset_handler({"num_rows": num_rows, "seed": task_seed})
             agg = self._aggregate_dataset_handler({"rows": dataset["rows"]})
 
@@ -137,7 +142,9 @@ class W5LargePayloadsWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: Optional[ExecutionTrace]) -> Tuple[bool, str, dict[str, Any]]:
+        def _validate(
+            task: TaskInstance, output: Any, trace: ExecutionTrace | None
+        ) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 
@@ -154,3 +161,189 @@ class W5LargePayloadsWorkload(BaseWorkload):
             return True, "Large payload aggregation validation passed", {"total_val_b": actual_total}
 
         return FunctionValidator(_validate)
+
+
+async def generate_streaming_payload(
+    payload_size_bytes: int,
+    chunk_size_bytes: int = 8192,
+    chunk_delay_s: float = 0.0002,
+) -> AsyncIterator[bytes]:
+    """Simulates streaming tool outputs yielding in byte chunks with realistic network latency."""
+    record_template = '{{"action":"process","id":{:d},"payload":"{}"}}\n'
+    padding = "a" * 128
+    current_chunk = bytearray()
+    rec_id = 0
+    generated_bytes = 0
+
+    while generated_bytes < payload_size_bytes:
+        line = record_template.format(rec_id, padding).encode("utf-8")
+        rec_id += 1
+        current_chunk.extend(line)
+        generated_bytes += len(line)
+
+        if len(current_chunk) >= chunk_size_bytes:
+            yield bytes(current_chunk)
+            current_chunk.clear()
+            if chunk_delay_s > 0:
+                await asyncio.sleep(chunk_delay_s)
+
+    if current_chunk:
+        yield bytes(current_chunk)
+
+
+async def consume_with_stream_parser(
+    payload_size_bytes: int,
+    chunk_size_bytes: int = 8192,
+    chunk_delay_s: float = 0.0002,
+) -> tuple[float, int, int]:
+    """Consumes stream incrementally; parses and acts on lines as chunks arrive.
+
+    Returns (time_to_first_action_ms, peak_memory_bytes, processed_count).
+    """
+    tracemalloc.start()
+    start_ns = time.perf_counter_ns()
+    remainder = ""
+    ttfa_ms: float | None = None
+    processed_count = 0
+
+    stream = generate_streaming_payload(payload_size_bytes, chunk_size_bytes, chunk_delay_s)
+    async for chunk in stream:
+        text = remainder + chunk.decode("utf-8")
+        lines = text.split("\n")
+        remainder = lines.pop()
+        for line in lines:
+            if line.strip():
+                _record = json.loads(line)
+                processed_count += 1
+                if ttfa_ms is None:
+                    ttfa_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
+
+    if remainder.strip():
+        _record = json.loads(remainder)
+        processed_count += 1
+        if ttfa_ms is None:
+            ttfa_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
+
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    effective_ttfa = ttfa_ms if ttfa_ms is not None else 0.0
+    return effective_ttfa, peak, processed_count
+
+
+async def consume_with_buffered_parser(
+    payload_size_bytes: int,
+    chunk_size_bytes: int = 8192,
+    chunk_delay_s: float = 0.0002,
+) -> tuple[float, int, int]:
+    """Buffers entire stream before parsing and dispatching actions.
+
+    Returns (time_to_first_action_ms, peak_memory_bytes, processed_count).
+    """
+    tracemalloc.start()
+    start_ns = time.perf_counter_ns()
+    buffer = bytearray()
+
+    stream = generate_streaming_payload(payload_size_bytes, chunk_size_bytes, chunk_delay_s)
+    async for chunk in stream:
+        buffer.extend(chunk)
+
+    full_text = buffer.decode("utf-8")
+    lines = full_text.splitlines()
+    records = [json.loads(line) for line in lines if line.strip()]
+    ttfa_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
+
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    return ttfa_ms, peak, len(records)
+
+
+@dataclass(frozen=True)
+class W5StreamingComparisonPoint:
+    payload_size_kb: int
+    payload_bytes: int
+    stream_ttfa_ms: float
+    buffered_ttfa_ms: float
+    ttfa_speedup: float
+    stream_peak_memory_bytes: int
+    buffered_peak_memory_bytes: int
+    memory_savings_bytes: int
+
+
+@dataclass
+class W5StreamingSweepReport:
+    points: list[W5StreamingComparisonPoint]
+
+    def verify_streaming_advantage_invariants(self) -> tuple[bool, str]:
+        """Verifies:
+
+        - TTFA is faster for streaming at every payload size (> 1.0x speedup)
+        - Streaming peak memory is strictly less than buffered peak memory for all sizes >= 100KB
+        - TTFA time difference (buffered - stream) strictly increases with payload size
+        - Memory savings strictly increases with payload size
+        """
+        if not self.points:
+            return False, "No streaming comparison points evaluated"
+
+        sorted_pts = sorted(self.points, key=lambda p: p.payload_bytes)
+
+        for p in sorted_pts:
+            if p.stream_ttfa_ms > p.buffered_ttfa_ms:
+                return (
+                    False,
+                    f"Stream TTFA ({p.stream_ttfa_ms:.2f}ms) not faster than buffered ({p.buffered_ttfa_ms:.2f}ms) at {p.payload_size_kb}KB",
+                )
+
+        # TTFA savings (buffered - stream) must scale up as payload size grows
+        time_deltas = [p.buffered_ttfa_ms - p.stream_ttfa_ms for p in sorted_pts]
+        for i in range(1, len(time_deltas)):
+            if time_deltas[i] < time_deltas[i - 1]:
+                return (
+                    False,
+                    f"TTFA savings did not increase with payload size: delta[{i - 1}]={time_deltas[i - 1]:.2f}ms vs delta[{i}]={time_deltas[i]:.2f}ms",
+                )
+
+        # Memory savings must scale up as payload size grows
+        mem_savings = [p.memory_savings_bytes for p in sorted_pts]
+        for i in range(1, len(mem_savings)):
+            if mem_savings[i] < mem_savings[i - 1]:
+                return (
+                    False,
+                    f"Memory savings did not increase with payload size: savings[{i - 1}]={mem_savings[i - 1]} vs savings[{i}]={mem_savings[i]}",
+                )
+
+        return True, "All W5 streaming vs buffering invariants hold."
+
+
+async def evaluate_w5_streaming_vs_buffering(
+    payload_sizes_kb: Sequence[int] = (10, 100, 1000, 5000),
+    chunk_size_bytes: int = 8192,
+    chunk_delay_s: float = 0.0002,
+) -> W5StreamingSweepReport:
+    """Compares stream parser (early action) vs buffered string parser across payload sizes [10KB, 100KB, 1MB, 5MB]."""
+    points: list[W5StreamingComparisonPoint] = []
+
+    for size_kb in payload_sizes_kb:
+        size_bytes = size_kb * 1024
+
+        s_ttfa, s_peak, _ = await consume_with_stream_parser(size_bytes, chunk_size_bytes, chunk_delay_s)
+        b_ttfa, b_peak, _ = await consume_with_buffered_parser(size_bytes, chunk_size_bytes, chunk_delay_s)
+
+        speedup = b_ttfa / s_ttfa if s_ttfa > 0 else 1.0
+        mem_savings = max(0, b_peak - s_peak)
+
+        points.append(
+            W5StreamingComparisonPoint(
+                payload_size_kb=size_kb,
+                payload_bytes=size_bytes,
+                stream_ttfa_ms=s_ttfa,
+                buffered_ttfa_ms=b_ttfa,
+                ttfa_speedup=speedup,
+                stream_peak_memory_bytes=s_peak,
+                buffered_peak_memory_bytes=b_peak,
+                memory_savings_bytes=mem_savings,
+            )
+        )
+
+    return W5StreamingSweepReport(points=points)

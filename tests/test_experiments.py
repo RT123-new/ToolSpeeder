@@ -3,44 +3,39 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
+
 import numpy as np
 
-from toolspeed.experiments.runner import (
-    LatencyProfile,
-    MetricSummary,
-    ExperimentResult,
-    FalsificationVerdict,
-    HypothesisCheck,
-    WorkloadFamily,
-    compute_summary,
-    samples,
-    compute_percentiles,
-    bootstrap_confidence_interval,
-)
+from toolspeed import cli
 from toolspeed.experiments.e1_dag_runner import E1DAGExperiment, run_e1_experiment
 from toolspeed.experiments.e2_fusion_runner import E2FusionExperiment, run_e2_experiment
 from toolspeed.experiments.e3_spec_runner import E3SpeculationExperiment, run_e3_experiment
 from toolspeed.experiments.e4_commit_runner import E4CommitHorizonExperiment, run_e4_experiment
 from toolspeed.experiments.e5_bytecode_runner import E5BytecodeExperiment, run_e5_experiment
-from toolspeed.experiments.full_suite import SuiteRunner, SuiteResult, run_full_suite
+from toolspeed.experiments.full_suite import SuiteRunner
+from toolspeed.experiments.runner import (
+    LatencyProfile,
+    bootstrap_confidence_interval,
+    compute_percentiles,
+    compute_summary,
+    samples,
+)
 from toolspeed.visualization.charts import (
-    generate_speedup_line_chart,
-    generate_cdf_chart,
-    generate_workload_bar_chart,
-    ascii_sparkline,
     ascii_bar_chart,
+    ascii_sparkline,
     ascii_table,
+    generate_cdf_chart,
+    generate_speedup_line_chart,
+    generate_workload_bar_chart,
 )
 from toolspeed.visualization.report import (
-    generate_markdown_evidence_log,
     generate_html_dashboard,
-    generate_json_summary,
+    generate_markdown_evidence_log,
     save_all_reports,
 )
-import toolspeed.cli as cli
 
 
 class TestLatencyProfileAndRunner(unittest.TestCase):
@@ -351,26 +346,31 @@ class TestCLI(unittest.TestCase):
 
     def test_cli_run_e1(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            ret = cli.main(["run", "--experiment", "e1", "--trials", "150", "--out", tmpdir])
+            ret = cli.main(["simulate", "--experiment", "e1", "--trials", "50", "--out", tmpdir])
             self.assertEqual(ret, 0)
 
     def test_cli_falsify(self):
-        ret = cli.main(["falsify", "--trials", "150"])
-        self.assertEqual(ret, 0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ret_bm = cli.main(["benchmark", "--backend", "replay", "--trials", "2", "--out", tmpdir])
+            self.assertEqual(ret_bm, 0)
+            ret = cli.main(["falsify", "--input", tmpdir])
+            self.assertIn(ret, (0, 2))
 
     def test_cli_benchmark(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            ret = cli.main(["benchmark", "--trials", "150", "--out", tmpdir])
+            ret = cli.main(["benchmark", "--backend", "replay", "--trials", "2", "--out", tmpdir])
             self.assertEqual(ret, 0)
-            self.assertTrue((Path(tmpdir) / "summary_report.json").exists())
-            self.assertTrue((Path(tmpdir) / "EVIDENCE_LOG.md").exists())
-            self.assertTrue((Path(tmpdir) / "dashboard.html").exists())
+            self.assertTrue((Path(tmpdir) / "benchmark_result.json").exists())
+            self.assertTrue((Path(tmpdir) / "report.md").exists())
+            self.assertTrue((Path(tmpdir) / "report.html").exists())
 
     def test_cli_report(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            ret = cli.main(["report", "--trials", "150", "--out", tmpdir])
+            ret_bm = cli.main(["benchmark", "--backend", "replay", "--trials", "2", "--out", tmpdir])
+            self.assertEqual(ret_bm, 0)
+            ret = cli.main(["report", "--input", tmpdir, "--out", tmpdir])
             self.assertEqual(ret, 0)
-            self.assertTrue((Path(tmpdir) / "dashboard.html").exists())
+            self.assertTrue((Path(tmpdir) / "report.html").exists())
 
 
 if __name__ == "__main__":

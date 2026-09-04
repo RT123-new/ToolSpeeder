@@ -6,9 +6,10 @@ Zero external dependencies required (no matplotlib required).
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
-import numpy as np
+from collections.abc import Sequence
+from typing import Any
 
+import numpy as np
 
 # Modern color palette
 PALETTE = [
@@ -27,11 +28,7 @@ def _escape_xml(text: Any) -> str:
     """Escape text for XML/SVG safety."""
     s = str(text)
     return (
-        s.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&apos;")
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;")
     )
 
 
@@ -44,7 +41,7 @@ def generate_speedup_line_chart(
     title: str,
     x_label: str,
     y_label: str,
-    series: Dict[str, Sequence[Tuple[float, float]]],
+    series: dict[str, Any] | Any,
     width: int = 800,
     height: int = 480,
     show_baseline_ref: bool = True,
@@ -60,8 +57,8 @@ def generate_speedup_line_chart(
     plot_h = height - margin_top - margin_bottom
 
     # Find min/max ranges
-    all_x: List[float] = []
-    all_y: List[float] = []
+    all_x: list[float] = []
+    all_y: list[float] = []
     for pts in series.values():
         for x, y in pts:
             all_x.append(float(x))
@@ -96,15 +93,15 @@ def generate_speedup_line_chart(
 
     svg_parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="100%" height="100%" style="background:#0f172a;font-family:system-ui,-apple-system,sans-serif;">',
-        f'<style>',
-        f'  .title {{ fill: #f8fafc; font-size: 16px; font-weight: 600; }}',
-        f'  .axis-label {{ fill: #94a3b8; font-size: 12px; }}',
-        f'  .tick-label {{ fill: #64748b; font-size: 11px; }}',
-        f'  .grid {{ stroke: #1e293b; stroke-width: 1; }}',
-        f'  .axis-line {{ stroke: #334155; stroke-width: 1.5; }}',
-        f'  .ref-line {{ stroke: #ef4444; stroke-width: 1.5; stroke-dasharray: 4,4; }}',
-        f'  .legend-text {{ fill: #cbd5e1; font-size: 11px; }}',
-        f'</style>',
+        "<style>",
+        "  .title { fill: #f8fafc; font-size: 16px; font-weight: 600; }",
+        "  .axis-label { fill: #94a3b8; font-size: 12px; }",
+        "  .tick-label { fill: #64748b; font-size: 11px; }",
+        "  .grid { stroke: #1e293b; stroke-width: 1; }",
+        "  .axis-line { stroke: #334155; stroke-width: 1.5; }",
+        "  .ref-line { stroke: #ef4444; stroke-width: 1.5; stroke-dasharray: 4,4; }",
+        "  .legend-text { fill: #cbd5e1; font-size: 11px; }",
+        "</style>",
         # Background card
         f'<rect width="{width}" height="{height}" rx="12" fill="#0f172a"/>',
         # Title
@@ -117,7 +114,9 @@ def generate_speedup_line_chart(
         y_val = min_y + (i / (num_y_ticks - 1)) * (max_y - min_y)
         py = scale_y(y_val)
         svg_parts.append(f'<line x1="{margin_left}" y1="{py}" x2="{margin_left + plot_w}" y2="{py}" class="grid"/>')
-        svg_parts.append(f'<text x="{margin_left - 10}" y="{py + 4}" text-anchor="end" class="tick-label">{y_val:.2f}</text>')
+        svg_parts.append(
+            f'<text x="{margin_left - 10}" y="{py + 4}" text-anchor="end" class="tick-label">{y_val:.2f}</text>'
+        )
 
     # X ticks
     num_x_ticks = 5
@@ -125,20 +124,32 @@ def generate_speedup_line_chart(
         x_val = min_x + (i / (num_x_ticks - 1)) * (max_x - min_x)
         px = scale_x(x_val)
         svg_parts.append(f'<line x1="{px}" y1="{margin_top}" x2="{px}" y2="{margin_top + plot_h}" class="grid"/>')
-        svg_parts.append(f'<text x="{px}" y="{margin_top + plot_h + 20}" text-anchor="middle" class="tick-label">{x_val:.1f}</text>')
+        svg_parts.append(
+            f'<text x="{px}" y="{margin_top + plot_h + 20}" text-anchor="middle" class="tick-label">{x_val:.1f}</text>'
+        )
 
     # Axis Lines
-    svg_parts.append(f'<line x1="{margin_left}" y1="{margin_top + plot_h}" x2="{margin_left + plot_w}" y2="{margin_top + plot_h}" class="axis-line"/>')
-    svg_parts.append(f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_h}" class="axis-line"/>')
+    svg_parts.append(
+        f'<line x1="{margin_left}" y1="{margin_top + plot_h}" x2="{margin_left + plot_w}" y2="{margin_top + plot_h}" class="axis-line"/>'
+    )
+    svg_parts.append(
+        f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_h}" class="axis-line"/>'
+    )
 
     # Reference Line (1.0 Baseline)
     if show_baseline_ref and min_y <= ref_y <= max_y:
         ref_py = scale_y(ref_y)
-        svg_parts.append(f'<line x1="{margin_left}" y1="{ref_py}" x2="{margin_left + plot_w}" y2="{ref_py}" class="ref-line"/>')
-        svg_parts.append(f'<text x="{margin_left + plot_w + 8}" y="{ref_py + 4}" fill="#ef4444" font-size="10px">1.0x Baseline</text>')
+        svg_parts.append(
+            f'<line x1="{margin_left}" y1="{ref_py}" x2="{margin_left + plot_w}" y2="{ref_py}" class="ref-line"/>'
+        )
+        svg_parts.append(
+            f'<text x="{margin_left + plot_w + 8}" y="{ref_py + 4}" fill="#ef4444" font-size="10px">1.0x Baseline</text>'
+        )
 
     # Axis Labels
-    svg_parts.append(f'<text x="{margin_left + plot_w / 2}" y="{height - 15}" text-anchor="middle" class="axis-label">{_escape_xml(x_label)}</text>')
+    svg_parts.append(
+        f'<text x="{margin_left + plot_w / 2}" y="{height - 15}" text-anchor="middle" class="axis-label">{_escape_xml(x_label)}</text>'
+    )
     svg_parts.append(
         f'<text x="20" y="{margin_top + plot_h / 2}" text-anchor="middle" transform="rotate(-90 20 {margin_top + plot_h / 2})" class="axis-label">{_escape_xml(y_label)}</text>'
     )
@@ -154,9 +165,11 @@ def generate_speedup_line_chart(
         path_d = []
         for i, (x, y) in enumerate(sorted_pts):
             px, py = scale_x(x), scale_y(y)
-            path_d.append(f'{"M" if i == 0 else "L"}{px:.1f},{py:.1f}')
+            path_d.append(f"{'M' if i == 0 else 'L'}{px:.1f},{py:.1f}")
 
-        svg_parts.append(f'<path d="{" ".join(path_d)}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linejoin="round"/>')
+        svg_parts.append(
+            f'<path d="{" ".join(path_d)}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linejoin="round"/>'
+        )
 
         # Points
         for x, y in sorted_pts:
@@ -166,9 +179,13 @@ def generate_speedup_line_chart(
             )
 
         # Legend
-        svg_parts.append(f'<line x1="{width - margin_right + 15}" y1="{legend_y}" x2="{width - margin_right + 35}" y2="{legend_y}" stroke="{color}" stroke-width="2.5"/>')
+        svg_parts.append(
+            f'<line x1="{width - margin_right + 15}" y1="{legend_y}" x2="{width - margin_right + 35}" y2="{legend_y}" stroke="{color}" stroke-width="2.5"/>'
+        )
         svg_parts.append(f'<circle cx="{width - margin_right + 25}" cy="{legend_y}" r="3" fill="{color}"/>')
-        svg_parts.append(f'<text x="{width - margin_right + 42}" y="{legend_y + 4}" class="legend-text">{_escape_xml(label)}</text>')
+        svg_parts.append(
+            f'<text x="{width - margin_right + 42}" y="{legend_y + 4}" class="legend-text">{_escape_xml(label)}</text>'
+        )
         legend_y += 22
 
     svg_parts.append("</svg>")
@@ -177,7 +194,7 @@ def generate_speedup_line_chart(
 
 def generate_cdf_chart(
     title: str,
-    datasets: Dict[str, Sequence[float]],
+    datasets: dict[str, Sequence[float]],
     width: int = 800,
     height: int = 480,
     x_unit: str = "ms",
@@ -192,7 +209,7 @@ def generate_cdf_chart(
     plot_h = height - margin_top - margin_bottom
 
     # Find global min/max
-    all_vals: List[float] = []
+    all_vals: list[float] = []
     for data in datasets.values():
         all_vals.extend([float(v) for v in data])
 
@@ -212,15 +229,15 @@ def generate_cdf_chart(
 
     svg_parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="100%" height="100%" style="background:#0f172a;font-family:system-ui,-apple-system,sans-serif;">',
-        f'<style>',
-        f'  .title {{ fill: #f8fafc; font-size: 16px; font-weight: 600; }}',
-        f'  .axis-label {{ fill: #94a3b8; font-size: 12px; }}',
-        f'  .tick-label {{ fill: #64748b; font-size: 11px; }}',
-        f'  .grid {{ stroke: #1e293b; stroke-width: 1; }}',
-        f'  .axis-line {{ stroke: #334155; stroke-width: 1.5; }}',
-        f'  .p95-line {{ stroke: #64748b; stroke-width: 1; stroke-dasharray: 2,2; }}',
-        f'  .legend-text {{ fill: #cbd5e1; font-size: 11px; }}',
-        f'</style>',
+        "<style>",
+        "  .title { fill: #f8fafc; font-size: 16px; font-weight: 600; }",
+        "  .axis-label { fill: #94a3b8; font-size: 12px; }",
+        "  .tick-label { fill: #64748b; font-size: 11px; }",
+        "  .grid { stroke: #1e293b; stroke-width: 1; }",
+        "  .axis-line { stroke: #334155; stroke-width: 1.5; }",
+        "  .p95-line { stroke: #64748b; stroke-width: 1; stroke-dasharray: 2,2; }",
+        "  .legend-text { fill: #cbd5e1; font-size: 11px; }",
+        "</style>",
         f'<rect width="{width}" height="{height}" rx="12" fill="#0f172a"/>',
         f'<text x="{margin_left}" y="35" class="title">{_escape_xml(title)}</text>',
     ]
@@ -230,11 +247,15 @@ def generate_cdf_chart(
     for p in y_probs:
         py = scale_y(p)
         svg_parts.append(f'<line x1="{margin_left}" y1="{py}" x2="{margin_left + plot_w}" y2="{py}" class="grid"/>')
-        svg_parts.append(f'<text x="{margin_left - 10}" y="{py + 4}" text-anchor="end" class="tick-label">{int(p*100)}%</text>')
+        svg_parts.append(
+            f'<text x="{margin_left - 10}" y="{py + 4}" text-anchor="end" class="tick-label">{int(p * 100)}%</text>'
+        )
 
     # P95 reference line
     p95_y = scale_y(0.95)
-    svg_parts.append(f'<line x1="{margin_left}" y1="{p95_y}" x2="{margin_left + plot_w}" y2="{p95_y}" class="p95-line"/>')
+    svg_parts.append(
+        f'<line x1="{margin_left}" y1="{p95_y}" x2="{margin_left + plot_w}" y2="{p95_y}" class="p95-line"/>'
+    )
     svg_parts.append(f'<text x="{margin_left + plot_w + 8}" y="{p95_y + 3}" fill="#94a3b8" font-size="10px">P95</text>')
 
     # X ticks
@@ -243,12 +264,20 @@ def generate_cdf_chart(
         x_val = min_x + (i / (num_x_ticks - 1)) * (max_x - min_x)
         px = scale_x(x_val)
         svg_parts.append(f'<line x1="{px}" y1="{margin_top}" x2="{px}" y2="{margin_top + plot_h}" class="grid"/>')
-        svg_parts.append(f'<text x="{px}" y="{margin_top + plot_h + 20}" text-anchor="middle" class="tick-label">{x_val:.0f}{x_unit}</text>')
+        svg_parts.append(
+            f'<text x="{px}" y="{margin_top + plot_h + 20}" text-anchor="middle" class="tick-label">{x_val:.0f}{x_unit}</text>'
+        )
 
-    svg_parts.append(f'<line x1="{margin_left}" y1="{margin_top + plot_h}" x2="{margin_left + plot_w}" y2="{margin_top + plot_h}" class="axis-line"/>')
-    svg_parts.append(f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_h}" class="axis-line"/>')
+    svg_parts.append(
+        f'<line x1="{margin_left}" y1="{margin_top + plot_h}" x2="{margin_left + plot_w}" y2="{margin_top + plot_h}" class="axis-line"/>'
+    )
+    svg_parts.append(
+        f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_h}" class="axis-line"/>'
+    )
 
-    svg_parts.append(f'<text x="{margin_left + plot_w / 2}" y="{height - 15}" text-anchor="middle" class="axis-label">Latency ({_escape_xml(x_unit)})</text>')
+    svg_parts.append(
+        f'<text x="{margin_left + plot_w / 2}" y="{height - 15}" text-anchor="middle" class="axis-label">Latency ({_escape_xml(x_unit)})</text>'
+    )
     svg_parts.append(
         f'<text x="20" y="{margin_top + plot_h / 2}" text-anchor="middle" transform="rotate(-90 20 {margin_top + plot_h / 2})" class="axis-label">Cumulative Probability</text>'
     )
@@ -274,13 +303,17 @@ def generate_cdf_chart(
             prob = (idx_val + 1) / n_pts
             px = scale_x(x)
             py = scale_y(prob)
-            path_d.append(f'{"M" if i_pt == 0 else "L"}{px:.1f},{py:.1f}')
+            path_d.append(f"{'M' if i_pt == 0 else 'L'}{px:.1f},{py:.1f}")
 
         svg_parts.append(f'<path d="{" ".join(path_d)}" fill="none" stroke="{color}" stroke-width="2.5"/>')
 
         # Legend
-        svg_parts.append(f'<line x1="{width - margin_right + 15}" y1="{legend_y}" x2="{width - margin_right + 35}" y2="{legend_y}" stroke="{color}" stroke-width="2.5"/>')
-        svg_parts.append(f'<text x="{width - margin_right + 42}" y="{legend_y + 4}" class="legend-text">{_escape_xml(label)}</text>')
+        svg_parts.append(
+            f'<line x1="{width - margin_right + 15}" y1="{legend_y}" x2="{width - margin_right + 35}" y2="{legend_y}" stroke="{color}" stroke-width="2.5"/>'
+        )
+        svg_parts.append(
+            f'<text x="{width - margin_right + 42}" y="{legend_y + 4}" class="legend-text">{_escape_xml(label)}</text>'
+        )
         legend_y += 22
 
     svg_parts.append("</svg>")
@@ -288,7 +321,7 @@ def generate_cdf_chart(
 
 
 def generate_workload_bar_chart(
-    workload_data: List[Dict[str, Any]],
+    workload_data: list[dict[str, Any]],
     width: int = 850,
     height: int = 420,
 ) -> str:
@@ -312,14 +345,14 @@ def generate_workload_bar_chart(
 
     svg_parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="100%" height="100%" style="background:#0f172a;font-family:system-ui,-apple-system,sans-serif;">',
-        f'<style>',
-        f'  .title {{ fill: #f8fafc; font-size: 16px; font-weight: 600; }}',
-        f'  .label {{ fill: #cbd5e1; font-size: 12px; font-weight: 500; }}',
-        f'  .val-label {{ fill: #f8fafc; font-size: 11px; font-weight: 600; }}',
-        f'  .grid {{ stroke: #1e293b; stroke-width: 1; }}',
-        f'  .axis-line {{ stroke: #334155; stroke-width: 1.5; }}',
-        f'  .thresh-line {{ stroke: #10B981; stroke-width: 1.5; stroke-dasharray: 4,4; }}',
-        f'</style>',
+        "<style>",
+        "  .title { fill: #f8fafc; font-size: 16px; font-weight: 600; }",
+        "  .label { fill: #cbd5e1; font-size: 12px; font-weight: 500; }",
+        "  .val-label { fill: #f8fafc; font-size: 11px; font-weight: 600; }",
+        "  .grid { stroke: #1e293b; stroke-width: 1; }",
+        "  .axis-line { stroke: #334155; stroke-width: 1.5; }",
+        "  .thresh-line { stroke: #10B981; stroke-width: 1.5; stroke-dasharray: 4,4; }",
+        "</style>",
         f'<rect width="{width}" height="{height}" rx="12" fill="#0f172a"/>',
         f'<text x="{margin_left}" y="35" class="title">Workload Family Latency Speedup (P95 CCL)</text>',
     ]
@@ -332,12 +365,18 @@ def generate_workload_bar_chart(
             break
         px = scale_x(x_val)
         svg_parts.append(f'<line x1="{px}" y1="{margin_top}" x2="{px}" y2="{margin_top + plot_h}" class="grid"/>')
-        svg_parts.append(f'<text x="{px}" y="{margin_top + plot_h + 18}" text-anchor="middle" fill="#64748b" font-size="11px">{x_val:.1f}x</text>')
+        svg_parts.append(
+            f'<text x="{px}" y="{margin_top + plot_h + 18}" text-anchor="middle" fill="#64748b" font-size="11px">{x_val:.1f}x</text>'
+        )
 
     # 1.10x Falsification Threshold Line (10% CCL improvement)
     thresh_x = scale_x(1.111)  # 1 / (1 - 0.10) ~ 1.11x
-    svg_parts.append(f'<line x1="{thresh_x}" y1="{margin_top}" x2="{thresh_x}" y2="{margin_top + plot_h}" class="thresh-line"/>')
-    svg_parts.append(f'<text x="{thresh_x + 4}" y="{margin_top - 8}" fill="#10B981" font-size="10px">10% Falsification Target (1.11x)</text>')
+    svg_parts.append(
+        f'<line x1="{thresh_x}" y1="{margin_top}" x2="{thresh_x}" y2="{margin_top + plot_h}" class="thresh-line"/>'
+    )
+    svg_parts.append(
+        f'<text x="{thresh_x + 4}" y="{margin_top - 8}" fill="#10B981" font-size="10px">10% Falsification Target (1.11x)</text>'
+    )
 
     # Bars
     slot_h = plot_h / max(1, n_bars)
@@ -346,18 +385,24 @@ def generate_workload_bar_chart(
         speedup = float(w.get("p95_speedup", 1.0))
         pct_red = float(w.get("p95_reduction_pct", 0.0))
         bar_w = max(4.0, (speedup / max_x) * plot_w)
-        name = w.get("workload_id", f"W{i+1}")
+        name = w.get("workload_id", f"W{i + 1}")
         desc = w.get("name", "")
         # Color based on performance
         color = "#10B981" if pct_red >= 10.0 else "#F59E0B"
 
-        svg_parts.append(f'<text x="{margin_left - 12}" y="{y + bar_h/2 + 4}" text-anchor="end" class="label">{_escape_xml(name)}</text>')
+        svg_parts.append(
+            f'<text x="{margin_left - 12}" y="{y + bar_h / 2 + 4}" text-anchor="end" class="label">{_escape_xml(name)}</text>'
+        )
         svg_parts.append(
             f'<rect x="{margin_left}" y="{y}" width="{bar_w}" height="{bar_h}" rx="4" fill="{color}"><title>{_escape_xml(desc)}: {speedup:.2f}x ({pct_red:.1f}% reduction)</title></rect>'
         )
-        svg_parts.append(f'<text x="{margin_left + bar_w + 8}" y="{y + bar_h/2 + 4}" class="val-label">{speedup:.2f}x ({pct_red:.1f}%)</text>')
+        svg_parts.append(
+            f'<text x="{margin_left + bar_w + 8}" y="{y + bar_h / 2 + 4}" class="val-label">{speedup:.2f}x ({pct_red:.1f}%)</text>'
+        )
 
-    svg_parts.append(f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_h}" class="axis-line"/>')
+    svg_parts.append(
+        f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_h}" class="axis-line"/>'
+    )
     svg_parts.append("</svg>")
     return "\n".join(svg_parts)
 
@@ -367,7 +412,7 @@ def generate_workload_bar_chart(
 # ============================================================================
 
 
-def ascii_sparkline(values: Sequence[float], width: Optional[int] = None) -> str:
+def ascii_sparkline(values: Sequence[float], width: int | None = None) -> str:
     """Generate compact Unicode sparkline (e.g.  ▂▃▅▆▇█)."""
     if not values:
         return ""
@@ -391,7 +436,7 @@ def ascii_sparkline(values: Sequence[float], width: Optional[int] = None) -> str
 
 
 def ascii_bar_chart(
-    data: Dict[str, float],
+    data: dict[str, float],
     max_bar_width: int = 35,
     unit: str = "",
 ) -> str:
@@ -402,7 +447,7 @@ def ascii_bar_chart(
     if max_val <= 0:
         max_val = 1.0
 
-    max_key_len = max(len(k) for k in data.keys())
+    max_key_len = max(len(k) for k in data)
     lines = []
     for key, val in data.items():
         bar_len = int((val / max_val) * max_bar_width) if max_val > 0 else 0
@@ -412,9 +457,9 @@ def ascii_bar_chart(
 
 
 def ascii_table(
-    headers: List[str],
-    rows: List[List[Any]],
-    alignments: Optional[List[str]] = None,
+    headers: list[str],
+    rows: list[list[Any]],
+    alignments: list[str] | None = None,
 ) -> str:
     """Generate beautiful formatted ASCII text table with box borders."""
     if not headers:
@@ -452,4 +497,4 @@ def ascii_table(
             cells.append(format_cell(val, col_widths[i], alignments[i]))
         body_rows.append("│ " + " │ ".join(cells) + " │")
 
-    return "\n".join([top_border, header_row, header_sep] + body_rows + [bottom_border])
+    return "\n".join([top_border, header_row, header_sep, *body_rows, bottom_border])

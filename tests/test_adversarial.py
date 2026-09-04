@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import struct
 import time
 import unittest
+
 import numpy as np
 
 from toolspeed.adapters.base import (
@@ -27,25 +27,22 @@ from toolspeed.adapters.base import (
 )
 from toolspeed.adapters.mock_models import (
     ActionBytecodeCodec as MockModelsBytecodeCodec,
-    DraftPredictorModel,
+)
+from toolspeed.adapters.mock_models import (
     MockScriptedLLM,
 )
 from toolspeed.adapters.mock_tools import (
     MockToolAdapter,
-    MockToolConfig,
     create_standard_mock_registry,
 )
-from toolspeed.core.guardrails import GuardrailTracker
 from toolspeed.core.profiler import (
     CCLTracker,
     calculate_percentiles,
     compute_speedup,
 )
 from toolspeed.core.rate_limiter import (
-    AsyncConcurrencyLimiter,
-    AsyncTokenBucket,
-    RateLimitError,
     RateLimiter,
+    RateLimitError,
 )
 from toolspeed.core.types import (
     EventType,
@@ -55,18 +52,17 @@ from toolspeed.core.types import (
     ToolResult,
     ToolSpec,
 )
-from toolspeed.experiments.runner import MetricSummary, compute_summary
+from toolspeed.experiments.runner import compute_summary
 from toolspeed.schedulers.base import SchedulerConfig
+from toolspeed.schedulers.composite import CompositeScheduler
 from toolspeed.schedulers.e1_dag_scheduler import DAGScheduler, ToolDAG
-from toolspeed.schedulers.e2_jit_fusion import FusedKernel, JITFusionScheduler
+from toolspeed.schedulers.e2_jit_fusion import JITFusionScheduler
 from toolspeed.schedulers.e3_speculation import SpeculativeReadScheduler
 from toolspeed.schedulers.e4_commit_horizon import CommitHorizonScheduler
 from toolspeed.schedulers.e5_action_bytecode import (
     ActionBytecodeCodec,
-    ActionBytecodeScheduler,
 )
-from toolspeed.schedulers.phase2_cache import CacheScheduler, ToolResultCache
-from toolspeed.schedulers.composite import CompositeScheduler
+from toolspeed.schedulers.phase2_cache import ToolResultCache
 from toolspeed.workloads.w7_side_effects import W7SideEffectsWorkload
 
 
@@ -83,7 +79,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------------------
     def test_adversarial_metric_poisoning_failed_tasks_excluded(self) -> None:
         """Adversarial Attack: Attempt to pollute CCL percentiles with fast-failing tasks.
-        
+
         Verification: CCLTracker and compute_summary MUST strictly exclude failed task
         latencies from P50, P90, P95, and P99 percentiles while penalizing the success rate.
         """
@@ -130,13 +126,19 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
             candidate_success=success_mask,
         )
 
+        self.assertIsNotNone(summary.candidate_success_rate)
+        assert summary.candidate_success_rate is not None
         self.assertAlmostEqual(summary.candidate_success_rate, 0.10)
+        self.assertIsNotNone(summary.candidate_p50_ms)
+        assert summary.candidate_p50_ms is not None
         self.assertGreaterEqual(summary.candidate_p50_ms, 1000.0)
+        self.assertIsNotNone(summary.candidate_p95_ms)
+        assert summary.candidate_p95_ms is not None
         self.assertGreaterEqual(summary.candidate_p95_ms, 1800.0)
 
     def test_adversarial_metric_zero_division_and_empty_arrays(self) -> None:
         """Adversarial Attack: Feed empty arrays, zero latencies, and 100% failure rates.
-        
+
         Verification: No ZeroDivisionError or crash occurs; returns safe defaults.
         """
         # Empty arrays
@@ -149,10 +151,10 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
             baseline_success=empty_bool,
             candidate_success=empty_bool,
         )
-        self.assertEqual(summary.baseline_p50_ms, 0.0)
-        self.assertEqual(summary.candidate_p50_ms, 0.0)
-        self.assertEqual(summary.p50_speedup, 1.0)
-        self.assertEqual(summary.candidate_success_rate, 1.0)
+        self.assertIn(summary.baseline_p50_ms, (0.0, None))
+        self.assertIn(summary.candidate_p50_ms, (0.0, None))
+        self.assertIn(summary.p50_speedup, (1.0, None))
+        self.assertIn(summary.candidate_success_rate, (1.0, None))
 
         # 100% failed candidate
         base_lat = np.array([500.0, 600.0, 700.0])
@@ -166,8 +168,10 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
             baseline_success=base_succ,
             candidate_success=cand_succ,
         )
+        # CCL speedup should NOT report high speedup for failed tasks
         self.assertEqual(summary_fail.candidate_success_rate, 0.0)
-        self.assertEqual(summary_fail.candidate_p50_ms, 0.0)
+        self.assertIn(summary_fail.p95_speedup, (0.0, None))
+        self.assertIn(summary_fail.candidate_p50_ms, (0.0, None))
 
         # calculate_percentiles on empty
         p = calculate_percentiles([])
@@ -182,7 +186,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------------------
     async def test_adversarial_speculative_cancellation_no_leaks(self) -> None:
         """Adversarial Attack: Speculate a slow background read tool that is rejected by LLM.
-        
+
         Verification: In 'cancellable' mode, the background task MUST be cleanly aborted,
         cancelled count incremented exactly once, with zero dangling tasks in event loop.
         """
@@ -203,7 +207,9 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
         )
         reg = ToolRegistry()
         reg.register(slow_tool)
-        reg.register(self.registry.get("fetch_user"))
+        fetch_u = self.registry.get("fetch_user")
+        assert fetch_u is not None
+        reg.register(fetch_u)
 
         # LLM decides to NOT call slow_read_db, but calls fetch_user instead
         llm = MockScriptedLLM(
@@ -214,12 +220,16 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
                 ),
                 LLMDecision(final_answer="Done"),
             ],
-            draft_predictor_fn=lambda task, hist: ToolCall(
-                name="slow_read_db",
-                arguments={"query": "SELECT *"},
-                is_speculative=True,
-                speculation_confidence=0.95,
-            ) if len(hist) == 0 else None,
+            draft_predictor_fn=lambda task, hist: (
+                ToolCall(
+                    name="slow_read_db",
+                    arguments={"query": "SELECT *"},
+                    is_speculative=True,
+                    speculation_confidence=0.95,
+                )
+                if len(hist) == 0
+                else None
+            ),
             simulated_decision_ms=5.0,
         )
 
@@ -242,7 +252,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
 
     async def test_adversarial_speculative_single_slot_tail_contention(self) -> None:
         """Adversarial Attack: Speculate in 'single_slot' contention mode with a miss.
-        
+
         Verification: Subsequent execution waits for speculative task to complete,
         accounting for single_slot tail contention and correctly recording wasted calls.
         """
@@ -253,7 +263,9 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
         )
         reg = ToolRegistry()
         reg.register(spec_tool)
-        reg.register(self.registry.get("fetch_user"))
+        fetch_u2 = self.registry.get("fetch_user")
+        assert fetch_u2 is not None
+        reg.register(fetch_u2)
 
         llm = MockScriptedLLM(
             decision_steps=[
@@ -262,12 +274,16 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
                 ),
                 LLMDecision(final_answer="Contention verified"),
             ],
-            draft_predictor_fn=lambda task, hist: ToolCall(
-                name="spec_tool",
-                arguments={"key": "val"},
-                is_speculative=True,
-                speculation_confidence=0.99,
-            ) if len(hist) == 0 else None,
+            draft_predictor_fn=lambda task, hist: (
+                ToolCall(
+                    name="spec_tool",
+                    arguments={"key": "val"},
+                    is_speculative=True,
+                    speculation_confidence=0.99,
+                )
+                if len(hist) == 0
+                else None
+            ),
             simulated_decision_ms=2.0,
         )
 
@@ -289,7 +305,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------------------
     async def test_adversarial_dag_cyclic_deadlock_recovery(self) -> None:
         """Adversarial Attack: Submit cyclic dependency graph (A -> B -> A).
-        
+
         Verification: DAGScheduler detects unresolvable circular dependencies without hanging
         or deadlocking, cleanly marks unresolvable nodes as failed, and terminates gracefully.
         """
@@ -304,7 +320,11 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
             simulated_decision_ms=2.0,
         )
 
-        task = Task(prompt="Cycle test", expected_output="Recovered from cyclic deadlock")
+        task = Task(
+            prompt="Cycle test",
+            expected_output="Recovered from cyclic deadlock",
+            validator=lambda out, trace=None: out == "Recovered from cyclic deadlock",
+        )
         scheduler = DAGScheduler()
 
         # Should complete swiftly within timeout, not deadlock
@@ -314,7 +334,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
 
     def test_adversarial_dag_parameter_template_robustness(self) -> None:
         """Adversarial Attack: Feed deeply nested, array indexed, missing, and special character references.
-        
+
         Verification: ToolDAG.resolve_arguments extracts arrays, ignores missing refs safely,
         and never raises unhandled exceptions or regex crashes.
         """
@@ -347,8 +367,8 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
             },
         )
         n2 = dag.add_call(child_call)
-        resolved = dag.resolve_arguments(n2)
-
+        resolved, _ = dag.resolve_node_arguments(n2, fail_closed=False)
+        assert resolved is not None
         self.assertEqual(resolved["direct_item"], ["first_item", "second_item"])
         self.assertEqual(resolved["indexed_item"], "zero_idx_item")
         self.assertEqual(resolved["missing_ref"], "$non_existent_node.val")
@@ -358,23 +378,22 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
     # ATTACK 4: JIT Fusion Deoptimization & Context Preservation (Checklist #3)
     # ------------------------------------------------------------------------
     async def test_adversarial_jit_fusion_exception_deopt_bailout(self) -> None:
-        """Adversarial Attack: Fused kernel throws an unhandled RuntimeError / ZeroDivisionError.
-        
-        Verification: JITFusionScheduler catches the exception, emits JIT_FUSION_DEOPT,
+        """Adversarial Attack: Fused declarative kernel step encounters an error or missing tool.
+
+        Verification: JITFusionScheduler catches the error, emits JIT_FUSION_DEOPT,
         records deopt event, and transparently falls back to LLM reasoning.
         """
-        async def crashing_kernel(ctx, tools):
-            raise RuntimeError("Catastrophic kernel memory fault!")
+        from toolspeed.schedulers.e2_jit_fusion import DeclarativeWorkflow, WorkflowNode
 
-        exploding_kernel = FusedKernel(
-            name="exploding_kernel",
-            tool_sequence=["crash_tool"],
-            match_fn=lambda ctx: True,
-            execute_fn=crashing_kernel,
+        exploding_workflow = DeclarativeWorkflow(
+            workflow_id="exploding_kernel",
+            nodes=(
+                WorkflowNode(step_id="crash_step", tool_name="missing_crash_tool", args_template={}, output_key="res"),
+            ),
         )
 
         scheduler = JITFusionScheduler()
-        scheduler.register_kernel(exploding_kernel)
+        scheduler.register_kernel(exploding_workflow)
 
         llm = MockScriptedLLM(
             decision_steps=[
@@ -386,7 +405,11 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
             simulated_decision_ms=2.0,
         )
 
-        task = Task(prompt="Run exploding kernel", expected_output="Safe fallback answer")
+        task = Task(
+            prompt="Run exploding kernel",
+            expected_output="Safe fallback answer",
+            metadata={"workflow": "exploding_kernel"},
+        )
         result = await scheduler.run(task, llm, self.registry)
 
         self.assertTrue(result.success)
@@ -396,21 +419,38 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
 
     async def test_adversarial_jit_fusion_validation_failure_deopt(self) -> None:
         """Adversarial Attack: Fused kernel returns incorrect output that violates task validator.
-        
+
         Verification: Invalid result is NOT returned; scheduler deoptimizes to model reasoning.
         """
-        async def corrupted_kernel(ctx, tools):
-            return {"sum": -99999}, True  # Invalid sum
+        from toolspeed.schedulers.e2_jit_fusion import (
+            DeclarativeWorkflow,
+            WorkflowInvariant,
+            WorkflowNode,
+        )
 
-        bad_kernel = FusedKernel(
-            name="corrupted_kernel",
-            tool_sequence=["corrupted_tool"],
-            match_fn=lambda ctx: True,
-            execute_fn=corrupted_kernel,
+        bad_workflow = DeclarativeWorkflow(
+            workflow_id="corrupted_kernel",
+            nodes=(
+                WorkflowNode(
+                    step_id="step1",
+                    tool_name="fetch_user",
+                    args_template={"user_id": "$context.user_id"},
+                    output_key="user",
+                ),
+            ),
+            invariants=(
+                WorkflowInvariant(
+                    field_path="user.status",
+                    operator="equals",
+                    expected_value="active",
+                    description="User status must be active",
+                ),
+            ),
+            output_mapping={"sum": -99999},
         )
 
         scheduler = JITFusionScheduler()
-        scheduler.register_kernel(bad_kernel)
+        scheduler.register_kernel(bad_workflow)
 
         llm = MockScriptedLLM(
             decision_steps=[
@@ -424,8 +464,10 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
 
         task = Task(
             prompt="Compute sum",
+            context={"user_id": "u1"},
             expected_output={"sum": 100},
             validator=lambda out: isinstance(out, dict) and out.get("sum") == 100,
+            metadata={"workflow": "corrupted_kernel"},
         )
         result = await scheduler.run(task, llm, self.registry)
 
@@ -438,7 +480,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------------------
     def test_adversarial_bytecode_truncated_streams(self) -> None:
         """Adversarial Attack: Feed truncated binary streams and buffer underflows to decoders.
-        
+
         Verification: Both ActionBytecodeCodec decoders raise clean ValueError on truncated input.
         """
         # Test mock_models codec
@@ -467,7 +509,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
 
     def test_adversarial_bytecode_extreme_payloads_and_unicode(self) -> None:
         """Adversarial Attack: Encode large payloads (>64KB), unicode/emojis, nested dicts, and nulls.
-        
+
         Verification: 100% exact round-trip fidelity with zero data loss or corruption.
         """
         codec = ActionBytecodeCodec(self.registry.list_specs())
@@ -507,7 +549,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------------------
     async def test_adversarial_commit_horizon_post_dispatch_argument_mutation(self) -> None:
         """Adversarial Attack: Early-dispatch tool with arg x=1. At final stream, mutate arg to x=999.
-        
+
         Verification: Scheduler flags GUARDRAIL_VIOLATION, cancels the early task,
         and re-executes with the mutated argument.
         """
@@ -583,7 +625,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------------------
     async def test_adversarial_w7_unapproved_side_effects_rejected(self) -> None:
         """Adversarial Attack: Attempt to execute side-effecting financial transfer without approval.
-        
+
         Verification: Tool execution is rejected with error, flagged in guardrails, balance unchanged.
         """
         w7 = W7SideEffectsWorkload()
@@ -592,7 +634,12 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
         # Call without approval
         unapproved_call = ToolCall(
             name="execute_fund_transfer",
-            arguments={"from_account": "acc_001", "to_account": "acc_002", "amount": 500.0, "idempotency_key": "idem_001"},
+            arguments={
+                "from_account": "acc_001",
+                "to_account": "acc_002",
+                "amount": 500.0,
+                "idempotency_key": "idem_001",
+            },
             requires_approval=True,
             is_approved=False,
         )
@@ -600,13 +647,20 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
         res = await tool.execute(unapproved_call)
         self.assertFalse(res.is_success)
         self.assertTrue(res.is_error)
+        self.assertIsNotNone(res.error)
+        assert res.error is not None
         self.assertIn("explicit approval", res.error)
         self.assertEqual(w7.accounts["acc_001"], 10_000.0, "Balance must remain unchanged on unapproved mutation!")
 
         # Approved call succeeds
         approved_call = ToolCall(
             name="execute_fund_transfer",
-            arguments={"from_account": "acc_001", "to_account": "acc_002", "amount": 500.0, "idempotency_key": "idem_001"},
+            arguments={
+                "from_account": "acc_001",
+                "to_account": "acc_002",
+                "amount": 500.0,
+                "idempotency_key": "idem_001",
+            },
             requires_approval=True,
             is_approved=True,
         )
@@ -617,14 +671,16 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
         # Replay with same idempotency key does not deduct balance twice
         res_replay = await tool.execute(approved_call)
         self.assertTrue(res_replay.is_success)
-        self.assertEqual(w7.accounts["acc_001"], 9500.0, "Duplicate idempotency key must not execute duplicate deduction!")
+        self.assertEqual(
+            w7.accounts["acc_001"], 9500.0, "Duplicate idempotency key must not execute duplicate deduction!"
+        )
 
     # ------------------------------------------------------------------------
     # ATTACK 8: Rate Limiter 429 Storm & High Concurrency Backpressure (Checklist #6)
     # ------------------------------------------------------------------------
     async def test_adversarial_rate_limiter_429_storm_and_peak_concurrency(self) -> None:
         """Adversarial Attack: Bombard rate limiter with 100 concurrent bursts exceeding limits.
-        
+
         Verification: RateLimitError raised when reject_on_limit=True; peak concurrency
         never exceeds configured capacity; all locks released cleanly.
         """
@@ -646,7 +702,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
         # Fire 50 concurrent tasks
         results = await asyncio.gather(*[worker(i) for i in range(50)], return_exceptions=True)
         errors = [r for r in results if isinstance(r, (RateLimitError, Exception))]
-        successes = [r for r in results if not isinstance(r, Exception)]
+        [r for r in results if not isinstance(r, Exception)]
 
         self.assertGreater(len(errors), 0, "Burst storm should trigger rate limit rejections")
         self.assertLessEqual(limiter.concurrency_limiter.peak_concurrency, 5)
@@ -656,7 +712,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------------------
     def test_adversarial_cache_ttl_and_write_invalidation(self) -> None:
         """Adversarial Attack: Attempt to serve stale cached reads after TTL expiration or domain write.
-        
+
         Verification: Expired entries return cache miss; write mutations invalidate domain entries.
         """
         cache = ToolResultCache()
@@ -670,7 +726,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
 
         # Sleep past TTL
         time.sleep(0.06)
-        out_exp, hit_expired, fresh_expired = cache.get("get_user", {"id": "u1"})
+        _out_exp, hit_expired, _fresh_expired = cache.get("get_user", {"id": "u1"})
         self.assertFalse(hit_expired, "Strict cache contract must reject expired entries!")
 
         # Invalidate on mutation write
@@ -684,7 +740,7 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------------------
     async def test_adversarial_composite_scheduler_cancellation_teardown(self) -> None:
         """Adversarial Attack: Run CompositeScheduler under full multi-mechanism load and cancel mid-flight.
-        
+
         Verification: All in-flight DAG tasks, speculation tasks, and commit dispatches
         are cleanly cancelled with zero unhandled exceptions or dangling tasks.
         """
@@ -698,12 +754,16 @@ class TestAdversarialStressSuite(unittest.IsolatedAsyncioTestCase):
                     ]
                 )
             ],
-            draft_predictor_fn=lambda task, hist: ToolCall(
-                name="fetch_user",
-                arguments={"user_id": "u1"},
-                is_speculative=True,
-                speculation_confidence=0.95,
-            ) if len(hist) == 0 else None,
+            draft_predictor_fn=lambda task, hist: (
+                ToolCall(
+                    name="fetch_user",
+                    arguments={"user_id": "u1"},
+                    is_speculative=True,
+                    speculation_confidence=0.95,
+                )
+                if len(hist) == 0
+                else None
+            ),
             simulated_decision_ms=50.0,
             commit_horizon_fraction=0.2,
         )

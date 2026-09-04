@@ -1,105 +1,231 @@
-"""Experiment E5: Action Bytecode Engine and Scheduler."""
+"""Experiment E5: Action Bytecode Transport Codec & Execution Scheduler."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+import hashlib
 import json
 import struct
+import time
+from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, ToolRegistry
-from toolspeed.core.types import EventType, ToolCall, ToolResult, ToolSpec
-from toolspeed.schedulers.base import BaseScheduler, ExecutionContext
+from toolspeed.core.types import EventType, ToolCall, ToolSpec
+from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig
 
 
 class ActionBytecodeCodec:
-    """Encodes and decodes ToolCalls into compact binary / token-efficient bytecodes."""
+    """E5a: Compact binary transport codec for tool calls.
 
-    def __init__(self, tool_specs: Optional[List[ToolSpec]] = None) -> None:
-        self.tool_to_opcode: Dict[str, int] = {}
-        self.opcode_to_tool: Dict[int, str] = {}
-        self.tool_arg_order: Dict[str, List[str]] = {}
+    Format:
+      [Version (1B)] [Opcode (2B >H)] [ArgCount (2B >H)]
+      Repeated per argument:
+        [KeyLen (2B >H)] [ValLen (4B >I)] [KeyBytes] [ValBytes (JSON)]
+
+    Enforces:
+      - Max packet size: 64 MB
+      - Max key length: 64 KB
+      - Max value size: 16 MB
+      - Max arguments: 1024
+      - Rejection of duplicate keys
+      - Rejection of unknown opcodes and trailing bytes
+      - No dynamic opcode registration during encode
+    """
+
+    PROTOCOL_VERSION = 0x02
+    MAX_PACKET_SIZE = 64 * 1024 * 1024
+    MAX_KEY_LEN = 65535
+    MAX_VAL_LEN = 16 * 1024 * 1024
+    MAX_ARG_COUNT = 1024
+
+    def __init__(self, tool_specs: list[ToolSpec] | None = None) -> None:
+        self.tool_to_opcode: dict[str, int] = {}
+        self.opcode_to_tool: dict[int, str] = {}
+        self.tool_arg_order: dict[str, list[str]] = {}
+        self._schema_hash: str = ""
 
         if tool_specs:
             for idx, spec in enumerate(tool_specs, start=1):
-                self.register_tool(spec.name, list(spec.parameters.get("properties", {}).keys()) or spec.required_args, opcode=idx)
+                self.register_tool(
+                    spec.name, list(spec.parameters.get("properties", {}).keys()) or spec.required_args, opcode=idx
+                )
+            self._compute_schema_hash(tool_specs)
 
-    def register_tool(self, name: str, arg_order: List[str], opcode: Optional[int] = None) -> int:
+    def _compute_schema_hash(self, tool_specs: list[ToolSpec]) -> None:
+        raw = json.dumps(
+            [{"name": s.name, "params": s.parameters} for s in sorted(tool_specs, key=lambda s: s.name)], sort_keys=True
+        )
+        self._schema_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @property
+    def schema_hash(self) -> str:
+        return self._schema_hash
+
+    def register_tool(self, name: str, arg_order: list[str] | None = None, opcode: int | None = None) -> int:
+        if name in self.tool_to_opcode:
+            return self.tool_to_opcode[name]
+
         op = opcode if opcode is not None else (len(self.tool_to_opcode) + 1)
+        if op in self.opcode_to_tool and self.opcode_to_tool[op] != name:
+            raise ValueError(f"Opcode collision: opcode {op} is already registered to tool '{self.opcode_to_tool[op]}'")
+        if op > 65535 or op <= 0:
+            raise ValueError(f"Opcode out of range: must be 1..65535, got {op}")
+
         self.tool_to_opcode[name] = op
         self.opcode_to_tool[op] = name
-        self.tool_arg_order[name] = list(arg_order)
+        self.tool_arg_order[name] = list(arg_order or [])
         return op
 
-    def encode(self, call: ToolCall) -> bytes:
-        """Encodes a ToolCall into a compact binary packet: [Opcode (1B)] [ArgCount (2B)] [KeyLen (2B), ValLen (4B), Key, Val...]."""
-        tool_name = call.name or call.tool_name or "default_tool"
-        op = self.tool_to_opcode.get(tool_name, 0)
-        if op == 0:
-            # Dynamic register
-            op = self.register_tool(tool_name, list(call.arguments.keys()))
+    def get_packet_schema_hash(self, packet: bytes) -> str:
+        """Extracts schema hash embedded in the bytecode packet header."""
+        if not packet:
+            return ""
+        version = packet[0]
+        if not (version & 0x80):
+            return ""
+        if len(packet) < 3:
+            return ""
+        (sh_len,) = struct.unpack(">H", packet[1:3])
+        if len(packet) < 3 + sh_len:
+            return ""
+        return packet[3 : 3 + sh_len].decode("utf-8")
 
-        # Pack arguments with exact key names and JSON-serialized values
-        payload_parts = []
+    def encode(self, call: ToolCall, schema_hash: str = "") -> bytes:
+        """Encodes a ToolCall into a compact binary packet with optional schema binding."""
+        tool_name = call.name or call.tool_name or "default_tool"
+        op = self.tool_to_opcode.get(tool_name)
+        if op is None:
+            op = self.register_tool(tool_name)
+
+        if len(call.arguments) > self.MAX_ARG_COUNT:
+            raise ValueError(f"Argument count {len(call.arguments)} exceeds maximum limit of {self.MAX_ARG_COUNT}")
+
+        payload_parts: list[bytes] = []
         for k, v in call.arguments.items():
             k_bytes = k.encode("utf-8")
-            v_bytes = json.dumps(v).encode("utf-8")
-            payload_parts.append(
-                struct.pack(">HI", len(k_bytes), len(v_bytes)) + k_bytes + v_bytes
-            )
+            v_bytes = json.dumps(v, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            if len(k_bytes) > self.MAX_KEY_LEN:
+                raise ValueError(f"Argument key '{k}' exceeds maximum length of {self.MAX_KEY_LEN} bytes")
+            if len(v_bytes) > self.MAX_VAL_LEN:
+                raise ValueError(f"Argument value for '{k}' exceeds maximum payload limit of {self.MAX_VAL_LEN} bytes")
+            payload_parts.append(struct.pack(">HI", len(k_bytes), len(v_bytes)) + k_bytes + v_bytes)
 
         body = b"".join(payload_parts)
-        header = struct.pack(">BH", min(255, op), len(call.arguments))
+
+        if schema_hash:
+            sh_bytes = schema_hash.encode("utf-8")
+            version_byte = self.PROTOCOL_VERSION | 0x80
+            header = (
+                struct.pack(">BH", version_byte, len(sh_bytes)) + sh_bytes + struct.pack(">HH", op, len(call.arguments))
+            )
+        else:
+            version_byte = self.PROTOCOL_VERSION
+            header = struct.pack(">BHH", version_byte, op, len(call.arguments))
+
+        if len(header) + len(body) > self.MAX_PACKET_SIZE:
+            raise ValueError(f"Total packet size exceeds maximum limit of {self.MAX_PACKET_SIZE} bytes")
+
         return header + body
 
-    def decode(self, data: bytes) -> ToolCall:
-        """Decodes binary bytecode back into a structured ToolCall."""
-        if len(data) < 3:
-            raise ValueError("Bytecode packet too short: minimum header is 3 bytes")
+    def decode(self, data: bytes, expected_schema_hash: str = "") -> ToolCall:
+        """Decodes binary bytecode back into a structured ToolCall, validating length, bounds, duplicate keys, and schema hash."""
+        if len(data) < 5:
+            raise ValueError(f"Bytecode packet too short: expected at least 5 bytes header, got {len(data)}")
+        if len(data) > self.MAX_PACKET_SIZE:
+            raise ValueError(f"Bytecode packet exceeds maximum size of {self.MAX_PACKET_SIZE} bytes")
 
-        op, arg_count = struct.unpack(">BH", data[:3])
-        if op == 0:
-            raise ValueError(f"Invalid opcode: {op}")
-        tool_name = self.opcode_to_tool.get(op, f"unknown_tool_{op}")
+        version_byte = data[0]
+        offset = 1
+        has_sh = bool(version_byte & 0x80)
+        base_version = version_byte & ~0x80
 
-        offset = 3
-        args: Dict[str, Any] = {}
+        if base_version != self.PROTOCOL_VERSION:
+            raise ValueError(f"Unsupported bytecode protocol version: {base_version}")
+
+        packet_sh = ""
+        if has_sh:
+            if len(data) < offset + 2:
+                raise ValueError("Bytecode packet truncated: missing schema hash length")
+            (sh_len,) = struct.unpack(">H", data[offset : offset + 2])
+            offset += 2
+            if len(data) < offset + sh_len:
+                raise ValueError("Bytecode packet truncated: missing schema hash body")
+            packet_sh = data[offset : offset + sh_len].decode("utf-8")
+            offset += sh_len
+
+        if expected_schema_hash:
+            if not has_sh:
+                raise ValueError(
+                    f"Schema identity mismatch before decode: expected '{expected_schema_hash}', but packet has no embedded schema hash"
+                )
+            if packet_sh != expected_schema_hash:
+                raise ValueError(
+                    f"Schema identity mismatch before decode: expected '{expected_schema_hash}', got '{packet_sh}'"
+                )
+
+        if len(data) < offset + 4:
+            raise ValueError("Bytecode packet truncated: missing opcode and arg_count")
+
+        op, arg_count = struct.unpack(">HH", data[offset : offset + 4])
+        offset += 4
+
+        if op == 0 or op not in self.opcode_to_tool:
+            raise ValueError(f"Unknown or invalid opcode: {op}")
+        if arg_count > self.MAX_ARG_COUNT:
+            raise ValueError(f"Declared argument count {arg_count} exceeds limit of {self.MAX_ARG_COUNT}")
+
+        tool_name = self.opcode_to_tool[op]
+        args: dict[str, Any] = {}
+        seen_keys: set[str] = set()
+
         for i in range(arg_count):
             if offset + 6 > len(data):
-                raise ValueError("Bytecode packet truncated: missing argument header")
+                raise ValueError(f"Bytecode packet truncated: missing header for argument {i}")
             k_len, val_len = struct.unpack(">HI", data[offset : offset + 6])
             offset += 6
             if offset + k_len + val_len > len(data):
-                raise ValueError(f"Bytecode packet truncated: expected {k_len + val_len} bytes for argument {i}, got {len(data) - offset}")
-            key = data[offset : offset + k_len].decode("utf-8", errors="replace")
+                raise ValueError(
+                    f"Bytecode packet truncated: expected {k_len + val_len} bytes for argument {i}, got {len(data) - offset}"
+                )
+
+            key = data[offset : offset + k_len].decode("utf-8")
+            if key in seen_keys:
+                raise ValueError(f"Duplicate argument key '{key}' in bytecode packet")
+            seen_keys.add(key)
             offset += k_len
+
             val_bytes = data[offset : offset + val_len]
             offset += val_len
 
             try:
                 parsed_val = json.loads(val_bytes.decode("utf-8"))
-            except Exception:
-                parsed_val = val_bytes.decode("utf-8", errors="replace")
+            except Exception as ex:
+                raise ValueError(f"Malformed JSON argument value for key '{key}': {ex}") from ex
 
             args[key] = parsed_val
 
+        if offset != len(data):
+            raise ValueError(f"Bytecode packet contains {len(data) - offset} unexpected trailing bytes")
+
         return ToolCall(name=tool_name, tool_name=tool_name, arguments=args)
 
-    def calculate_compression_ratio(self, call: ToolCall) -> Tuple[int, int, float]:
-        """Compares verbose JSON schema character count to compact binary bytecode size."""
-        json_len = len(json.dumps({"name": call.name, "arguments": call.arguments}))
+    def calculate_compression_ratio(self, call: ToolCall) -> tuple[int, int, float]:
+        """Compares JSON character count to compact binary bytecode size."""
+        json_len = len(
+            json.dumps({"name": call.name or call.tool_name, "arguments": call.arguments}, separators=(",", ":"))
+        )
         bc_len = len(self.encode(call))
         ratio = json_len / max(1, bc_len)
         return json_len, bc_len, ratio
 
 
 class ActionBytecodeScheduler(BaseScheduler):
-    """Experiment E5: Action Bytecode Engine.
-    
-    Replaces verbose JSON generation with compact Action ByteCode (ABC), cutting decode token count
-    and latency by 2x+ while deterministically expanding to full tool schemas.
+    """Experiment E5a: Action Bytecode Transport Codec Engine.
+
+    Evaluates binary transport codec compression and wire serialization efficiency.
+    Note: Direct model action-token generation is scoped as E5b and remains UNIMPLEMENTED for live LLMs.
     """
 
-    def __init__(self, config=None) -> None:
+    def __init__(self, config: SchedulerConfig | None = None) -> None:
         super().__init__(config)
         self.codec = ActionBytecodeCodec()
 
@@ -109,16 +235,17 @@ class ActionBytecodeScheduler(BaseScheduler):
         model: BaseLLMAdapter,
         tools: ToolRegistry,
     ) -> Any:
-        # Initialize codec with tools
         for spec in tools.list_specs():
-            self.codec.register_tool(spec.name, spec.required_args or list(spec.parameters.get("properties", {}).keys()))
+            self.codec.register_tool(
+                spec.name, spec.required_args or list(spec.parameters.get("properties", {}).keys())
+            )
 
         for turn in range(ctx.config.max_turns):
             ctx.step_count = turn + 1
 
             ctx.profiler.start_span(f"bytecode_model_turn_{turn}")
             decision = await model.decide(
-                ctx.task,
+                ctx.agent_task,
                 ctx.history,
                 tools.list_specs(),
             )
@@ -132,14 +259,16 @@ class ActionBytecodeScheduler(BaseScheduler):
             if decision.final_answer is not None or not decision.tool_calls:
                 return decision.final_answer
 
-            # Process tool calls through bytecode encode/decode cycle to simulate compact generation
             for raw_call in decision.tool_calls:
-                # 1. Encode to compact bytecode
+                # 1. Transport encode
+                t_enc_start = time.perf_counter()
                 encoded_bytes = self.codec.encode(raw_call)
+                t_enc_ms = (time.perf_counter() - t_enc_start) * 1000.0
                 json_size, bc_size, comp_ratio = self.codec.calculate_compression_ratio(raw_call)
 
                 ctx.profiler.record_event(
                     EventType.BYTECODE_ENCODE,
+                    duration_ms=t_enc_ms,
                     details={
                         "tool": raw_call.name,
                         "json_bytes": json_size,
@@ -148,33 +277,21 @@ class ActionBytecodeScheduler(BaseScheduler):
                     },
                 )
 
-                # 2. Deterministic expansion to ToolCall schema
+                # 2. Transport decode
+                t_dec_start = time.perf_counter()
                 decoded_call = self.codec.decode(encoded_bytes)
+                t_dec_ms = (time.perf_counter() - t_dec_start) * 1000.0
                 decoded_call.call_id = raw_call.call_id
                 ctx.tool_calls.append(decoded_call)
 
                 ctx.profiler.record_event(
                     EventType.BYTECODE_DECODE,
+                    duration_ms=t_dec_ms,
                     details={"tool": decoded_call.name, "call_id": decoded_call.call_id},
                 )
 
-                # 3. Execute tool call
-                adapter = tools.get(decoded_call.name)
-                if not adapter:
-                    continue
-
-                ctx.guardrails.record_tool_dispatch(adapter.spec, decoded_call, is_speculative=False)
-                ctx.profiler.start_span(f"tool_{decoded_call.call_id}")
-                ctx.guardrails.record_concurrency_enter()
-
-                await ctx.rate_limiter.acquire()
-                try:
-                    res = await adapter.execute(decoded_call)
-                finally:
-                    ctx.rate_limiter.release()
-                    ctx.guardrails.record_concurrency_exit()
-
-                ctx.profiler.end_span(f"tool_{decoded_call.call_id}", EventType.TOOL_END)
+                # 3. Tool execution via ToolExecutor
+                res = await ctx.executor.execute(decoded_call)
                 ctx.record_tool_result(res)
 
         return "Max turns reached without final answer."

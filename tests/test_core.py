@@ -4,32 +4,26 @@ import asyncio
 import time
 import unittest
 
+from toolspeed.core.guardrails import GuardrailTracker
+from toolspeed.core.profiler import (
+    CCLTracker,
+    NanosecondProfiler,
+)
+from toolspeed.core.rate_limiter import (
+    AsyncConcurrencyLimiter,
+    AsyncTokenBucket,
+    RateLimiter,
+    RateLimitError,
+)
 from toolspeed.core.types import (
-    DependencyNode,
     EventType,
     ExecutionEvent,
     ExecutionTrace,
-    FunctionValidator,
-    GuardrailMetrics,
-    LatencyProfile,
     TaskInstance,
     TokenUsage,
     ToolCall,
     ToolResult,
     WorkloadSpec,
-)
-from toolspeed.core.profiler import (
-    CCLTracker,
-    LatencyStats,
-    NanosecondProfiler,
-    calculate_percentiles,
-)
-from toolspeed.core.guardrails import GuardrailTracker
-from toolspeed.core.rate_limiter import (
-    AsyncConcurrencyLimiter,
-    AsyncTokenBucket,
-    RateLimitError,
-    RateLimiter,
 )
 
 
@@ -147,7 +141,7 @@ class TestProfilerAndCCL(unittest.TestCase):
         profiler = NanosecondProfiler(task_id="test_task")
         profiler.record_event(EventType.TASK_START)
 
-        with profiler.span("model_reasoning", category="llm") as span:
+        with profiler.span("model_reasoning", category="llm"):
             time.sleep(0.01)
 
         profiler.record_event(EventType.TASK_END)

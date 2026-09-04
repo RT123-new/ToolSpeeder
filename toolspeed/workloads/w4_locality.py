@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
-from typing import Any, Dict, List, Optional, Tuple
 
 from toolspeed.adapters.base import BaseToolAdapter
 from toolspeed.adapters.mock_tools import MockToolAdapter, MockToolConfig
@@ -14,12 +17,14 @@ from toolspeed.core.types import (
     TaskValidator,
     WorkloadSpec,
 )
+from toolspeed.schedulers.base import SchedulerConfig
+from toolspeed.schedulers.phase2_cache import Phase2CacheScheduler, ToolResultCache
 from toolspeed.workloads.base import BaseWorkload
 
 
 class W4LocalityWorkload(BaseWorkload):
     """Workload Family 4: Repeated Workflows with High Plan Locality.
-    
+
     Evaluates speedups from exact/semantic tool result caching and plan template reuse
     across workloads with Zipfian/skewed key locality.
     """
@@ -92,19 +97,19 @@ class W4LocalityWorkload(BaseWorkload):
                 sigma=0.2,
                 cost_usd=0.0002,
                 handler=lambda args: {
-                    "final_price": round(args.get("base_amount", 100.0) * (1.0 - args.get("discount_pct", 0) / 100.0), 2),
+                    "final_price": round(
+                        args.get("base_amount", 100.0) * (1.0 - args.get("discount_pct", 0) / 100.0), 2
+                    ),
                     "currency": "USD",
                 },
             )
         )
         return [user_lookup, pricing_calc]
 
-    def generate_tasks(self, count: int = 10, seed: Optional[int] = None) -> list[TaskInstance]:
+    def generate_tasks(self, count: int = 10, seed: int | None = None) -> list[TaskInstance]:
         rng = np.random.default_rng(seed)
         tasks: list[TaskInstance] = []
 
-        # Generate Zipfian / skewed distribution over user IDs
-        # First 20% of users get 80% of queries
         hot_count = max(1, int(self.num_entities * 0.2))
         hot_users = [f"usr_{i:03d}" for i in range(hot_count)]
         cold_users = [f"usr_{i:03d}" for i in range(hot_count, self.num_entities)]
@@ -135,7 +140,9 @@ class W4LocalityWorkload(BaseWorkload):
         return tasks
 
     def get_validator(self) -> TaskValidator:
-        def _validate(task: TaskInstance, output: Any, trace: Optional[ExecutionTrace]) -> Tuple[bool, str, dict[str, Any]]:
+        def _validate(
+            task: TaskInstance, output: Any, trace: ExecutionTrace | None
+        ) -> tuple[bool, str, dict[str, Any]]:
             if not isinstance(output, dict):
                 return False, f"Output must be a dict, got {type(output).__name__}", {}
 
@@ -152,3 +159,126 @@ class W4LocalityWorkload(BaseWorkload):
             return True, "Locality validation passed", {"final_price": actual_price}
 
         return FunctionValidator(_validate)
+
+
+@dataclass(frozen=True)
+class W4CacheEvictionPoint:
+    capacity: int | None
+    hits: int
+    misses: int
+    total_queries: int
+    hit_rate: float
+    duration_ms: float
+
+
+@dataclass
+class W4CacheEvictionSweepReport:
+    points: list[W4CacheEvictionPoint]
+
+    def verify_eviction_pressure_invariants(self) -> tuple[bool, str]:
+        """Verifies:
+
+        - No cache has exactly 0 hits (hit_rate = 0.0)
+        - Hit rate increases monotonically with capacity: 0 <= cap(1) <= cap(4) <= cap(16)
+        - Cap 16 has strictly higher hit rate than Cap 1
+        """
+        if not self.points:
+            return False, "No cache eviction points evaluated"
+
+        p_no = next((p for p in self.points if p.capacity is None or p.capacity == 0), None)
+        p1 = next((p for p in self.points if p.capacity == 1), None)
+        p4 = next((p for p in self.points if p.capacity == 4), None)
+        p16 = next((p for p in self.points if p.capacity == 16), None)
+
+        if p_no is None or p1 is None or p4 is None or p16 is None:
+            return False, "Missing one of required capacities: no-cache, 1, 4, 16"
+
+        if p_no.hits != 0 or p_no.hit_rate != 0.0:
+            return False, f"No-cache point recorded {p_no.hits} hits (expected 0)"
+
+        if not (p_no.hit_rate <= p1.hit_rate <= p4.hit_rate <= p16.hit_rate):
+            return (
+                False,
+                f"Hit rates not monotonically increasing: no_cache={p_no.hit_rate:.2f}, "
+                f"cap1={p1.hit_rate:.2f}, cap4={p4.hit_rate:.2f}, cap16={p16.hit_rate:.2f}",
+            )
+
+        if p16.hit_rate <= p1.hit_rate:
+            return (
+                False,
+                f"Capacity 16 hit rate ({p16.hit_rate:.2f}) not strictly greater than Capacity 1 ({p1.hit_rate:.2f})",
+            )
+
+        return True, "All W4 cache eviction pressure invariants hold."
+
+
+async def evaluate_w4_cache_eviction_pressure(
+    backend: Any,
+    capacities: Sequence[int | None] = (None, 1, 4, 16),
+    trial_sequence: Sequence[int] = (
+        0,
+        0,
+        1,
+        0,
+        1,
+        2,
+        2,
+        0,
+        3,
+        0,
+        4,
+        1,
+        0,
+        5,
+        0,
+        1,
+        6,
+        2,
+        1,
+        0,
+    ),
+) -> W4CacheEvictionSweepReport:
+    """Evaluates W4 pipeline cache locality under eviction pressure across capacities [no cache, 1, 4, 16]."""
+    points: list[W4CacheEvictionPoint] = []
+
+    for cap in capacities:
+        is_enabled = cap is not None and cap > 0
+        cache = ToolResultCache(max_entries=cap if (cap and cap > 0) else 1)
+        sched = Phase2CacheScheduler(
+            config=SchedulerConfig(cache_enabled=is_enabled),
+            cache=cache,
+        )
+
+        hits = 0
+        misses = 0
+        total_duration_ms = 0.0
+
+        for t in trial_sequence:
+            task = backend.generate_task("W4", trial_index=t, arm="candidate")
+            tools, model = backend.create_workload_environment("W4", trial_index=t, arm="candidate")
+
+            task_model = task.to_model_task() if hasattr(task, "to_model_task") else task
+            res = await sched.execute(task_model, model, tools)
+
+            total_duration_ms += res.total_duration_ms
+            for tr in res.tool_results:
+                if tr.cached:
+                    hits += 1
+                else:
+                    misses += 1
+
+        total_queries = hits + misses
+        hit_rate = hits / total_queries if total_queries > 0 else 0.0
+
+        points.append(
+            W4CacheEvictionPoint(
+                capacity=cap,
+                hits=hits,
+                misses=misses,
+                total_queries=total_queries,
+                hit_rate=hit_rate,
+                duration_ms=total_duration_ms,
+            )
+        )
+
+    return W4CacheEvictionSweepReport(points=points)

@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
 
 from toolspeed.adapters.base import BaseToolAdapter
 from toolspeed.core.types import (
-    ExecutionTrace,
     TaskInstance,
     TaskValidator,
     WorkloadSpec,
@@ -23,7 +21,7 @@ class BaseWorkload(ABC):
         ...
 
     @abstractmethod
-    def generate_tasks(self, count: int = 10, seed: Optional[int] = None) -> list[TaskInstance]:
+    def generate_tasks(self, count: int = 10, seed: int | None = None) -> list[TaskInstance]:
         """Generate a deterministic sequence of benchmark task instances."""
         ...
 

@@ -22,3 +22,12 @@ dist/
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Benchmark generated bundles & evidence
+artifacts/replay/
+artifacts/confirmatory_*/
+artifacts/smoke_test/
+artifacts/replay_*/
+artifacts/noncanonical/
+evidence-*
+smoke-*
