@@ -18,6 +18,7 @@ class MockFrozenProtocol:
     is_frozen: bool = True
     seeds: list[int] = field(default_factory=lambda: [7001, 7013, 7019])
     seeds_dict: dict[str, list[int]] = field(default_factory=lambda: {"confirmatory": [7001, 7013, 7019]})
+    mechanisms: dict = field(default_factory=dict)
 
 
 class TestCLIModeAndProtocol(unittest.TestCase):
@@ -70,7 +71,10 @@ class TestCLIModeAndProtocol(unittest.TestCase):
 
     def test_04_confirmatory_rejects_insufficient_trials(self) -> None:
         """Confirmatory mode must enforce minimum trial counts (>= 1,000 for replay)."""
-        with patch("toolspeed.cli.load_frozen_protocol", return_value=MockFrozenProtocol()):
+        with (
+            patch("toolspeed.cli.load_frozen_protocol", return_value=MockFrozenProtocol()),
+            patch("toolspeed.cli.is_git_working_tree_dirty", return_value=False),
+        ):
             args = argparse.Namespace(
                 backend="replay",
                 protocol="test-frozen",
@@ -90,7 +94,10 @@ class TestCLIModeAndProtocol(unittest.TestCase):
             seeds=[42, 7013, 7019],
             seeds_dict={"confirmatory": [42, 7013, 7019]},
         )
-        with patch("toolspeed.cli.load_frozen_protocol", return_value=proto):
+        with (
+            patch("toolspeed.cli.load_frozen_protocol", return_value=proto),
+            patch("toolspeed.cli.is_git_working_tree_dirty", return_value=False),
+        ):
             args = argparse.Namespace(
                 backend="replay",
                 protocol="test-frozen",
@@ -110,7 +117,10 @@ class TestCLIModeAndProtocol(unittest.TestCase):
             seeds=[7001, 7013],
             seeds_dict={"confirmatory": [7001, 7013]},
         )
-        with patch("toolspeed.cli.load_frozen_protocol", return_value=proto):
+        with (
+            patch("toolspeed.cli.load_frozen_protocol", return_value=proto),
+            patch("toolspeed.cli.is_git_working_tree_dirty", return_value=False),
+        ):
             args = argparse.Namespace(
                 backend="replay",
                 protocol="test-frozen",

@@ -182,10 +182,8 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         if len(conf_seeds) != len(set(conf_seeds)):
             print(f"❌ Confirmatory seeds must be unique. Found duplicates: {conf_seeds}")
             return 1
-        if protocol.plan_id == "tool-speed-v1.3-draft" and set(conf_seeds).intersection({42, 137, 2026}):
-            print(
-                "❌ Confirmatory mode strictly forbids reusing retrospective seeds (42, 137, 2026) in draft protocol."
-            )
+        if protocol.plan_id != "tool-speed-v1.3" and set(conf_seeds).intersection({42, 137, 2026}):
+            print("❌ Confirmatory mode strictly forbids reusing retrospective seeds (42, 137, 2026).")
             return 1
 
         if is_git_working_tree_dirty():
