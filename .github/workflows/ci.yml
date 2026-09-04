@@ -46,15 +46,39 @@ jobs:
         run: |
           mypy toolspeed tests
 
-      - name: Run Full Unit & Adversarial Test Suite with Coverage
+      - name: Run Bandit Security Analysis
         run: |
-          coverage run -m unittest discover -s tests -p "test_*.py"
-          coverage report -m --fail-under=80
+          bandit -r toolspeed -s B101,B404,B602,B603
+
+      - name: Run Unit Tests with Coverage
+        run: |
+          pytest --cov=toolspeed --cov-report=term-missing --cov-fail-under=80
+
+      - name: Run Adversarial Mutation Integrity Tests
+        run: |
+          pytest tests/test_behavioral_mutation_integrity.py -v
+
+      - name: Run Scientific Integrity Tests
+        run: |
+          pytest tests/test_scientific_integrity.py -v
+
+      - name: Run Review Findings Tests
+        run: |
+          pytest tests/test_review_findings.py -v
 
       - name: Build Wheel Distribution Package & Check Twine
         run: |
-          python -m build
+          python -m build --wheel
           twine check dist/*
+
+      - name: Install Wheel in Clean Environment & Run CLI Smoke Test
+        run: |
+          python -m venv /tmp/clean_env
+          /tmp/clean_env/bin/pip install --upgrade pip
+          /tmp/clean_env/bin/pip install dist/*.whl
+          /tmp/clean_env/bin/toolspeed --help
+          /tmp/clean_env/bin/toolspeed simulate --trials 5 --out /tmp/wheel_smoke_bundle
+          /tmp/clean_env/bin/toolspeed validate-bundle --input /tmp/wheel_smoke_bundle
 
   benchmark-smoke:
     name: Benchmark Smoke (Python 3.12, Non-Verdict-Eligible)
