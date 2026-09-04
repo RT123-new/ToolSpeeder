@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import time
 from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, StreamingChunk, ToolRegistry
 from toolspeed.core.types import EventType, ToolCall, ToolResult
 from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig, cancel_and_await
-from toolspeed.schedulers.e1_dag_scheduler import DAGNode, ToolDAG
+from toolspeed.schedulers.e1_dag_scheduler import DAGNode, DAGScheduler, ToolDAG
 from toolspeed.schedulers.e2_jit_fusion import JITFusionScheduler
-from toolspeed.schedulers.e4_commit_horizon import IncrementalCommitParser
+from toolspeed.schedulers.e3_speculation import SpeculativeScheduler
+from toolspeed.schedulers.e4_commit_horizon import CommitHorizonScheduler, IncrementalCommitParser
 from toolspeed.schedulers.e5_action_bytecode import ActionBytecodeCodec
 from toolspeed.schedulers.phase2_cache import ToolResultCache
 
@@ -46,8 +48,46 @@ class CompositeScheduler(BaseScheduler):
         )
         super().__init__(cfg)
         self.cache = shared_cache or ToolResultCache(default_ttl_seconds=cfg.cache_ttl_seconds)
+        self.e1_dag_scheduler = DAGScheduler(cfg)
         self.jit_scheduler = JITFusionScheduler(cfg)
+        self.e2_fusion_scheduler = self.jit_scheduler
+        self.e3_spec_scheduler = SpeculativeScheduler(cfg)
+        self.e4_commit_scheduler = CommitHorizonScheduler(cfg)
         self.bytecode_codec = ActionBytecodeCodec()
+
+        # Measured overhead of composite dispatch itself
+        self.last_dispatch_overhead_ns: int = 0
+        self.total_dispatch_overhead_ns: int = 0
+        self.dispatch_count: int = 0
+
+    def delegate_fanout(self) -> DAGScheduler:
+        """Returns real E1 delegate for independent fanout."""
+        return self.e1_dag_scheduler
+
+    def delegate_pipeline_sequence(self) -> JITFusionScheduler:
+        """Returns real E2 delegate for recognized pipeline sequences."""
+        return self.e2_fusion_scheduler
+
+    def delegate_speculative(self) -> SpeculativeScheduler:
+        """Returns real E3 delegate for speculative first-branch."""
+        return self.e3_spec_scheduler
+
+    def delegate_streaming(self) -> CommitHorizonScheduler:
+        """Returns real E4 delegate for streaming early actions."""
+        return self.e4_commit_scheduler
+
+    def delegate_cache(self) -> ToolResultCache:
+        """Returns real Cache delegate for repeat queries with zero mutations."""
+        return self.cache
+
+    def get_dispatch_overhead(self) -> dict[str, Any]:
+        """Returns measured composite dispatch overhead statistics."""
+        return {
+            "last_overhead_ns": self.last_dispatch_overhead_ns,
+            "total_overhead_ns": self.total_dispatch_overhead_ns,
+            "dispatch_count": self.dispatch_count,
+            "mean_overhead_ns": (self.total_dispatch_overhead_ns / max(1, self.dispatch_count)),
+        }
 
     def has_cache_lookup_in_dispatch_path(self) -> bool:
         """Returns whether read tool calls visibly route through cache lookup."""
@@ -84,9 +124,17 @@ class CompositeScheduler(BaseScheduler):
 
         # 3. JIT Fusion Check
         if self.config.jit_fusion_enabled:
+            t_jit_0 = time.perf_counter_ns()
             wf = self.jit_scheduler._match_workflow(ctx)
+            jit_overhead = time.perf_counter_ns() - t_jit_0
+            self.last_dispatch_overhead_ns = jit_overhead
+            self.total_dispatch_overhead_ns += jit_overhead
+            self.dispatch_count += 1
             if wf is not None:
-                ctx.profiler.record_event(EventType.JIT_FUSION_START, details={"workflow": wf.workflow_id})
+                ctx.profiler.record_event(
+                    EventType.JIT_FUSION_START,
+                    details={"workflow": wf.workflow_id, "dispatch_overhead_ns": jit_overhead},
+                )
                 res = await self.jit_scheduler._execute_internal(ctx, model, tools)
                 if res is not None:
                     return res
@@ -352,9 +400,17 @@ class CompositeScheduler(BaseScheduler):
                             )
 
                             if is_read and self.config.cache_enabled:
+                                t_c_0 = time.perf_counter_ns()
                                 cached_val, hit, _ = self.cache.get(call_name, n.call.arguments)
+                                c_overhead = time.perf_counter_ns() - t_c_0
+                                self.last_dispatch_overhead_ns = c_overhead
+                                self.total_dispatch_overhead_ns += c_overhead
+                                self.dispatch_count += 1
                                 if hit:
-                                    ctx.profiler.record_event(EventType.CACHE_HIT, details={"tool": call_name})
+                                    ctx.profiler.record_event(
+                                        EventType.CACHE_HIT,
+                                        details={"tool": call_name, "dispatch_overhead_ns": c_overhead},
+                                    )
                                     res = ToolResult(
                                         call_id=n.call.call_id,
                                         name=call_name,

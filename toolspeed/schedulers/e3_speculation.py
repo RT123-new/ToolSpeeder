@@ -243,3 +243,6 @@ class SpeculativeReadScheduler(BaseScheduler):
                 await cancel_and_await(draft_task)
             if model_decision_task and not model_decision_task.done():
                 await cancel_and_await(model_decision_task)
+
+
+SpeculativeScheduler = SpeculativeReadScheduler
