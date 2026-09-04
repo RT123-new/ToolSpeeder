@@ -77,7 +77,8 @@ jobs:
           /tmp/clean_env/bin/pip install --upgrade pip
           /tmp/clean_env/bin/pip install dist/*.whl
           /tmp/clean_env/bin/toolspeed --help
-          /tmp/clean_env/bin/toolspeed simulate --trials 5 --out /tmp/wheel_smoke_bundle
+          /tmp/clean_env/bin/toolspeed simulate --trials 5 --out /tmp/wheel_sim_bundle
+          /tmp/clean_env/bin/toolspeed benchmark --backend replay --trials 10 --out /tmp/wheel_smoke_bundle
           /tmp/clean_env/bin/toolspeed validate-bundle --input /tmp/wheel_smoke_bundle
 
   benchmark-smoke:
