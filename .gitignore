@@ -25,7 +25,6 @@ Thumbs.db
 
 # Benchmark generated bundles & evidence
 artifacts/replay/
-artifacts/local/
 artifacts/confirmatory_*/
 artifacts/smoke_test/
 artifacts/replay_*/

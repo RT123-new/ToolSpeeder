@@ -1,0 +1,953 @@
+{
+  "title": "ToolSpeed Paired Benchmark Suite (LOCAL_WALL_CLOCK)",
+  "evidence_level": "local_wall_clock",
+  "overall_verdict": "falsified",
+  "total_runtime_s": 62.67633929196745,
+  "verdicts": [
+    {
+      "workload_id": "W1",
+      "comparison": "DAGScheduler vs DAGScheduler_serial_ablation",
+      "verdict": {
+        "experiment_id": "W1",
+        "hypothesis": "Candidate DAGScheduler outperforms DAGScheduler_serial_ablation on W1",
+        "passed": true,
+        "falsified": false,
+        "state": "passed",
+        "evidence_level": "local_wall_clock",
+        "summary": "PASSED \u2014 P95 speedup: 3.83x, P50 speedup: 4.07x, Success: 100.0%, Cost: 1.00x",
+        "checks": [
+          {
+            "name": "P95 CCL Reduction",
+            "target": ">= 1.50x speedup",
+            "measured": "3.83x",
+            "passed": true,
+            "detail": "95% CI: [73.4%, 75.0%]"
+          },
+          {
+            "name": "Candidate Success Rate",
+            "target": ">= 99.0% and non-inferior",
+            "measured": "100.0% (delta: +0.00%)",
+            "passed": true,
+            "detail": "Success non-inferiority check"
+          },
+          {
+            "name": "P99 CCL Non-Regression",
+            "target": ">= 0.95x",
+            "measured": "3.67x",
+            "passed": true,
+            "detail": "Tail latency stability check"
+          },
+          {
+            "name": "Side-Effect Approvals",
+            "target": "0 unapproved side effects",
+            "measured": "0",
+            "passed": true,
+            "detail": "Approval gate enforcement"
+          },
+          {
+            "name": "Cost Multiplier",
+            "target": "<= 1.05x",
+            "measured": "1.00x",
+            "passed": true,
+            "detail": "Monetary / token overhead"
+          }
+        ],
+        "is_verdict_eligible": true,
+        "metadata": {}
+      },
+      "summary": {
+        "baseline_p50_ms": 153.5688544390723,
+        "candidate_p50_ms": 37.69943752558902,
+        "p50_speedup": 4.073505190490848,
+        "baseline_p90_ms": 161.17533722426742,
+        "candidate_p90_ms": 40.57242959970608,
+        "p90_speedup": 3.9725335360600393,
+        "baseline_p95_ms": 162.82297354191542,
+        "candidate_p95_ms": 42.52898815902881,
+        "p95_speedup": 3.8285174557426767,
+        "baseline_p99_ms": 165.57906052912585,
+        "candidate_p99_ms": 45.11343120248057,
+        "p99_speedup": 3.6702830202820276,
+        "baseline_mean_ms": 152.9400814679684,
+        "candidate_mean_ms": 37.67346251872368,
+        "mean_speedup": 4.059623704403526,
+        "baseline_success_rate": 1.0,
+        "candidate_success_rate": 1.0,
+        "success_rate_delta": 0.0,
+        "paired_success_counts": {
+          "both_succeeded": 200,
+          "candidate_only": 0,
+          "baseline_only": 0,
+          "both_failed": 0
+        },
+        "wasted_call_rate": null,
+        "cost_multiplier": null,
+        "rate_limit_error_rate": null,
+        "input_tokens_baseline": null,
+        "input_tokens_candidate": null,
+        "token_reduction_pct": null,
+        "deopt_rate": null,
+        "tool_start_p50_ms": null,
+        "tool_start_p95_ms": null,
+        "tool_start_speedup_p95": null,
+        "semantic_mutation_rate": null,
+        "p95_reduction_ci": [
+          73.39179757715026,
+          75.00503330658115
+        ],
+        "p50_reduction_ci": [
+          75.1425993893753,
+          75.78595381977877
+        ],
+        "p99_reduction_ci": [
+          71.05211190517626,
+          74.13162627644627
+        ],
+        "success_delta_ci": [
+          0.0,
+          0.0
+        ],
+        "cost_delta_ci": null,
+        "unapproved_side_effects": 0,
+        "tool_selection_accuracy": null,
+        "arg_selection_accuracy": null,
+        "extra_metrics": {}
+      }
+    },
+    {
+      "workload_id": "W2",
+      "comparison": "JITFusionScheduler vs JITFusionScheduler_fusion_disabled",
+      "verdict": {
+        "experiment_id": "W2",
+        "hypothesis": "Candidate JITFusionScheduler outperforms JITFusionScheduler_fusion_disabled on W2",
+        "passed": false,
+        "falsified": true,
+        "state": "falsified",
+        "evidence_level": "local_wall_clock",
+        "summary": "FALSIFIED \u2014 P95 speedup: 0.00x, Success: 0.0%, P99 speedup: 0.00x",
+        "checks": [
+          {
+            "name": "P95 CCL Reduction",
+            "target": ">= 1.50x speedup",
+            "measured": "0.00x",
+            "passed": false,
+            "detail": "95% CI: null"
+          },
+          {
+            "name": "Candidate Success Rate",
+            "target": ">= 99.0% and non-inferior",
+            "measured": "0.0% (delta: +0.00%)",
+            "passed": false,
+            "detail": "Success non-inferiority check"
+          },
+          {
+            "name": "P99 CCL Non-Regression",
+            "target": ">= 0.95x",
+            "measured": "0.00x",
+            "passed": false,
+            "detail": "Tail latency stability check"
+          },
+          {
+            "name": "Side-Effect Approvals",
+            "target": "0 unapproved side effects",
+            "measured": "0",
+            "passed": true,
+            "detail": "Approval gate enforcement"
+          },
+          {
+            "name": "Cost Multiplier",
+            "target": "<= 1.05x",
+            "measured": "1.00x",
+            "passed": true,
+            "detail": "Monetary / token overhead"
+          }
+        ],
+        "is_verdict_eligible": true,
+        "metadata": {}
+      },
+      "summary": {
+        "baseline_p50_ms": null,
+        "candidate_p50_ms": null,
+        "p50_speedup": null,
+        "baseline_p90_ms": null,
+        "candidate_p90_ms": null,
+        "p90_speedup": null,
+        "baseline_p95_ms": null,
+        "candidate_p95_ms": null,
+        "p95_speedup": null,
+        "baseline_p99_ms": null,
+        "candidate_p99_ms": null,
+        "p99_speedup": null,
+        "baseline_mean_ms": null,
+        "candidate_mean_ms": null,
+        "mean_speedup": null,
+        "baseline_success_rate": 0.0,
+        "candidate_success_rate": 0.0,
+        "success_rate_delta": 0.0,
+        "paired_success_counts": {
+          "both_succeeded": 0,
+          "candidate_only": 0,
+          "baseline_only": 0,
+          "both_failed": 200
+        },
+        "wasted_call_rate": null,
+        "cost_multiplier": null,
+        "rate_limit_error_rate": null,
+        "input_tokens_baseline": null,
+        "input_tokens_candidate": null,
+        "token_reduction_pct": null,
+        "deopt_rate": null,
+        "tool_start_p50_ms": null,
+        "tool_start_p95_ms": null,
+        "tool_start_speedup_p95": null,
+        "semantic_mutation_rate": null,
+        "p95_reduction_ci": null,
+        "p50_reduction_ci": null,
+        "p99_reduction_ci": null,
+        "success_delta_ci": [
+          0.0,
+          0.0
+        ],
+        "cost_delta_ci": null,
+        "unapproved_side_effects": 0,
+        "tool_selection_accuracy": null,
+        "arg_selection_accuracy": null,
+        "extra_metrics": {}
+      }
+    },
+    {
+      "workload_id": "W3",
+      "comparison": "SpeculativeReadScheduler vs SpeculativeReadScheduler_speculation_disabled",
+      "verdict": {
+        "experiment_id": "W3",
+        "hypothesis": "Candidate SpeculativeReadScheduler outperforms SpeculativeReadScheduler_speculation_disabled on W3",
+        "passed": false,
+        "falsified": true,
+        "state": "falsified",
+        "evidence_level": "local_wall_clock",
+        "summary": "FALSIFIED \u2014 P95 speedup: 0.00x, Success: 0.0%, P99 speedup: 0.00x",
+        "checks": [
+          {
+            "name": "P95 CCL Reduction",
+            "target": ">= 0.95x speedup",
+            "measured": "0.00x",
+            "passed": false,
+            "detail": "95% CI: null"
+          },
+          {
+            "name": "Candidate Success Rate",
+            "target": ">= 99.0% and non-inferior",
+            "measured": "0.0% (delta: +0.00%)",
+            "passed": false,
+            "detail": "Success non-inferiority check"
+          },
+          {
+            "name": "P99 CCL Non-Regression",
+            "target": ">= 0.90x",
+            "measured": "0.00x",
+            "passed": false,
+            "detail": "Tail latency stability check"
+          },
+          {
+            "name": "Side-Effect Approvals",
+            "target": "0 unapproved side effects",
+            "measured": "0",
+            "passed": true,
+            "detail": "Approval gate enforcement"
+          },
+          {
+            "name": "Cost Multiplier",
+            "target": "<= 1.25x",
+            "measured": "1.00x",
+            "passed": true,
+            "detail": "Monetary / token overhead"
+          }
+        ],
+        "is_verdict_eligible": true,
+        "metadata": {}
+      },
+      "summary": {
+        "baseline_p50_ms": null,
+        "candidate_p50_ms": null,
+        "p50_speedup": null,
+        "baseline_p90_ms": null,
+        "candidate_p90_ms": null,
+        "p90_speedup": null,
+        "baseline_p95_ms": null,
+        "candidate_p95_ms": null,
+        "p95_speedup": null,
+        "baseline_p99_ms": null,
+        "candidate_p99_ms": null,
+        "p99_speedup": null,
+        "baseline_mean_ms": null,
+        "candidate_mean_ms": null,
+        "mean_speedup": null,
+        "baseline_success_rate": 0.0,
+        "candidate_success_rate": 0.0,
+        "success_rate_delta": 0.0,
+        "paired_success_counts": {
+          "both_succeeded": 0,
+          "candidate_only": 0,
+          "baseline_only": 0,
+          "both_failed": 200
+        },
+        "wasted_call_rate": null,
+        "cost_multiplier": null,
+        "rate_limit_error_rate": null,
+        "input_tokens_baseline": null,
+        "input_tokens_candidate": null,
+        "token_reduction_pct": null,
+        "deopt_rate": null,
+        "tool_start_p50_ms": null,
+        "tool_start_p95_ms": null,
+        "tool_start_speedup_p95": null,
+        "semantic_mutation_rate": null,
+        "p95_reduction_ci": null,
+        "p50_reduction_ci": null,
+        "p99_reduction_ci": null,
+        "success_delta_ci": [
+          0.0,
+          0.0
+        ],
+        "cost_delta_ci": null,
+        "unapproved_side_effects": 0,
+        "tool_selection_accuracy": null,
+        "arg_selection_accuracy": null,
+        "extra_metrics": {}
+      }
+    },
+    {
+      "workload_id": "W4",
+      "comparison": "CacheScheduler vs CacheScheduler_caching_disabled",
+      "verdict": {
+        "experiment_id": "W4",
+        "hypothesis": "Candidate CacheScheduler outperforms CacheScheduler_caching_disabled on W4",
+        "passed": false,
+        "falsified": true,
+        "state": "falsified",
+        "evidence_level": "local_wall_clock",
+        "summary": "FALSIFIED \u2014 P95 speedup: 0.00x, Success: 0.0%, P99 speedup: 0.00x",
+        "checks": [
+          {
+            "name": "P95 CCL Reduction",
+            "target": ">= 0.95x speedup",
+            "measured": "0.00x",
+            "passed": false,
+            "detail": "95% CI: null"
+          },
+          {
+            "name": "Candidate Success Rate",
+            "target": ">= 99.0% and non-inferior",
+            "measured": "0.0% (delta: +0.00%)",
+            "passed": false,
+            "detail": "Success non-inferiority check"
+          },
+          {
+            "name": "P99 CCL Non-Regression",
+            "target": ">= 0.90x",
+            "measured": "0.00x",
+            "passed": false,
+            "detail": "Tail latency stability check"
+          },
+          {
+            "name": "Side-Effect Approvals",
+            "target": "0 unapproved side effects",
+            "measured": "0",
+            "passed": true,
+            "detail": "Approval gate enforcement"
+          },
+          {
+            "name": "Cost Multiplier",
+            "target": "<= 1.05x",
+            "measured": "1.00x",
+            "passed": true,
+            "detail": "Monetary / token overhead"
+          }
+        ],
+        "is_verdict_eligible": true,
+        "metadata": {}
+      },
+      "summary": {
+        "baseline_p50_ms": null,
+        "candidate_p50_ms": null,
+        "p50_speedup": null,
+        "baseline_p90_ms": null,
+        "candidate_p90_ms": null,
+        "p90_speedup": null,
+        "baseline_p95_ms": null,
+        "candidate_p95_ms": null,
+        "p95_speedup": null,
+        "baseline_p99_ms": null,
+        "candidate_p99_ms": null,
+        "p99_speedup": null,
+        "baseline_mean_ms": null,
+        "candidate_mean_ms": null,
+        "mean_speedup": null,
+        "baseline_success_rate": 0.0,
+        "candidate_success_rate": 0.0,
+        "success_rate_delta": 0.0,
+        "paired_success_counts": {
+          "both_succeeded": 0,
+          "candidate_only": 0,
+          "baseline_only": 0,
+          "both_failed": 200
+        },
+        "wasted_call_rate": null,
+        "cost_multiplier": null,
+        "rate_limit_error_rate": null,
+        "input_tokens_baseline": null,
+        "input_tokens_candidate": null,
+        "token_reduction_pct": null,
+        "deopt_rate": null,
+        "tool_start_p50_ms": null,
+        "tool_start_p95_ms": null,
+        "tool_start_speedup_p95": null,
+        "semantic_mutation_rate": null,
+        "p95_reduction_ci": null,
+        "p50_reduction_ci": null,
+        "p99_reduction_ci": null,
+        "success_delta_ci": [
+          0.0,
+          0.0
+        ],
+        "cost_delta_ci": null,
+        "unapproved_side_effects": 0,
+        "tool_selection_accuracy": null,
+        "arg_selection_accuracy": null,
+        "extra_metrics": {}
+      }
+    },
+    {
+      "workload_id": "W5",
+      "comparison": "CommitHorizonScheduler vs CommitHorizonScheduler_commit_horizon_disabled",
+      "verdict": {
+        "experiment_id": "W5",
+        "hypothesis": "Candidate CommitHorizonScheduler outperforms CommitHorizonScheduler_commit_horizon_disabled on W5",
+        "passed": true,
+        "falsified": false,
+        "state": "passed",
+        "evidence_level": "local_wall_clock",
+        "summary": "PASSED \u2014 P95 speedup: 1.22x, P50 speedup: 1.21x, Success: 100.0%, Cost: 1.00x",
+        "checks": [
+          {
+            "name": "P95 CCL Reduction",
+            "target": ">= 1.10x speedup",
+            "measured": "1.22x",
+            "passed": true,
+            "detail": "95% CI: [9.6%, 24.6%]"
+          },
+          {
+            "name": "Candidate Success Rate",
+            "target": ">= 99.0% and non-inferior",
+            "measured": "100.0% (delta: +0.00%)",
+            "passed": true,
+            "detail": "Success non-inferiority check"
+          },
+          {
+            "name": "P99 CCL Non-Regression",
+            "target": ">= 0.95x",
+            "measured": "1.25x",
+            "passed": true,
+            "detail": "Tail latency stability check"
+          },
+          {
+            "name": "Side-Effect Approvals",
+            "target": "0 unapproved side effects",
+            "measured": "0",
+            "passed": true,
+            "detail": "Approval gate enforcement"
+          },
+          {
+            "name": "Cost Multiplier",
+            "target": "<= 1.05x",
+            "measured": "1.00x",
+            "passed": true,
+            "detail": "Monetary / token overhead"
+          }
+        ],
+        "is_verdict_eligible": true,
+        "metadata": {}
+      },
+      "summary": {
+        "baseline_p50_ms": 4.676999989897013,
+        "candidate_p50_ms": 3.863208054099232,
+        "p50_speedup": 1.2106518531753085,
+        "baseline_p90_ms": 5.059424671344459,
+        "candidate_p90_ms": 4.235342075116932,
+        "p90_speedup": 1.1945728542374643,
+        "baseline_p95_ms": 5.455897963838651,
+        "candidate_p95_ms": 4.478156613186002,
+        "p95_speedup": 1.2183356758389545,
+        "baseline_p99_ms": 6.621306171873581,
+        "candidate_p99_ms": 5.299228980438774,
+        "p99_speedup": 1.2494848205871147,
+        "baseline_mean_ms": 4.733526820782572,
+        "candidate_mean_ms": 3.931843761820346,
+        "mean_speedup": 1.2038949428120376,
+        "baseline_success_rate": 1.0,
+        "candidate_success_rate": 1.0,
+        "success_rate_delta": 0.0,
+        "paired_success_counts": {
+          "both_succeeded": 200,
+          "candidate_only": 0,
+          "baseline_only": 0,
+          "both_failed": 0
+        },
+        "wasted_call_rate": null,
+        "cost_multiplier": null,
+        "rate_limit_error_rate": null,
+        "input_tokens_baseline": null,
+        "input_tokens_candidate": null,
+        "token_reduction_pct": null,
+        "deopt_rate": null,
+        "tool_start_p50_ms": null,
+        "tool_start_p95_ms": null,
+        "tool_start_speedup_p95": null,
+        "semantic_mutation_rate": null,
+        "p95_reduction_ci": [
+          9.578244606061105,
+          24.5924520571266
+        ],
+        "p50_reduction_ci": [
+          16.65231788712701,
+          18.312110261234704
+        ],
+        "p99_reduction_ci": [
+          -102.16936658374267,
+          36.86206198684829
+        ],
+        "success_delta_ci": [
+          0.0,
+          0.0
+        ],
+        "cost_delta_ci": null,
+        "unapproved_side_effects": 0,
+        "tool_selection_accuracy": null,
+        "arg_selection_accuracy": null,
+        "extra_metrics": {}
+      }
+    },
+    {
+      "workload_id": "W6",
+      "comparison": "CompositeScheduler vs SyncReActScheduler",
+      "verdict": {
+        "experiment_id": "W6",
+        "hypothesis": "Candidate CompositeScheduler outperforms SyncReActScheduler on W6",
+        "passed": false,
+        "falsified": true,
+        "state": "falsified",
+        "evidence_level": "local_wall_clock",
+        "summary": "FALSIFIED \u2014 P95 speedup: 0.94x, Success: 100.0%, P99 speedup: 0.81x",
+        "checks": [
+          {
+            "name": "P95 CCL Reduction",
+            "target": ">= 0.95x speedup",
+            "measured": "0.94x",
+            "passed": false,
+            "detail": "95% CI: [-10.6%, -2.6%]"
+          },
+          {
+            "name": "Candidate Success Rate",
+            "target": ">= 99.0% and non-inferior",
+            "measured": "100.0% (delta: +0.00%)",
+            "passed": true,
+            "detail": "Success non-inferiority check"
+          },
+          {
+            "name": "P99 CCL Non-Regression",
+            "target": ">= 0.90x",
+            "measured": "0.81x",
+            "passed": false,
+            "detail": "Tail latency stability check"
+          },
+          {
+            "name": "Side-Effect Approvals",
+            "target": "0 unapproved side effects",
+            "measured": "0",
+            "passed": true,
+            "detail": "Approval gate enforcement"
+          },
+          {
+            "name": "Cost Multiplier",
+            "target": "<= 1.15x",
+            "measured": "1.00x",
+            "passed": true,
+            "detail": "Monetary / token overhead"
+          }
+        ],
+        "is_verdict_eligible": true,
+        "metadata": {}
+      },
+      "summary": {
+        "baseline_p50_ms": 5.934770975727588,
+        "candidate_p50_ms": 6.200208503287286,
+        "p50_speedup": 0.9571889352722629,
+        "baseline_p90_ms": 6.322949740570039,
+        "candidate_p90_ms": 6.736837211064994,
+        "p90_speedup": 0.9385635339658851,
+        "baseline_p95_ms": 6.474208610597998,
+        "candidate_p95_ms": 6.894930993439629,
+        "p95_speedup": 0.9389809146397639,
+        "baseline_p99_ms": 6.730512356152756,
+        "candidate_p99_ms": 8.327480397419999,
+        "p99_speedup": 0.8082291443445473,
+        "baseline_mean_ms": 5.95392061106395,
+        "candidate_mean_ms": 6.360194346634671,
+        "mean_speedup": 0.9361224337766203,
+        "baseline_success_rate": 1.0,
+        "candidate_success_rate": 1.0,
+        "success_rate_delta": 0.0,
+        "paired_success_counts": {
+          "both_succeeded": 200,
+          "candidate_only": 0,
+          "baseline_only": 0,
+          "both_failed": 0
+        },
+        "wasted_call_rate": null,
+        "cost_multiplier": null,
+        "rate_limit_error_rate": null,
+        "input_tokens_baseline": null,
+        "input_tokens_candidate": null,
+        "token_reduction_pct": null,
+        "deopt_rate": null,
+        "tool_start_p50_ms": null,
+        "tool_start_p95_ms": null,
+        "tool_start_speedup_p95": null,
+        "semantic_mutation_rate": null,
+        "p95_reduction_ci": [
+          -10.635686509299042,
+          -2.6183220356912207
+        ],
+        "p50_reduction_ci": [
+          -5.9351944399877326,
+          -3.071036702872973
+        ],
+        "p99_reduction_ci": [
+          -317.8736584877812,
+          -3.9286963291439316
+        ],
+        "success_delta_ci": [
+          0.0,
+          0.0
+        ],
+        "cost_delta_ci": null,
+        "unapproved_side_effects": 0,
+        "tool_selection_accuracy": null,
+        "arg_selection_accuracy": null,
+        "extra_metrics": {}
+      }
+    },
+    {
+      "workload_id": "W7_SAFETY",
+      "comparison": "CompositeScheduler vs CompositeScheduler",
+      "verdict": {
+        "experiment_id": "W7_SAFETY",
+        "hypothesis": "Candidate CompositeScheduler outperforms CompositeScheduler on W7_SAFETY",
+        "passed": false,
+        "falsified": true,
+        "state": "falsified",
+        "evidence_level": "local_wall_clock",
+        "summary": "FALSIFIED \u2014 P95 speedup: 0.00x, Success: 0.0%, P99 speedup: 0.00x",
+        "checks": [
+          {
+            "name": "P95 CCL Reduction",
+            "target": "Safety gate (0 unapproved)",
+            "measured": "0.00x",
+            "passed": true,
+            "detail": "95% CI: null"
+          },
+          {
+            "name": "Candidate Success Rate",
+            "target": ">= 100.0% and non-inferior",
+            "measured": "0.0% (delta: +0.00%)",
+            "passed": false,
+            "detail": "Success non-inferiority check"
+          },
+          {
+            "name": "P99 CCL Non-Regression",
+            "target": ">= 0.90x",
+            "measured": "0.00x",
+            "passed": true,
+            "detail": "Tail latency stability check"
+          },
+          {
+            "name": "Side-Effect Approvals",
+            "target": "0 unapproved side effects",
+            "measured": "0",
+            "passed": true,
+            "detail": "Approval gate enforcement"
+          },
+          {
+            "name": "Cost Multiplier",
+            "target": "<= 1.10x",
+            "measured": "1.00x",
+            "passed": true,
+            "detail": "Monetary / token overhead"
+          }
+        ],
+        "is_verdict_eligible": true,
+        "metadata": {}
+      },
+      "summary": {
+        "baseline_p50_ms": null,
+        "candidate_p50_ms": null,
+        "p50_speedup": null,
+        "baseline_p90_ms": null,
+        "candidate_p90_ms": null,
+        "p90_speedup": null,
+        "baseline_p95_ms": null,
+        "candidate_p95_ms": null,
+        "p95_speedup": null,
+        "baseline_p99_ms": null,
+        "candidate_p99_ms": null,
+        "p99_speedup": null,
+        "baseline_mean_ms": null,
+        "candidate_mean_ms": null,
+        "mean_speedup": null,
+        "baseline_success_rate": 0.0,
+        "candidate_success_rate": 0.0,
+        "success_rate_delta": 0.0,
+        "paired_success_counts": {
+          "both_succeeded": 0,
+          "candidate_only": 0,
+          "baseline_only": 0,
+          "both_failed": 200
+        },
+        "wasted_call_rate": null,
+        "cost_multiplier": null,
+        "rate_limit_error_rate": null,
+        "input_tokens_baseline": null,
+        "input_tokens_candidate": null,
+        "token_reduction_pct": null,
+        "deopt_rate": null,
+        "tool_start_p50_ms": null,
+        "tool_start_p95_ms": null,
+        "tool_start_speedup_p95": null,
+        "semantic_mutation_rate": null,
+        "p95_reduction_ci": null,
+        "p50_reduction_ci": null,
+        "p99_reduction_ci": null,
+        "success_delta_ci": [
+          0.0,
+          0.0
+        ],
+        "cost_delta_ci": null,
+        "unapproved_side_effects": 0,
+        "tool_selection_accuracy": null,
+        "arg_selection_accuracy": null,
+        "extra_metrics": {}
+      }
+    },
+    {
+      "workload_id": "W7_LATENCY",
+      "comparison": "CompositeScheduler vs SyncReActScheduler",
+      "verdict": {
+        "experiment_id": "W7_LATENCY",
+        "hypothesis": "Candidate CompositeScheduler outperforms SyncReActScheduler on W7_LATENCY",
+        "passed": false,
+        "falsified": true,
+        "state": "falsified",
+        "evidence_level": "local_wall_clock",
+        "summary": "FALSIFIED \u2014 P95 speedup: 0.00x, Success: 0.0%, P99 speedup: 0.00x",
+        "checks": [
+          {
+            "name": "P95 CCL Reduction",
+            "target": ">= 0.90x speedup",
+            "measured": "0.00x",
+            "passed": false,
+            "detail": "95% CI: null"
+          },
+          {
+            "name": "Candidate Success Rate",
+            "target": ">= 99.0% and non-inferior",
+            "measured": "0.0% (delta: +0.00%)",
+            "passed": false,
+            "detail": "Success non-inferiority check"
+          },
+          {
+            "name": "P99 CCL Non-Regression",
+            "target": ">= 0.85x",
+            "measured": "0.00x",
+            "passed": false,
+            "detail": "Tail latency stability check"
+          },
+          {
+            "name": "Side-Effect Approvals",
+            "target": "0 unapproved side effects",
+            "measured": "0",
+            "passed": true,
+            "detail": "Approval gate enforcement"
+          },
+          {
+            "name": "Cost Multiplier",
+            "target": "<= 1.10x",
+            "measured": "1.00x",
+            "passed": true,
+            "detail": "Monetary / token overhead"
+          }
+        ],
+        "is_verdict_eligible": true,
+        "metadata": {}
+      },
+      "summary": {
+        "baseline_p50_ms": null,
+        "candidate_p50_ms": null,
+        "p50_speedup": null,
+        "baseline_p90_ms": null,
+        "candidate_p90_ms": null,
+        "p90_speedup": null,
+        "baseline_p95_ms": null,
+        "candidate_p95_ms": null,
+        "p95_speedup": null,
+        "baseline_p99_ms": null,
+        "candidate_p99_ms": null,
+        "p99_speedup": null,
+        "baseline_mean_ms": null,
+        "candidate_mean_ms": null,
+        "mean_speedup": null,
+        "baseline_success_rate": 0.0,
+        "candidate_success_rate": 0.0,
+        "success_rate_delta": 0.0,
+        "paired_success_counts": {
+          "both_succeeded": 0,
+          "candidate_only": 0,
+          "baseline_only": 0,
+          "both_failed": 200
+        },
+        "wasted_call_rate": null,
+        "cost_multiplier": null,
+        "rate_limit_error_rate": null,
+        "input_tokens_baseline": null,
+        "input_tokens_candidate": null,
+        "token_reduction_pct": null,
+        "deopt_rate": null,
+        "tool_start_p50_ms": null,
+        "tool_start_p95_ms": null,
+        "tool_start_speedup_p95": null,
+        "semantic_mutation_rate": null,
+        "p95_reduction_ci": null,
+        "p50_reduction_ci": null,
+        "p99_reduction_ci": null,
+        "success_delta_ci": [
+          0.0,
+          0.0
+        ],
+        "cost_delta_ci": null,
+        "unapproved_side_effects": 0,
+        "tool_selection_accuracy": null,
+        "arg_selection_accuracy": null,
+        "extra_metrics": {}
+      }
+    },
+    {
+      "workload_id": "E5a",
+      "comparison": "ActionBytecodeScheduler vs SyncReActScheduler",
+      "verdict": {
+        "experiment_id": "E5a",
+        "hypothesis": "Candidate ActionBytecodeScheduler outperforms SyncReActScheduler on E5a",
+        "passed": false,
+        "falsified": true,
+        "state": "falsified",
+        "evidence_level": "local_wall_clock",
+        "summary": "FALSIFIED \u2014 P95 speedup: 0.92x, Success: 100.0%, P99 speedup: 0.98x",
+        "checks": [
+          {
+            "name": "P95 CCL Reduction",
+            "target": ">= 0.95x speedup",
+            "measured": "0.92x",
+            "passed": false,
+            "detail": "95% CI: [-18.0%, -2.0%]"
+          },
+          {
+            "name": "Candidate Success Rate",
+            "target": ">= 100.0% and non-inferior",
+            "measured": "100.0% (delta: +0.00%)",
+            "passed": true,
+            "detail": "Success non-inferiority check"
+          },
+          {
+            "name": "P99 CCL Non-Regression",
+            "target": ">= 0.90x",
+            "measured": "0.98x",
+            "passed": true,
+            "detail": "Tail latency stability check"
+          },
+          {
+            "name": "Side-Effect Approvals",
+            "target": "0 unapproved side effects",
+            "measured": "0",
+            "passed": true,
+            "detail": "Approval gate enforcement"
+          },
+          {
+            "name": "Cost Multiplier",
+            "target": "<= 1.05x",
+            "measured": "1.00x",
+            "passed": true,
+            "detail": "Monetary / token overhead"
+          }
+        ],
+        "is_verdict_eligible": true,
+        "metadata": {}
+      },
+      "summary": {
+        "baseline_p50_ms": 2.8950205305591226,
+        "candidate_p50_ms": 3.0653750291094184,
+        "p50_speedup": 0.9444262131280593,
+        "baseline_p90_ms": 3.074337530415505,
+        "candidate_p90_ms": 3.301883244421333,
+        "p90_speedup": 0.9310860811355836,
+        "baseline_p95_ms": 3.1714518205262716,
+        "candidate_p95_ms": 3.4453860542271286,
+        "p95_speedup": 0.9204924413724934,
+        "baseline_p99_ms": 3.8604590389877544,
+        "candidate_p99_ms": 3.9586592605337474,
+        "p99_speedup": 0.9751935655273466,
+        "baseline_mean_ms": 2.926823300658725,
+        "candidate_mean_ms": 3.0845839565154165,
+        "mean_speedup": 0.9488551266294888,
+        "baseline_success_rate": 1.0,
+        "candidate_success_rate": 1.0,
+        "success_rate_delta": 0.0,
+        "paired_success_counts": {
+          "both_succeeded": 200,
+          "candidate_only": 0,
+          "baseline_only": 0,
+          "both_failed": 0
+        },
+        "wasted_call_rate": null,
+        "cost_multiplier": null,
+        "rate_limit_error_rate": null,
+        "input_tokens_baseline": null,
+        "input_tokens_candidate": null,
+        "token_reduction_pct": null,
+        "deopt_rate": null,
+        "tool_start_p50_ms": null,
+        "tool_start_p95_ms": null,
+        "tool_start_speedup_p95": null,
+        "semantic_mutation_rate": null,
+        "p95_reduction_ci": [
+          -17.962004091423406,
+          -1.9664541577870074
+        ],
+        "p50_reduction_ci": [
+          -7.245250360463729,
+          -4.277320965277075
+        ],
+        "p99_reduction_ci": [
+          -43.550546560111655,
+          43.01385396933316
+        ],
+        "success_delta_ci": [
+          0.0,
+          0.0
+        ],
+        "cost_delta_ci": null,
+        "unapproved_side_effects": 0,
+        "tool_selection_accuracy": null,
+        "arg_selection_accuracy": null,
+        "extra_metrics": {}
+      }
+    }
+  ]
+}

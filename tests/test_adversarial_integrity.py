@@ -538,8 +538,8 @@ class TestAdversarialIntegrity(unittest.IsolatedAsyncioTestCase):
     # 21. Rate Limiter: Bounded semaphore prevents over-release
     def test_21_rate_limiter_bounded_semaphore(self) -> None:
         conc = AsyncConcurrencyLimiter(max_concurrency=2)
-        conc.release()
-        conc.release()
+        with self.assertRaises(RuntimeError):
+            conc.release()
         self.assertEqual(conc.active_count, 0)
 
     # 22. Guardrails: Extra unexpected arguments penalized

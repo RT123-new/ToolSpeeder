@@ -444,8 +444,8 @@ def cmd_falsify(args: argparse.Namespace) -> int:
         any_raw_falsified = False
         for wl, c_list in c_by_wl.items():
             b_list = b_by_wl.get(wl, [])
-            c_lat = [float(x.get("ccl_ms", x.get("total_duration_ms", 100.0))) for x in c_list]
-            b_lat = [float(x.get("ccl_ms", x.get("total_duration_ms", 100.0))) for x in b_list] or [100.0] * len(c_lat)
+            c_lat = [float(x.get("ccl_ms") or x.get("total_duration_ms") or 100.0) for x in c_list]
+            b_lat = [float(x.get("ccl_ms") or x.get("total_duration_ms") or 100.0) for x in b_list] or [100.0] * len(c_lat)
             c_succ = [bool(x.get("success", False)) for x in c_list]
             b_succ = [bool(x.get("success", True)) for x in b_list] or [True] * len(c_succ)
 

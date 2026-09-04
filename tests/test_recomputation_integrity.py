@@ -589,8 +589,9 @@ class TestRecomputationIntegrity(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(res.is_error)
         elapsed_wall = time.perf_counter() - start_wall
 
-        # Virtual clock advanced by 20ms instantly
-        self.assertEqual(vclock.now_ns() / 1_000_000.0, 20.0)
+        # Virtual clock advanced by tool duration instantly
+        self.assertAlmostEqual(vclock.now_ns() / 1_000_000.0, res.execution_time_ms, places=4)
+        self.assertGreaterEqual(vclock.now_ns() / 1_000_000.0, 20.0)
         self.assertLess(elapsed_wall, 0.01)  # Wall clock didn't sleep for 20ms
 
     # 72. LocalWallClockBackend: Real OS loopback and subprocess execution

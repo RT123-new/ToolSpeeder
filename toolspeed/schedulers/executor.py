@@ -502,9 +502,9 @@ class ToolExecutor:
 
         # 4. Trusted Approval Gate Enforcement
         # Model cannot grant its own approval via call.is_approved or call.approval_grant!
+        auth_ctx = authority_context or self.authority_context
         requires_approval = spec.requires_approval or call.requires_approval
         if requires_approval:
-            auth_ctx = authority_context or self.authority_context
             grant_valid = False
 
             # Check explicit trusted_grant passed from scheduler context

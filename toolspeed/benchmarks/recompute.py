@@ -73,9 +73,9 @@ def recompute_bundle_metrics(bundle_path: str | Path) -> dict[str, Any]:
     for wl, c_items in sorted(c_by_wl.items()):
         b_items = b_by_wl.get(wl, [])
 
-        c_lats = [float(x.get("ccl_ms", x.get("total_duration_ms", x.get("latency_ms", 0.0)))) for x in c_items]
+        c_lats = [float(x.get("ccl_ms") or x.get("total_duration_ms") or x.get("latency_ms") or 0.0) for x in c_items]
         b_lats = (
-            [float(x.get("ccl_ms", x.get("total_duration_ms", x.get("latency_ms", 0.0)))) for x in b_items]
+            [float(x.get("ccl_ms") or x.get("total_duration_ms") or x.get("latency_ms") or 0.0) for x in b_items]
             if b_items
             else list(c_lats)
         )
