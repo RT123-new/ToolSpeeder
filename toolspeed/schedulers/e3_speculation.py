@@ -73,10 +73,7 @@ class SpeculativeReadScheduler(BaseScheduler):
         else:
             for idx, spec in enumerate(tools.list_specs()):
                 is_safe = (
-                    spec.is_read_only
-                    and not spec.side_effects
-                    and not spec.requires_approval
-                    and spec.is_idempotent
+                    spec.is_read_only and not spec.side_effects and not spec.requires_approval and spec.is_idempotent
                 )
                 candidates.append(
                     SpeculationCandidate(
@@ -176,9 +173,7 @@ class SpeculativeReadScheduler(BaseScheduler):
 
                 # 1. Launch Draft Prediction and Main Model Reasoning CONCURRENTLY if speculation enabled and model is concurrency-safe
                 if spec_enabled:
-                    draft_task = asyncio.create_task(
-                        self._predict_candidate(ctx, model, tools, threshold)
-                    )
+                    draft_task = asyncio.create_task(self._predict_candidate(ctx, model, tools, threshold))
 
                 ctx.profiler.start_span(f"model_turn_{turn}")
                 model_decision_task = asyncio.create_task(model.decide(ctx.agent_task, ctx.history, tools.list_specs()))
@@ -218,6 +213,9 @@ class SpeculativeReadScheduler(BaseScheduler):
                                         isolated_executor
                                         if (contention_mode == "isolated" and isolated_executor is not None)
                                         else ctx.executor
+                                    )
+                                    ctx.guardrails.record_tool_dispatch(
+                                        spec_adapter.spec, speculative_call, is_speculative=True
                                     )
                                     spec_task = asyncio.create_task(
                                         exec_to_use.execute(speculative_call, is_speculative=True)

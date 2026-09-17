@@ -28,7 +28,12 @@ TOOL_DEFINITIONS = [
     ("query_order_history", "Query past customer order history and transaction timestamps.", "customer_id", "CUST-"),
     ("get_inventory_status", "Query warehouse product inventory levels and backorder status.", "sku", "SKU-"),
     ("read_customer_account", "Retrieve customer profile, billing address, and account status.", "account_id", "ACC-"),
-    ("lookup_product_catalog", "Lookup product catalog attributes, specifications, and categories.", "item_id", "ITEM-"),
+    (
+        "lookup_product_catalog",
+        "Lookup product catalog attributes, specifications, and categories.",
+        "item_id",
+        "ITEM-",
+    ),
     ("check_shipping_status", "Retrieve logistics tracking details and estimated arrival.", "tracking_num", "TRK-"),
     ("get_pricing_tiers", "Fetch volume discounting rules and pricing tier matrix.", "tier_id", "TIER-"),
     ("inspect_policy_rules", "Inspect business rules and regional return policy guidelines.", "policy_id", "POL-"),
@@ -62,9 +67,11 @@ class W8SpeculativeRoutingWorkload(BaseWorkload):
 
     def get_tools(self) -> list[BaseToolAdapter]:
         tools: list[BaseToolAdapter] = []
+
         def _make_handler(tool_n: str) -> Any:
             def _handler(args: dict[str, Any]) -> dict[str, Any]:
                 return {"status": "success", "tool": tool_n, "data": args}
+
             return _handler
 
         for name, desc, arg_name, _ in TOOL_DEFINITIONS[: self.candidate_count]:

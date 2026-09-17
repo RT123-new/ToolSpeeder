@@ -38,6 +38,7 @@ try:
         TypeSafeError,
         TypeSafeRateLimitError,
     )
+
     TYPESAFE_SDK_AVAILABLE = True
 except ImportError:
     typesafe_sdk = None  # type: ignore[assignment]

@@ -70,9 +70,7 @@ class TestTypeSafeConcurrency(unittest.IsolatedAsyncioTestCase):
         # Launch 25 concurrent decide requests
         num_requests = 25
         tasks = [
-            asyncio.create_task(
-                provider.decide(self.state, self.candidates, confidence_threshold=0.70)
-            )
+            asyncio.create_task(provider.decide(self.state, self.candidates, confidence_threshold=0.70))
             for _ in range(num_requests)
         ]
 
@@ -106,9 +104,7 @@ class TestTypeSafeConcurrency(unittest.IsolatedAsyncioTestCase):
 
         provider = TypeSafeJevProvider(api_key="mock_key", client=mock_client)
 
-        task = asyncio.create_task(
-            provider.decide(self.state, self.candidates, confidence_threshold=0.70)
-        )
+        task = asyncio.create_task(provider.decide(self.state, self.candidates, confidence_threshold=0.70))
 
         # Wait until inference starts, then cancel it
         await started_event.wait()

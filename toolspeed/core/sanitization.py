@@ -28,7 +28,12 @@ FORBIDDEN_ORACLE_KEYS: frozenset[str] = frozenset(
 _SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("BEARER_TOKEN", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9_\-\.]{12,}\b")),
     ("JWT_TOKEN", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b")),
-    ("API_KEY_EXPLICIT", re.compile(r"(?i)(?:api[_-]?key|secret[_-]?key|token|auth[_-]?token|passwd|password)\s*[:=]\s*['\"]?([A-Za-z0-9_\-\.]{8,})['\"]?")),
+    (
+        "API_KEY_EXPLICIT",
+        re.compile(
+            r"(?i)(?:api[_-]?key|secret[_-]?key|token|auth[_-]?token|passwd|password)\s*[:=]\s*['\"]?([A-Za-z0-9_\-\.]{8,})['\"]?"
+        ),
+    ),
     ("GENERIC_SECRET_PREFIX", re.compile(r"\b(?:sk|ts|key|akid|ghp|glpat|xoxb|xoxp|live)[_\-][A-Za-z0-9_\-]{12,}\b")),
     ("URL_WITH_CREDENTIALS", re.compile(r"https?://[^:\s/]+:[^@\s/]+@[^\s/]+")),
     ("URL_QUERY_TOKEN", re.compile(r"(?i)[?&](?:token|key|api_key|secret|password)=([A-Za-z0-9_\-\.]{8,})")),
@@ -121,13 +126,12 @@ def assert_no_egress_violations(data: Any) -> None:
 
     Raises EgressSecurityError if any violations are discovered.
     """
+
     def _inspect(node: Any, path: str = "") -> None:
         if isinstance(node, str):
             for name, pattern in _SECRET_PATTERNS:
                 if pattern.search(node):
-                    raise EgressSecurityError(
-                        f"Egress boundary violation at '{path}': detected unredacted {name}"
-                    )
+                    raise EgressSecurityError(f"Egress boundary violation at '{path}': detected unredacted {name}")
         elif isinstance(node, Mapping):
             for k, v in node.items():
                 k_lower = str(k).lower()

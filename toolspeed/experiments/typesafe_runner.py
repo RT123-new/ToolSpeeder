@@ -45,7 +45,9 @@ def get_provider_by_name(name: str, **kwargs: Any) -> SpeculationDecisionProvide
     elif norm in ("replay", "replay_jev"):
         return ReplaySpeculationProvider(**kwargs)
     else:
-        raise ValueError(f"Unknown predictor '{name}'. Choose from: no_speculation, current_e3, deterministic_baseline, typesafe_jev, llm_system_one, replay")
+        raise ValueError(
+            f"Unknown predictor '{name}'. Choose from: no_speculation, current_e3, deterministic_baseline, typesafe_jev, llm_system_one, replay"
+        )
 
 
 def run_typesafe_pilot() -> int:
@@ -56,6 +58,7 @@ def run_typesafe_pilot() -> int:
 
     try:
         import typesafe_sdk
+
         sdk_available = True
         sdk_version = getattr(typesafe_sdk, "__version__", "0.6.0")
     except ImportError:
@@ -153,7 +156,10 @@ async def _run_benchmark_trials_async(
             if ev.event_type == EventType.CUSTOM and ev.details.get("event") == "speculation_provider_latency":
                 provider_latencies_ms.append(float(ev.details.get("latency_ms", 0.0)))
 
-        total_task_launched = max(m.speculative_calls_launched, m.speculative_calls_hit + m.speculative_calls_wasted + m.speculative_calls_cancelled)
+        total_task_launched = max(
+            m.speculative_calls_launched,
+            m.speculative_calls_hit + m.speculative_calls_wasted + m.speculative_calls_cancelled,
+        )
         if total_task_launched > 0:
             is_hit = m.speculative_calls_hit > 0
             is_correct_speculation.append(is_hit)
@@ -176,7 +182,9 @@ async def _run_benchmark_trials_async(
     wasted_rate = (spec_misses / len(tasks)) if tasks else 0.0
 
     # Brier score: (p - y)^2
-    brier_score = float(np.mean((np.array(probabilities) - np.array(is_correct_speculation)) ** 2)) if probabilities else 0.0
+    brier_score = (
+        float(np.mean((np.array(probabilities) - np.array(is_correct_speculation)) ** 2)) if probabilities else 0.0
+    )
 
     return {
         "provider": provider.provider_name,
@@ -211,7 +219,9 @@ def run_typesafe_benchmark(
 ) -> dict[str, Any]:
     """Runs benchmark for a single predictor and outputs formatted results."""
     provider = get_provider_by_name(predictor)
-    print(f"\n⚡ Running ToolSpeed benchmark: predictor={provider.provider_name}, tool_latency={tool_latency_ms}ms, candidates={candidate_count}, trials={trials}...")
+    print(
+        f"\n⚡ Running ToolSpeed benchmark: predictor={provider.provider_name}, tool_latency={tool_latency_ms}ms, candidates={candidate_count}, trials={trials}..."
+    )
 
     res = asyncio.run(
         _run_benchmark_trials_async(
@@ -252,7 +262,9 @@ def run_typesafe_sweep(
     latencies = tool_latencies or [50.0, 100.0, 250.0, 500.0, 1000.0, 2000.0]
     preds = predictors or ["no_speculation", "current_e3", "deterministic_baseline", "replay"]
 
-    print(f"\n⚡ Running Break-Even Sweep across {len(latencies)} latency bins and {len(preds)} predictors ({trials} trials/bin)...")
+    print(
+        f"\n⚡ Running Break-Even Sweep across {len(latencies)} latency bins and {len(preds)} predictors ({trials} trials/bin)..."
+    )
     results_by_lat: dict[float, dict[str, Any]] = {}
 
     table_rows: list[list[str]] = []
@@ -295,7 +307,9 @@ def run_typesafe_replay() -> dict[str, Any]:
         target_tool = task.metadata["target_tool"]
         matching_cand = next((c for c in candidates if c.tool_name == target_tool), candidates[0])
 
-        prob_map = {c.candidate_id: (0.85 if c.candidate_id == matching_cand.candidate_id else 0.05) for c in candidates}
+        prob_map = {
+            c.candidate_id: (0.85 if c.candidate_id == matching_cand.candidate_id else 0.05) for c in candidates
+        }
         prob_map["no_speculation"] = 0.05
 
         state = SpeculationState(

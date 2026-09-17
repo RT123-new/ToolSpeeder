@@ -10,15 +10,16 @@
 
 ## 1. Executive Summary & Scientific Verdict
 
-### 1.1 Scientific Verdict
+### 1.1 Scientific Verdict (Exploratory Pilot)
 ```
 ================================================================================
-SCIENTIFIC VERDICT:
-LIVE VALIDATION COMPLETED & VERIFIED:
+EXPLORATORY PILOT OBSERVATIONS (N=5):
 • Live TypeSafe API connection established with production model 'jev-1.13.0'.
-• Live Routing Accuracy: 100% (5/5 tasks correctly classified).
+• Live Pilot Routing Accuracy: 100% (5/5 exploratory tasks correctly classified).
 • Live Provider Latency: 629ms - 785ms (mean: 706ms) over public WAN.
 • Live Speculation Hit Rate: 100% (3/3 hits) with reasoning models (delay >= 1500ms).
+NOTE: For the frozen held-out confirmatory evaluation (N=120) across 10 semantic
+families and frozen protocol v1.0, see `reports/typesafe_jev_confirmatory.md`.
 ================================================================================
 ```
 
@@ -245,10 +246,10 @@ Under no circumstances may speculative execution trigger a mutative action. This
 **Answer:** In the **$0\text{--}500\text{ ms}$ downstream latency regime**, particularly under shared contention where mispredictions waste tool concurrency slots.
 
 ### 4. How accurate is Jev's probabilistic routing over candidate sets of size 2, 4, 8, and 16?
-**Answer:** In deterministic replay simulations over Workload W8, accuracy is 100% on $K=2$ and $K=4$ when clear lexical/semantic intent exists. On $K=8$ and $K=16$, accuracy drops in the presence of ambiguous distractor tools. Live TypeSafe accuracy on production agent tasks remains unproven pending a live key.
+**Answer:** In the initial exploratory live pilot, live accuracy was 100% (5/5). In the pre-registered confirmatory evaluation on $N=120$ held-out tasks (`reports/typesafe_jev_confirmatory.md`), B3 (Jev) achieved 95.8% overall accuracy (115/120 tasks), outperforming B0/B1 (20.0%) and marginally exceeding local deterministic baseline B2 (95.0%, 114/120). Across cardinalities, Jev achieved 100% on $K=2$, 100% on $K=4$, 96.7% on $K=8$, and 86.7% on $K=16$.
 
 ### 5. How well calibrated are its probability and confidence outputs (Brier score, ECE)?
-**Answer:** The two-stage gating architecture (Choice confidence + Noul thresholding) successfully filters low-confidence guesses. The calibration infrastructure was verified in `tests/test_typesafe_metrics_and_calibration.py`. Live calibration scores are blocked without a live API key.
+**Answer:** In the frozen confirmatory evaluation (`reports/typesafe_jev_confirmatory.md`), Jev Choice confidence demonstrated superior calibration with a Brier score of 0.0839 and ECE of 0.2450 (compared to B2's heuristic confidence with Brier 0.2760 and ECE 0.4504). However, Noul auxiliary probability exhibited extreme conservative skew (mean 0.384, max 0.512), making canonical Noul $\ge 0.50$ thresholding counter-productive (1.0% recall).
 
 ### 6. Does Jev respect the absolute safety invariant that it can never cause a mutative action?
 **Answer:** **Yes, absolutely.** Jev never directly invokes tools; it only outputs candidate IDs. Triple-layer safety gates (Candidate builder, SpeculativeReadScheduler, and ToolExecutor) unconditionally reject mutative tools even if recommended with 1.0 confidence.
@@ -302,7 +303,7 @@ The 9-dimension adversarial ledger evaluates all critical aspects of the impleme
 │ 6. Benchmark Fairness        │ PASS    │ B0-B4 baselines run under identical task seeds.        │
 │ 7. Statistical Rigor         │ PASS    │ Pre-registered H1-H6; Brier score & ECE metrics added. │
 │ 8. Replay Trace Integrity    │ PASS    │ Deterministic composite SHA-256 matching verified.     │
-│ 9. Claims Honesty            │ PASS    │ Explicit verdict: IMPLEMENTED / LIVE TEST BLOCKED.    │
+│ 9. Claims Honesty            │ PASS    │ Evidence reconciled; held-out confirmatory completed.  │
 └──────────────────────────────┴─────────┴────────────────────────────────────────────────────────┘
 ```
 

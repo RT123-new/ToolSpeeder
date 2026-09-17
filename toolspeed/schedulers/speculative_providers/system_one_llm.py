@@ -26,6 +26,7 @@ from toolspeed.schedulers.speculative_providers.base import (
 # Optional dependency check for system_one_adapter and typesafe_sdk
 try:
     from system_one_adapter import AsyncSystemOneAdapterClient, Choice, Noul
+
     SYSTEM_ONE_ADAPTER_AVAILABLE = True
 except ImportError:
     AsyncSystemOneAdapterClient = None  # type: ignore[assignment,misc]
@@ -80,9 +81,7 @@ class SystemOneLLMProvider:
         t0 = time.perf_counter()
 
         if not self.is_available:
-            return await self._fallback(
-                state, candidates, confidence_threshold, "SYSTEM_ONE_ADAPTER_UNAVAILABLE", t0
-            )
+            return await self._fallback(state, candidates, confidence_threshold, "SYSTEM_ONE_ADAPTER_UNAVAILABLE", t0)
 
         if not self.is_configured:
             return await self._fallback(

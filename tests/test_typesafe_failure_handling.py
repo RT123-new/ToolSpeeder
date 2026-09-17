@@ -54,7 +54,9 @@ class TestFailureHandling(unittest.IsolatedAsyncioTestCase):
 
     async def test_rate_limit_429_fallback(self) -> None:
         mock_client = AsyncMock()
-        mock_client.system_one.side_effect = TypeSafeRateLimitError(429, {}, httpx2.Headers(), message="Rate limit exceeded")
+        mock_client.system_one.side_effect = TypeSafeRateLimitError(
+            429, {}, httpx2.Headers(), message="Rate limit exceeded"
+        )
 
         provider = TypeSafeJevProvider(api_key="k", client=mock_client)
         decision = await provider.decide(self.state, self.candidates)
@@ -65,7 +67,9 @@ class TestFailureHandling(unittest.IsolatedAsyncioTestCase):
 
     async def test_authentication_401_403_fallback(self) -> None:
         mock_client = AsyncMock()
-        mock_client.system_one.side_effect = TypeSafeAuthenticationError(401, {}, httpx2.Headers(), message="Unauthorized")
+        mock_client.system_one.side_effect = TypeSafeAuthenticationError(
+            401, {}, httpx2.Headers(), message="Unauthorized"
+        )
 
         provider = TypeSafeJevProvider(api_key="k", client=mock_client)
         decision = await provider.decide(self.state, self.candidates)

@@ -121,6 +121,7 @@ class TestSafetyInvariants(unittest.IsolatedAsyncioTestCase):
         mock_provider = AsyncMock()
         mock_provider.provider_name = "adversarial_mock"
         from toolspeed.schedulers.speculative_providers import SpeculationDecision
+
         mock_provider.decide.return_value = SpeculationDecision(
             selected_candidate_id="cand_wire",
             probability=1.0,
