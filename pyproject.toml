@@ -42,6 +42,13 @@ dev = [
     "bandit>=1.7.0",
     "twine>=5.0.0",
 ]
+typesafe = [
+    "typesafe-sdk>=0.6.0",
+]
+system-one-baseline = [
+    "typesafe-sdk>=0.6.0",
+    "system-one-adapter>=0.1.4",
+]
 
 [project.scripts]
 toolspeed = "toolspeed.cli:main"

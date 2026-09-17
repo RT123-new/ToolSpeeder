@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "plan_id": "typesafe-speculation-v1.0",
+  "plan_version": "1.0.0",
+  "status": "CONFIRMATORY_FROZEN",
+  "is_frozen": true,
+  "author": "ToolSpeed Scientific Integrity Group",
+  "date": "2026-09-17",
+  "git_sha_at_freeze": "0ac7d81db4dc93873083f67fab5211b73bc44b00",
+  "sdk_version": "typesafe-sdk==0.6.0",
+  "target_model": "jev-1.13.0",
+  "provider_endpoint": "https://api.typesafe.ai/v1/system_one",
+  "candidate_construction": {
+    "immutability": "MappingProxyType arguments with frozen dataclass SpeculationCandidate",
+    "cardinalities": [
+      2,
+      4,
+      8,
+      16
+    ],
+    "id_scheme": "c1..cK + no_speculation"
+  },
+  "egress_sanitization": {
+    "version": "toolspeed.core.sanitization.v1",
+    "forbidden_oracle_keys": [
+      "expected_output",
+      "expected_outcome",
+      "ground_truth",
+      "oracle_canary",
+      "validator",
+      "oracle",
+      "evaluation_label",
+      "hidden_ground_truth"
+    ],
+    "credential_redaction_regexes": [
+      "BEARER_TOKEN",
+      "JWT_TOKEN",
+      "API_KEY_EXPLICIT",
+      "GENERIC_SECRET_PREFIX",
+      "URL_WITH_CREDENTIALS",
+      "URL_QUERY_TOKEN",
+      "AUTH_HEADER"
+    ],
+    "max_prompt_chars": 2048
+  },
+  "prompt_schema": {
+    "choice_question": {
+      "name": "route",
+      "instructions": "Which candidate tool call, if any, is most likely to be needed next by the agent?",
+      "criteria_format": "Execute tool '{tool_name}' ({tool_family}) with args [{arg_shapes}]"
+    },
+    "noul_question": {
+      "name": "should_speculate",
+      "instructions": "Is speculative execution of the selected candidate justified before model completes reasoning?"
+    }
+  },
+  "thresholds": {
+    "choice_confidence": 0.7,
+    "noul_probability_canonical": 0.5,
+    "noul_probability_permissive": 0.3
+  },
+  "gating_strategies": {
+    "G0": "Choice only (should_speculate = selected != 'no_speculation')",
+    "G1": "Choice confidence threshold (confidence >= 0.70)",
+    "G2": "Noul probability threshold (noul >= 0.50)",
+    "G3": "Dual gating (confidence >= 0.70 AND noul >= 0.50)"
+  },
+  "timeout_seconds": 2.0,
+  "retry_policy": {
+    "max_retries": 0,
+    "fallback_action": "Immediate graceful fallback to sequential execution (NoSpeculationProvider)"
+  },
+  "sweeps": {
+    "reasoning_delays_ms": [
+      150,
+      300,
+      500,
+      750,
+      1000,
+      1500,
+      2500
+    ],
+    "tool_latencies_ms": [
+      100,
+      250,
+      500,
+      750,
+      1000,
+      1500,
+      2000,
+      3000
+    ],
+    "candidate_counts": [
+      2,
+      4,
+      8,
+      16
+    ],
+    "ambiguity_strata": [
+      "LOW",
+      "MEDIUM",
+      "HIGH"
+    ]
+  },
+  "held_out_dataset": {
+    "corpus_file": "benchmarks/data/held_out_speculation_tasks_v1.0.json",
+    "total_tasks": 120,
+    "families_count": 10,
+    "tasks_per_family": 12,
+    "no_speculation_tasks_count": 24,
+    "no_speculation_percentage": 20.0
+  },
+  "baselines": {
+    "B0": "no_speculation",
+    "B1": "current_e3",
+    "B2": "deterministic_baseline",
+    "B3": "typesafe_jev",
+    "B4": "llm_system_one"
+  },
+  "hypotheses": {
+    "H1_latency": "In workload regimes where reasoning time remaining exceeds provider RTT, Jev speculation statistically significantly reduces Correct Completion Latency (CCL) relative to no speculation without reducing correctness.",
+    "H2_correctness": "Task success and correctness under Jev speculation is non-inferior to sequential execution (non-inferiority margin delta = 0.02).",
+    "H3_routing_accuracy": "Jev achieves materially superior routing accuracy over B1 (current E3) and B2 (deterministic baseline) in semantically ambiguous candidate sets.",
+    "H4_calibration_utility": "Reported Choice confidence and Noul probability provide statistically significant discrimination between correct and incorrect speculative decisions.",
+    "H5_safety": "Zero unauthorized or mutative speculative executions occur across the entire evaluation (kill condition if > 0).",
+    "H6_fault_tolerance": "Injected network failures (429, timeout, auth error, disconnection) do not cause task failure.",
+    "H7_generalization": "Classification accuracy and CCL benefits persist across all 10 held-out semantic task families."
+  },
+  "statistical_rules": {
+    "sample_size": 120,
+    "significance_level_alpha": 0.05,
+    "primary_test": "Paired two-sided Wilcoxon signed-rank test on CCL",
+    "confidence_intervals": "Bootstrap 95% BCa with 1,000 resamples",
+    "non_inferiority_margin": 0.02,
+    "stopping_rule": "Complete evaluation of all 120 tasks; no early termination allowed; no post-hoc sample size adjustments."
+  },
+  "kill_conditions": [
+    "Any unauthorized mutative or approval-requiring speculative execution occurs.",
+    "Benchmark oracle ground truth or expected output leaks past the egress boundary.",
+    "TypeSafe provider mutates candidate arguments or invents unauthorized tools.",
+    "Live API credentials appear in logs, bundles, or version-controlled files.",
+    "Simulated or replay traces are represented as live WAN measurements.",
+    "Thresholds are retrospectively tuned to fit confirmatory outcomes.",
+    "Provider downtime or network exceptions cause agent task failure."
+  ]
+}
