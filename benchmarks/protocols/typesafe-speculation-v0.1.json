@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "plan_id": "typesafe-speculation-v0.1",
+  "plan_version": "0.1.0",
+  "status": "EXPLORATORY",
+  "is_frozen": false,
+  "author": "ToolSpeed Exploratory Research Group",
+  "date": "2026-09-17",
+  "git_sha_at_authoring": "e531a4a00fc98b2fa6895b7df43d97fa382b4470",
+  "purpose": "Exploratory evaluation protocol testing whether a fast TypeSafe/Jev System One probabilistic router can improve ToolSpeeder's speculative read execution after fully accounting for provider latency, wasted calls, failure modes, and safety invariants.",
+  "status_note": "EXPLORATORY PROTOCOL ONLY. This protocol is distinct from the frozen confirmatory protocol tool-speed-v1.3.json. Findings from this protocol cannot be represented as confirmatory evidence.",
+  "evidence_levels": [
+    "replay_integration",
+    "local_wall_clock"
+  ],
+  "supported_execution_modes": [
+    "smoke",
+    "exploratory"
+  ],
+  "predictors": {
+    "B0": "no_speculation",
+    "B1": "current_e3",
+    "B2": "deterministic_baseline",
+    "B3": "typesafe_jev",
+    "B4": "llm_system_one"
+  },
+  "seeds": {
+    "smoke": [
+      101
+    ],
+    "exploratory": [
+      101,
+      102,
+      103
+    ]
+  },
+  "trials_per_seed": {
+    "smoke": 10,
+    "exploratory": 100
+  },
+  "sweeps": {
+    "tool_latency_ms": [
+      50,
+      100,
+      250,
+      500,
+      1000,
+      2000
+    ],
+    "confidence_thresholds": [
+      0.50,
+      0.60,
+      0.70,
+      0.80,
+      0.90
+    ],
+    "candidate_counts": [
+      2,
+      4,
+      8
+    ]
+  },
+  "required_metrics": [
+    "ccl_mean_ms",
+    "ccl_median_ms",
+    "ccl_p95_ms",
+    "task_success_rate",
+    "speculation_precision",
+    "speculation_recall",
+    "useful_speculation_rate",
+    "wasted_speculation_rate",
+    "cancelled_speculation_rate",
+    "provider_latency_p50_ms",
+    "provider_latency_p95_ms",
+    "downstream_latency_hidden_ms",
+    "net_latency_saved_ms",
+    "break_even_latency_ms",
+    "fallback_frequency",
+    "provider_error_frequency",
+    "unauthorized_mutations_count",
+    "brier_score"
+  ],
+  "pre_registered_hypotheses": {
+    "H1_latency": "Jev produces a statistically supported improvement in Correct Completion Latency (CCL) in workload regions where downstream tool latency exceeds the break-even threshold.",
+    "H2_correctness": "Task success/correctness under Jev is non-inferior to existing E3 and no-speculation baselines.",
+    "H3_prediction_quality": "Jev reported probabilities correlate with actual speculation correctness, yielding Brier score better than random uniform guessing (< 0.25).",
+    "H4_safety": "Zero unauthorized or mutative speculative executions across all trials (kill condition if violated).",
+    "H5_net_utility": "Jev overhead must not consume more time than it saves except in sub-break-even tool latency regions.",
+    "H6_graceful_degradation": "Provider failure (timeout, 429, 401, network disconnect) falls back without causing task execution failure."
+  },
+  "kill_conditions": [
+    "Any unauthorized mutative or approval-requiring speculative execution occurs.",
+    "Oracle or expected-output leakage enters provider state or execution history.",
+    "TypeSafe output creates or mutates tool arguments instead of selecting predefined candidates.",
+    "Live API credentials or secrets enter logs, traces, or evidence bundles.",
+    "Live provider results are labeled or represented as deterministic replay evidence, or vice versa.",
+    "Failed tasks are omitted from latency accounting.",
+    "TypeSafe provider inference latency is excluded from end-to-end timing.",
+    "Thresholds are retrospectively tuned and presented as confirmatory."
+  ]
+}

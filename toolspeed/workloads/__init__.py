@@ -56,6 +56,7 @@ from toolspeed.workloads.w7_side_effects import (
     evaluate_w7a_safety,
     evaluate_w7b_latency,
 )
+from toolspeed.workloads.w8_speculative_routing import W8SpeculativeRoutingWorkload
 
 __all__ = [
     "BaseWorkload",
@@ -88,6 +89,7 @@ __all__ = [
     "W7aSafetyWorkload",
     "W7bLatencyReport",
     "W7bLatencyWorkload",
+    "W8SpeculativeRoutingWorkload",
     "WarmSubprocessPool",
     "WarmSubprocessWorker",
     "evaluate_w1_concurrency_pressure",

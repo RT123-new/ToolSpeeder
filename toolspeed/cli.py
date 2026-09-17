@@ -638,6 +638,44 @@ def cmd_test(args: argparse.Namespace) -> int:
     return 0 if result.wasSuccessful() else 1
 
 
+def cmd_typesafe(args: argparse.Namespace) -> int:
+    """Execute TypeSafe/Jev speculative routing experiment commands."""
+    from toolspeed.experiments.typesafe_runner import (
+        run_typesafe_benchmark,
+        run_typesafe_pilot,
+        run_typesafe_replay,
+        run_typesafe_sweep,
+    )
+
+    action = getattr(args, "typesafe_action", "pilot") or "pilot"
+    if action == "pilot":
+        return run_typesafe_pilot()
+    elif action == "benchmark":
+        res = run_typesafe_benchmark(
+            predictor=getattr(args, "predictor", "current_e3"),
+            tool_latency_ms=getattr(args, "tool_latency", 250.0),
+            candidate_count=getattr(args, "candidates", 4),
+            trials=getattr(args, "trials", 20),
+            confidence_threshold=getattr(args, "confidence_threshold", 0.70),
+            seed=getattr(args, "seed", 42),
+        )
+        return 0 if res["success_rate"] > 0 else 1
+    elif action == "sweep":
+        run_typesafe_sweep(
+            trials=getattr(args, "trials", 20),
+            seed=getattr(args, "seed", 42),
+        )
+        return 0
+    elif action == "replay":
+        run_typesafe_replay()
+        return 0
+    elif action == "report":
+        print("⚡ Generating TypeSafe Report...")
+        run_typesafe_sweep(trials=getattr(args, "trials", 10), seed=getattr(args, "seed", 42))
+        return 0
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="toolspeed",
@@ -705,6 +743,32 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_val.add_argument("--input", "-i", type=str, required=True, help="Path to result bundle JSON or directory")
 
+    # typesafe
+    p_ts = subparsers.add_parser("typesafe", help="TypeSafe/Jev speculative routing experiment commands")
+    ts_sub = p_ts.add_subparsers(dest="typesafe_action", help="Action to execute")
+    ts_sub.add_parser("pilot", help="Run TypeSafe exploratory pilot check")
+
+    p_ts_bm = ts_sub.add_parser("benchmark", help="Run speculative routing benchmark")
+    p_ts_bm.add_argument(
+        "--predictor",
+        "-p",
+        choices=["current_e3", "jev", "no_speculation", "deterministic_baseline", "llm_system_one", "replay"],
+        default="current_e3",
+        help="Predictor to evaluate",
+    )
+    p_ts_bm.add_argument("--tool-latency", "-l", type=float, default=250.0, help="Downstream tool latency in ms")
+    p_ts_bm.add_argument("--candidates", "-c", type=int, default=4, help="Number of candidates (2-8)")
+    p_ts_bm.add_argument("--trials", "-n", type=int, default=20, help="Number of trials")
+    p_ts_bm.add_argument("--confidence-threshold", "-t", type=float, default=0.70, help="Confidence threshold")
+    p_ts_bm.add_argument("--seed", "-s", type=int, default=42, help="Random seed")
+
+    p_ts_sw = ts_sub.add_parser("sweep", help="Run latency sweep across break-even points")
+    p_ts_sw.add_argument("--trials", "-n", type=int, default=20, help="Number of trials per bin")
+    p_ts_sw.add_argument("--seed", "-s", type=int, default=42, help="Random seed")
+
+    ts_sub.add_parser("replay", help="Run deterministic replay verification")
+    ts_sub.add_parser("report", help="Generate summary evaluation report")
+
     # test
     subparsers.add_parser("test", help="Run test suite")
 
@@ -727,6 +791,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_report(args)
     elif args.subcommand == "validate-bundle":
         return cmd_validate_bundle(args)
+    elif args.subcommand == "typesafe":
+        return cmd_typesafe(args)
     elif args.subcommand == "test":
         return cmd_test(args)
 

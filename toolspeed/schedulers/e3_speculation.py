@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
 from toolspeed.adapters.base import BaseLLMAdapter, LLMDecision, ToolRegistry
@@ -10,6 +11,11 @@ from toolspeed.core.rate_limiter import RateLimiter
 from toolspeed.core.types import EventType, ToolCall, ToolResult
 from toolspeed.schedulers.base import BaseScheduler, ExecutionContext, SchedulerConfig, cancel_and_await
 from toolspeed.schedulers.executor import ToolExecutor
+from toolspeed.schedulers.speculative_providers.base import (
+    SpeculationCandidate,
+    SpeculationDecisionProvider,
+    SpeculationState,
+)
 
 
 class SpeculativeReadScheduler(BaseScheduler):
@@ -19,13 +25,21 @@ class SpeculativeReadScheduler(BaseScheduler):
     cancelling on decision divergence and reconciling results on speculation hits.
     """
 
-    def __init__(self, config: SchedulerConfig | None = None, speculation_enabled: bool | None = None) -> None:
+    def __init__(
+        self,
+        config: SchedulerConfig | None = None,
+        speculation_enabled: bool | None = None,
+        speculation_provider: SpeculationDecisionProvider | None = None,
+        candidate_builder: Callable[[ExecutionContext, ToolRegistry], list[SpeculationCandidate]] | None = None,
+    ) -> None:
         cfg = config or SchedulerConfig(speculation_enabled=True)
         if speculation_enabled is not None:
             cfg.speculation_enabled = speculation_enabled
         elif config is None:
             cfg.speculation_enabled = True
         super().__init__(cfg)
+        self.speculation_provider = speculation_provider
+        self.candidate_builder = candidate_builder
 
     def supports_concurrent_adapter(self, adapter: Any) -> bool:
         """Verifies whether an adapter is explicitly concurrency-safe for overlapped speculative execution."""
@@ -42,6 +56,78 @@ class SpeculativeReadScheduler(BaseScheduler):
             return None
         except Exception as e:
             return e
+
+    async def _predict_candidate(
+        self,
+        ctx: ExecutionContext,
+        model: BaseLLMAdapter,
+        tools: ToolRegistry,
+        threshold: float,
+    ) -> ToolCall | None:
+        if self.speculation_provider is None:
+            return await model.predict_draft(ctx.agent_task, ctx.history, tools.list_specs())
+
+        candidates: list[SpeculationCandidate] = []
+        if self.candidate_builder is not None:
+            candidates = self.candidate_builder(ctx, tools)
+        else:
+            for idx, spec in enumerate(tools.list_specs()):
+                is_safe = (
+                    spec.is_read_only
+                    and not spec.side_effects
+                    and not spec.requires_approval
+                    and spec.is_idempotent
+                )
+                candidates.append(
+                    SpeculationCandidate(
+                        candidate_id=f"cand_{idx}_{spec.name}",
+                        tool_name=spec.name,
+                        arguments={"query": ctx.agent_task.prompt},
+                        is_read_only=is_safe,
+                        tool_family=getattr(spec, "tool_family", "default"),
+                    )
+                )
+
+        state = SpeculationState(
+            task_id=ctx.agent_task.task_id,
+            prompt=ctx.agent_task.prompt,
+            step_index=ctx.step_count,
+            history_summary=tuple(ctx.history),
+        )
+
+        decision = await self.speculation_provider.decide(state, candidates, confidence_threshold=threshold)
+        if decision.latency_ms > 0:
+            ctx.profiler.record_event(
+                EventType.CUSTOM,
+                details={
+                    "event": "speculation_provider_latency",
+                    "provider": decision.provider,
+                    "latency_ms": decision.latency_ms,
+                    "fallback_used": decision.fallback_used,
+                    "error_class": decision.error_class,
+                },
+            )
+
+        if not decision.should_speculate or not decision.selected_candidate_id:
+            return None
+
+        cand = next((c for c in candidates if c.candidate_id == decision.selected_candidate_id), None)
+        if cand is None or not cand.is_read_only:
+            return None
+
+        return ToolCall(
+            name=cand.tool_name,
+            tool_name=cand.tool_name,
+            arguments=dict(cand.arguments),
+            is_speculative=True,
+            speculation_confidence=decision.confidence,
+            metadata={
+                "provider": decision.provider,
+                "provider_latency_ms": decision.latency_ms,
+                "provider_probability": decision.probability,
+                "fallback_used": decision.fallback_used,
+            },
+        )
 
     async def _execute_internal(
         self,
@@ -91,7 +177,7 @@ class SpeculativeReadScheduler(BaseScheduler):
                 # 1. Launch Draft Prediction and Main Model Reasoning CONCURRENTLY if speculation enabled and model is concurrency-safe
                 if spec_enabled:
                     draft_task = asyncio.create_task(
-                        model.predict_draft(ctx.agent_task, ctx.history, tools.list_specs())
+                        self._predict_candidate(ctx, model, tools, threshold)
                     )
 
                 ctx.profiler.start_span(f"model_turn_{turn}")
