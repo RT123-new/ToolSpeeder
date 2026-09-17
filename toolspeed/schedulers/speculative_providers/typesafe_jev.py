@@ -61,15 +61,17 @@ class TypeSafeJevProvider:
         self,
         api_key: str | None = None,
         model: str | None = None,
-        timeout_s: float = 0.25,  # 250 ms bounded timeout
+        timeout_s: float = 2.0,  # 2.0s bounded timeout for live inference
         client: Any | None = None,
         fallback_provider: SpeculationDecisionProvider | None = None,
+        noul_threshold: float = 0.30,
     ) -> None:
         self.api_key = api_key or os.environ.get("TYPESAFE_API_KEY")
         self.model = model
         self.timeout_s = timeout_s
         self._injected_client = client
         self.fallback_provider = fallback_provider
+        self.noul_threshold = noul_threshold
 
     @property
     def provider_name(self) -> str:
@@ -235,8 +237,8 @@ class TypeSafeJevProvider:
                 )
 
             # Confidence-gated speculation condition:
-            # Requires reported confidence >= threshold AND Noul probability >= 0.50
-            should_speculate = route_confidence >= confidence_threshold and noul_prob >= 0.50
+            # Requires reported confidence >= threshold AND Noul probability >= noul_threshold
+            should_speculate = route_confidence >= confidence_threshold and noul_prob >= self.noul_threshold
 
             return SpeculationDecision(
                 selected_candidate_id=cand.candidate_id,
